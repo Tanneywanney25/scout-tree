@@ -28,6 +28,22 @@ export interface AnalysisResult {
   playerColor: "white" | "black" | "both";
 }
 
+export interface SerializedAnalysisResult {
+  totalGames: number;
+  openingTree: any; // Serialized tree structure
+  weakestLines: Array<{
+    line: string;
+    winRate: number;
+    count: number;
+  }>;
+  strongestLines: Array<{
+    line: string;
+    winRate: number;
+    count: number;
+  }>;
+  playerColor: "white" | "black" | "both";
+}
+
 export function analyzeGames(
   games: GameData[],
   targetUsername: string,
