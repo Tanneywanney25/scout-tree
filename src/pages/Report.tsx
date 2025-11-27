@@ -6,18 +6,19 @@ import { Badge } from "@/components/ui/badge";
 import { Download, Copy, Check, ChevronRight } from "lucide-react";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
-import type { AnalysisResult } from "@/lib/chessAnalysis";
+import type { SerializedAnalysisResult } from "@/lib/chessAnalysis";
+import OpeningTreeViewer from "@/components/OpeningTreeViewer";
 
 const Report = () => {
   const { id } = useParams();
   const location = useLocation();
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
-  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [analysis, setAnalysis] = useState<SerializedAnalysisResult | null>(null);
 
   useEffect(() => {
     // Get analysis from navigation state or fallback to cache
     if (location.state) {
-      setAnalysis(location.state as AnalysisResult);
+      setAnalysis(location.state as SerializedAnalysisResult);
     } else {
       // Try to load from cache
       const cacheKeys = Object.keys(localStorage).filter(key => key.startsWith('scout_'));
@@ -159,6 +160,25 @@ const Report = () => {
 
             {/* Right Column: Detailed Analysis */}
             <div className="lg:col-span-2 space-y-6">
+              {/* Opening Tree */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Opening Repertoire Tree</CardTitle>
+                  <CardDescription>
+                    Interactive move tree showing frequencies and win rates
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {analysis.openingTree ? (
+                    <div className="max-h-[600px] overflow-y-auto pr-2">
+                      <OpeningTreeViewer node={analysis.openingTree} maxDepth={15} />
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No opening tree data available</p>
+                  )}
+                </CardContent>
+              </Card>
+
               <Card>
                 <CardHeader>
                   <CardTitle>Weakest Opening Lines</CardTitle>
