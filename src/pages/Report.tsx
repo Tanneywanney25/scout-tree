@@ -1,80 +1,107 @@
+import { useParams, useLocation } from "react-router-dom";
 import Header from "@/components/Header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
-import { Download, Copy, ChevronRight, AlertCircle } from "lucide-react";
+import { Download, Copy, Check, ChevronRight } from "lucide-react";
+import { useState, useEffect } from "react";
 import { toast } from "sonner";
+import type { AnalysisResult } from "@/lib/chessAnalysis";
 
 const Report = () => {
-  const mockReport = {
-    username: "demo_player",
-    platform: "Lichess",
-    rating: 2150,
-    gamesAnalyzed: 247,
-    summary: "Demo_player is a solid tactical player who favors the King's Indian Defense as Black. Shows strong attacking instincts but occasionally overextends in the middlegame. Time management is a weakness in blitz games - blunder rate increases significantly under 30 seconds.",
-    
-    weaknesses: [
-      {
-        title: "Time Pressure Blunders",
-        confidence: "high",
-        description: "Blunder rate increases by 340% when under 30 seconds",
-        evidence: "32 of 85 blitz losses occurred with <20s on clock"
-      },
-      {
-        title: "Endgame Conversion",
-        confidence: "medium", 
-        description: "Struggles to convert winning rook endgames (+2 advantage)",
-        evidence: "Drew/lost 8 of 15 favorable rook endgames"
-      },
-      {
-        title: "Queen's Gambit Declined",
-        confidence: "high",
-        description: "Limited experience defending QGD structures",
-        evidence: "Only 12 games, 33% win rate vs 54% overall"
+  const { id } = useParams();
+  const location = useLocation();
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+
+  useEffect(() => {
+    // Get analysis from navigation state or fallback to cache
+    if (location.state) {
+      setAnalysis(location.state as AnalysisResult);
+    } else {
+      // Try to load from cache
+      const cacheKeys = Object.keys(localStorage).filter(key => key.startsWith('scout_'));
+      if (cacheKeys.length > 0) {
+        const latestCache = JSON.parse(localStorage.getItem(cacheKeys[0]) || '{}');
+        if (latestCache.analysis) {
+          setAnalysis(latestCache.analysis);
+        }
       }
-    ],
-
-    recommendations: [
-      {
-        title: "Exploit Time Pressure",
-        line: "1.e4 c5 2.Nf3 d6 3.d4 cxd4 4.Nxd4 Nf6 5.Nc3 a6",
-        description: "Play the Najdorf to create complex positions that burn clock",
-        successRate: "68%"
-      },
-      {
-        title: "Enter Rook Endgames",
-        line: "1.d4 Nf6 2.c4 g6 3.Nc3 Bg7 4.e4 d6 5.Nf3 O-O",
-        description: "Trade pieces to reach rook endgames where conversion is weak",
-        successRate: "61%"
-      }
-    ],
-
-    pregameChecklist: [
-      "They struggle under time pressure - aim for complex middlegames",
-      "Weak in rook endgames - simplify when ahead",
-      "Limited QGD experience - consider 1.d4 approach",
-      "Strong King's Indian player - avoid if playing 1.d4",
-      "Takes 2-3 seconds per move in opening - stay in prep to maintain tempo"
-    ]
-  };
-
-  const getConfidenceBadge = (level: string) => {
-    const variants: Record<string, string> = {
-      high: "bg-confidence-high text-white",
-      medium: "bg-confidence-medium text-white", 
-      low: "bg-confidence-low text-white"
-    };
-    return variants[level] || variants.low;
-  };
-
-  const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
-    toast.success("Copied to clipboard");
-  };
+    }
+  }, [location.state]);
 
   const handleDownload = () => {
+    if (!analysis) return;
+    
+    const reportData = {
+      player_id: id,
+      total_games: analysis.totalGames,
+      player_color: analysis.playerColor,
+      opening_tree: analysis.openingTree,
+      weakest_lines: analysis.weakestLines,
+      strongest_lines: analysis.strongestLines,
+      metadata: {
+        generated_at: new Date().toISOString(),
+      },
+    };
+    
+    const blob = new Blob([JSON.stringify(reportData, null, 2)], { 
+      type: "application/json" 
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `scout-report-${id}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
     toast.success("Report downloaded");
+  };
+
+  const handleCopy = (text: string, index: number) => {
+    navigator.clipboard.writeText(text);
+    setCopiedIndex(index);
+    toast.success("Copied to clipboard");
+    setTimeout(() => setCopiedIndex(null), 2000);
+  };
+
+  if (!analysis) {
+    return (
+      <div className="min-h-screen flex flex-col bg-background">
+        <Header />
+        <main className="flex-1 py-8">
+          <div className="container mx-auto px-4 text-center">
+            <p className="text-muted-foreground">Loading analysis...</p>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  const generateSummary = () => {
+    const weakestLine = analysis.weakestLines[0];
+    const strongestLine = analysis.strongestLines[0];
+    
+    return `Player has ${analysis.totalGames} games analyzed as ${analysis.playerColor}. ` +
+           (weakestLine ? `Weakest opening: ${weakestLine.line} (${(weakestLine.winRate * 100).toFixed(0)}% win rate in ${weakestLine.count} games). ` : '') +
+           (strongestLine ? `Strongest opening: ${strongestLine.line} (${(strongestLine.winRate * 100).toFixed(0)}% win rate in ${strongestLine.count} games). ` : '') +
+           `Target their weak lines and avoid or deeply prepare against their strongest lines.`;
+  };
+
+  const generateChecklist = () => {
+    const items: string[] = [];
+    
+    if (analysis.weakestLines.length > 0) {
+      items.push(`Target ${analysis.weakestLines[0].line} - their weakest line at ${(analysis.weakestLines[0].winRate * 100).toFixed(0)}%`);
+    }
+    
+    if (analysis.strongestLines.length > 0) {
+      items.push(`Avoid ${analysis.strongestLines[0].line} - they score ${(analysis.strongestLines[0].winRate * 100).toFixed(0)}% here`);
+    }
+    
+    items.push(`${analysis.totalGames} games analyzed - data is ${analysis.totalGames > 100 ? 'highly' : 'moderately'} reliable`);
+    items.push(`Analyzed as ${analysis.playerColor} - prepare color-specific lines`);
+    
+    return items;
   };
 
   return (
@@ -83,19 +110,14 @@ const Report = () => {
       
       <main className="flex-1 py-8">
         <div className="container mx-auto px-4 max-w-6xl">
-          {/* Header */}
           <div className="flex items-center justify-between mb-6">
             <div>
               <h1 className="text-3xl font-bold text-foreground mb-2">
-                Scout Report: {mockReport.username}
+                Scout Report: {id}
               </h1>
-              <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                <span>{mockReport.platform}</span>
-                <span>•</span>
-                <span>Rating: {mockReport.rating}</span>
-                <span>•</span>
-                <span>{mockReport.gamesAnalyzed} games analyzed</span>
-              </div>
+              <p className="text-muted-foreground">
+                {analysis.totalGames} games analyzed as {analysis.playerColor}
+              </p>
             </div>
             <Button onClick={handleDownload} variant="outline">
               <Download className="mr-2 w-4 h-4" />
@@ -112,7 +134,7 @@ const Report = () => {
                 </CardHeader>
                 <CardContent>
                   <p className="text-sm text-foreground leading-relaxed">
-                    {mockReport.summary}
+                    {generateSummary()}
                   </p>
                 </CardContent>
               </Card>
@@ -124,7 +146,7 @@ const Report = () => {
                 </CardHeader>
                 <CardContent>
                   <ul className="space-y-3">
-                    {mockReport.pregameChecklist.map((item, i) => (
+                    {generateChecklist().map((item, i) => (
                       <li key={i} className="flex items-start gap-2 text-sm">
                         <ChevronRight className="w-4 h-4 text-primary shrink-0 mt-0.5" />
                         <span className="text-foreground">{item}</span>
@@ -139,56 +161,82 @@ const Report = () => {
             <div className="lg:col-span-2 space-y-6">
               <Card>
                 <CardHeader>
-                  <CardTitle>Key Weaknesses</CardTitle>
-                  <CardDescription>Exploitable patterns found in their games</CardDescription>
+                  <CardTitle>Weakest Opening Lines</CardTitle>
+                  <CardDescription>
+                    Lines where {id} struggles most (minimum 3 games)
+                  </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {mockReport.weaknesses.map((weakness, i) => (
-                    <div key={i} className="border border-border rounded-lg p-4">
-                      <div className="flex items-start justify-between mb-2">
-                        <h4 className="font-semibold text-foreground">{weakness.title}</h4>
-                        <Badge className={getConfidenceBadge(weakness.confidence)}>
-                          {weakness.confidence}
-                        </Badge>
+                  {analysis.weakestLines.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      Not enough game data to identify weak lines
+                    </p>
+                  ) : (
+                    analysis.weakestLines.map((line, index) => (
+                      <div key={index} className="border border-border rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <code className="font-mono text-sm bg-muted px-2 py-1 rounded">
+                            {line.line}
+                          </code>
+                          <Badge variant={
+                            line.winRate < 0.3 ? "default" :
+                            line.winRate < 0.4 ? "secondary" : "outline"
+                          }>
+                            {(line.winRate * 100).toFixed(0)}% win rate
+                          </Badge>
+                        </div>
+                        <p className="text-sm text-muted-foreground">
+                          {line.count} games • Target this line in your preparation
+                        </p>
                       </div>
-                      <p className="text-sm text-foreground mb-2">{weakness.description}</p>
-                      <div className="flex items-start gap-2 text-xs text-muted-foreground bg-muted/50 p-2 rounded">
-                        <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
-                        <span>{weakness.evidence}</span>
-                      </div>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </CardContent>
               </Card>
 
               <Card>
                 <CardHeader>
-                  <CardTitle>Recommended Lines</CardTitle>
-                  <CardDescription>Opening strategies to exploit weaknesses</CardDescription>
+                  <CardTitle>Strongest Opening Lines</CardTitle>
+                  <CardDescription>
+                    Lines where {id} performs best - avoid or prepare deeply
+                  </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {mockReport.recommendations.map((rec, i) => (
-                    <div key={i} className="border border-border rounded-lg p-4">
-                      <div className="flex items-start justify-between mb-2">
-                        <h4 className="font-semibold text-foreground">{rec.title}</h4>
-                        <Badge variant="secondary">
-                          {rec.successRate} success
-                        </Badge>
+                  {analysis.strongestLines.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      Not enough game data to identify strong lines
+                    </p>
+                  ) : (
+                    analysis.strongestLines.map((line, index) => (
+                      <div key={index} className="border border-border rounded-lg p-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <code className="font-mono text-sm bg-muted px-2 py-1 rounded">
+                            {line.line}
+                          </code>
+                          <Badge variant="default">
+                            {(line.winRate * 100).toFixed(0)}% win rate
+                          </Badge>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <p className="text-sm text-muted-foreground">
+                            {line.count} games • Avoid this line or prepare deeply
+                          </p>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleCopy(line.line, index)}
+                            className="h-8 w-8 p-0"
+                          >
+                            {copiedIndex === index ? (
+                              <Check className="w-3 h-3" />
+                            ) : (
+                              <Copy className="w-3 h-3" />
+                            )}
+                          </Button>
+                        </div>
                       </div>
-                      <div className="bg-muted/50 p-3 rounded mb-2 flex items-center justify-between group">
-                        <code className="text-sm font-mono text-foreground">{rec.line}</code>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="opacity-0 group-hover:opacity-100"
-                          onClick={() => handleCopy(rec.line)}
-                        >
-                          <Copy className="w-3 h-3" />
-                        </Button>
-                      </div>
-                      <p className="text-sm text-muted-foreground">{rec.description}</p>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </CardContent>
               </Card>
 
@@ -200,7 +248,7 @@ const Report = () => {
                 <CardContent>
                   <div className="bg-muted/30 border border-border rounded-lg p-8 text-center">
                     <p className="text-sm text-muted-foreground">
-                      Training positions would appear here
+                      Training positions coming soon - requires engine analysis
                     </p>
                   </div>
                 </CardContent>

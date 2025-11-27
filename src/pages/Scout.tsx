@@ -6,17 +6,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Search, Upload } from "lucide-react";
+import { Search, Upload, Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { fetchLichessGames, fetchChessComGames } from "@/lib/chessApi";
+import { analyzeGames, serializeOpeningTree } from "@/lib/chessAnalysis";
 
 const Scout = () => {
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
-  const [platform, setPlatform] = useState("auto");
+  const [platform, setPlatform] = useState("lichess");
   const [color, setColor] = useState("both");
-  const [timeControl, setTimeControl] = useState("all");
+  const [timeControl, setTimeControl] = useState("blitz");
+  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
     if (!username.trim()) {
@@ -24,11 +27,77 @@ const Scout = () => {
       return;
     }
 
-    // Mock: Navigate to report with demo data
-    toast.success("Generating scout report...");
-    setTimeout(() => {
-      navigate("/report/demo");
-    }, 1500);
+    setLoading(true);
+
+    try {
+      // Check cache first
+      const cacheKey = `scout_${username}_${platform}_${timeControl}_${color}`;
+      const cached = localStorage.getItem(cacheKey);
+      
+      if (cached) {
+        const cachedData = JSON.parse(cached);
+        const cacheAge = Date.now() - cachedData.timestamp;
+        
+        // Cache valid for 24 hours
+        if (cacheAge < 24 * 60 * 60 * 1000) {
+          toast.success("Loading cached report...");
+          navigate(`/report/${username}`, { state: cachedData.analysis });
+          setLoading(false);
+          return;
+        }
+      }
+
+      toast.loading("Fetching games...");
+
+      // Fetch games based on platform
+      let games;
+      const actualPlatform = platform === "auto" ? "lichess" : platform;
+      
+      if (actualPlatform === "lichess") {
+        games = await fetchLichessGames(username, timeControl, 500);
+      } else {
+        games = await fetchChessComGames(username, timeControl, 500);
+      }
+
+      if (games.length === 0) {
+        toast.error("No games found for this user");
+        setLoading(false);
+        return;
+      }
+
+      toast.loading(`Analyzing ${games.length} games...`);
+
+      // Analyze games
+      const analysis = analyzeGames(
+        games,
+        username,
+        color as "white" | "black" | "both"
+      );
+
+      // Add metadata
+      const reportData = {
+        username,
+        platform: actualPlatform,
+        timeControl,
+        color,
+        analysis: {
+          ...analysis,
+          openingTree: serializeOpeningTree(analysis.openingTree),
+        },
+        timestamp: Date.now(),
+      };
+
+      // Cache results
+      localStorage.setItem(cacheKey, JSON.stringify(reportData));
+
+      toast.success("Report generated!");
+      navigate(`/report/${username}`, { state: reportData.analysis });
+    } catch (error: any) {
+      console.error("Scout error:", error);
+      toast.error(error.message || "Failed to generate report. Try again.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -73,9 +142,8 @@ const Scout = () => {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="auto">Auto-detect</SelectItem>
                       <SelectItem value="lichess">Lichess</SelectItem>
-                      <SelectItem value="chesscom">Chess.com</SelectItem>
+                      <SelectItem value="chesscom">Chess.com (may hit CORS)</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -102,19 +170,31 @@ const Scout = () => {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="all">All Games</SelectItem>
-                        <SelectItem value="bullet">Bullet</SelectItem>
                         <SelectItem value="blitz">Blitz</SelectItem>
                         <SelectItem value="rapid">Rapid</SelectItem>
+                        <SelectItem value="bullet">Bullet</SelectItem>
                         <SelectItem value="classical">Classical</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
                 </div>
 
-                <Button type="submit" className="w-full bg-primary hover:bg-primary-dark text-primary-foreground">
-                  <Search className="mr-2 w-4 h-4" />
-                  Generate Scout Report
+                <Button 
+                  type="submit" 
+                  disabled={loading}
+                  className="w-full bg-primary hover:bg-primary-dark text-primary-foreground"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="mr-2 w-4 h-4 animate-spin" />
+                      Analyzing...
+                    </>
+                  ) : (
+                    <>
+                      <Search className="mr-2 w-4 h-4" />
+                      Generate Scout Report
+                    </>
+                  )}
                 </Button>
               </form>
 
