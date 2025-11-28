@@ -39,6 +39,11 @@ const Scout = () => {
 
     try {
       const cacheKey = `scout_${username}_${platform}_${timeControl}_${color}_${dateFilter}`;
+      
+      // CLEAR CACHE to force fresh analysis with new logic
+      localStorage.removeItem(cacheKey);
+      console.log(`Cleared cache for: ${cacheKey}`);
+      
       const cached = localStorage.getItem(cacheKey);
       
       if (cached) {

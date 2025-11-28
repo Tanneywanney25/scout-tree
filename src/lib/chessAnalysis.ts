@@ -120,6 +120,11 @@ export function analyzeGamesIncremental(
     for (let i = 0; i < maxPlies; i++) {
       const move = history[i];
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
+      
+      // Debug logging (first game only)
+      if (totalGames === 1 && i < 6) {
+        console.log(`Move ${i}: ${move.san}, isWhite: ${isWhite}, isBlack: ${isBlack}, playerColor: ${playerColor}, tracking: ${targetPlaysMoveAtIndex(i)}`);
+      }
 
       // Only track moves made by the target player
       if (targetPlaysMoveAtIndex(i)) {
