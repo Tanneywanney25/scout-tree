@@ -1,6 +1,6 @@
 // src/app/chess/RacingKingsChess.js
 
-import Chess from 'chess.js'
+import { Chess } from 'chess.js'
 
 export default class RacingKingsChess extends Chess {
   constructor(fen) {

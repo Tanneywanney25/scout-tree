@@ -1,6 +1,6 @@
 // src/app/chess/CrazyhouseChess.js
 
-import Chess from 'chess.js'
+import { Chess } from 'chess.js'
 
 export default class CrazyhouseChess extends Chess {
   constructor(fen) {
