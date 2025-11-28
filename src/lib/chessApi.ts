@@ -227,8 +227,6 @@ export async function fetchChessComGames(
     ratingMax,
     opponentName
   } = options;
-
-  const maxGames = 1000;
   
   // Chess.com usernames must be lowercase
   const normalizedUsername = username.toLowerCase().trim();
@@ -277,8 +275,8 @@ export async function fetchChessComGames(
       });
     }
     
-    // Process recent archives (reversed to get newest first)
-    const recentArchives = filteredArchives.slice(-6).reverse();
+    // Process ALL archives (reversed to get newest first)
+    const recentArchives = filteredArchives.reverse();
     const allGames: GameData[] = [];
     let count = 0;
 
@@ -344,7 +342,6 @@ export async function fetchChessComGames(
           });
           
           count++;
-          if (count >= maxGames) break;
         }
         
         allGames.push(...batchGames);
@@ -357,8 +354,6 @@ export async function fetchChessComGames(
         if (onProgress) {
           onProgress(count);
         }
-        
-        if (count >= maxGames) break;
       } catch (error) {
         console.warn(`Error processing archive ${archiveUrl}:`, error);
         continue;
