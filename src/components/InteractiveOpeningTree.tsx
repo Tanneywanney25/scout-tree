@@ -1,7 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { Chess } from "chess.js";
 import Chessboard from "chessboardjsx";
-import { OpeningTreeViewer } from "./OpeningTreeViewer";
 import { Button } from "./ui/button";
 import { RotateCcw, FlipVertical } from "lucide-react";
 
@@ -78,12 +77,12 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
       try {
         const move = chess.move(child.san);
         if (move) {
-          // Calculate opacity based on frequency (0.3 to 1.0)
+          // Calculate opacity based on frequency (0.6 to 1.0 for better visibility)
           const frequency = child.count / totalCount;
-          const opacity = Math.max(0.3, Math.min(1.0, frequency * 2));
+          const opacity = Math.max(0.6, Math.min(1.0, 0.6 + frequency * 0.4));
           
-          // Green for white moves, red for black moves
-          const color = isWhiteToMove ? `rgba(34, 197, 94, ${opacity})` : `rgba(239, 68, 68, ${opacity})`;
+          // Dark green for white moves, red for black moves
+          const color = isWhiteToMove ? `rgba(46, 125, 50, ${opacity})` : `rgba(198, 40, 40, ${opacity})`;
           
           moveArrows.push({
             from: move.from,
@@ -188,9 +187,9 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
   };
 
   return (
-    <div className="flex gap-4 h-[calc(100vh-12rem)]">
+    <div className="flex gap-6 h-[calc(100vh-12rem)] max-w-7xl mx-auto">
       {/* Left: Move List */}
-      <div className="w-64 flex-shrink-0 space-y-4">
+      <div className="w-72 flex-shrink-0 space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold">Moves</h3>
           <div className="flex gap-1">
@@ -248,14 +247,14 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
               })}
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">No moves yet. Click on moves in the opening tree or use arrow keys.</p>
+            <p className="text-sm text-muted-foreground">No moves yet. Use arrow keys or drag pieces on the board.</p>
           )}
         </div>
       </div>
 
-      {/* Center: Chess Board */}
+      {/* Right: Chess Board */}
       <div className="flex-1 flex items-center justify-center">
-        <div className="relative aspect-square w-full max-w-[min(calc(100vh-14rem),100%)] border-2 border-border rounded-lg overflow-hidden shadow-lg">
+        <div className="relative aspect-square w-full max-w-[600px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
           <Chessboard 
             position={currentPosition}
             orientation={boardOrientation}
@@ -281,7 +280,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
                 refY="2"
                 orient="auto"
               >
-                <polygon points="0 0, 4 2, 0 4" fill="rgb(34, 197, 94)" />
+                <polygon points="0 0, 4 2, 0 4" fill="rgb(46, 125, 50)" />
               </marker>
               <marker
                 id="arrowhead-red"
@@ -291,7 +290,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
                 refY="2"
                 orient="auto"
               >
-                <polygon points="0 0, 4 2, 0 4" fill="rgb(239, 68, 68)" />
+                <polygon points="0 0, 4 2, 0 4" fill="rgb(198, 40, 40)" />
               </marker>
             </defs>
             {arrows.map((arrow, idx) => {
@@ -313,7 +312,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
-              const isGreen = arrow.color.includes('34, 197, 94');
+              const isGreen = arrow.color.includes('46, 125, 50');
               
               return (
                 <line
@@ -323,26 +322,13 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
                   x2={x2Shortened}
                   y2={y2Shortened}
                   stroke={arrow.color}
-                  strokeWidth="0.15"
+                  strokeWidth="0.18"
                   strokeLinecap="round"
                   markerEnd={`url(#arrowhead-${isGreen ? 'green' : 'red'})`}
                 />
               );
             })}
           </svg>
-        </div>
-      </div>
-
-      {/* Right: Opening Tree */}
-      <div className="w-96 flex-shrink-0 space-y-4">
-        <h3 className="text-sm font-semibold">Opening Tree</h3>
-        <div className="h-[calc(100%-2rem)] overflow-y-auto border border-border rounded-lg p-4 bg-card">
-          <OpeningTreeViewer 
-            node={node} 
-            maxDepth={maxDepth}
-            onMoveClick={handleMoveClick}
-            selectedPath={selectedPath}
-          />
         </div>
       </div>
     </div>
