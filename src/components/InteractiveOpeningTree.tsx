@@ -50,23 +50,48 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
   };
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      {/* Chess Board */}
-      <div className="space-y-4">
+    <div className="flex gap-4 h-[calc(100vh-12rem)]">
+      {/* Left: Move List */}
+      <div className="w-64 flex-shrink-0 space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-lg font-semibold">Position</h3>
+          <h3 className="text-sm font-semibold">Moves</h3>
           <Button
-            variant="outline"
+            variant="ghost"
             size="sm"
             onClick={handleReset}
             disabled={selectedPath.length === 0}
           >
-            <RotateCcw className="w-4 h-4 mr-2" />
-            Reset
+            <RotateCcw className="w-4 h-4" />
           </Button>
         </div>
         
-        <div className="aspect-square w-full mx-auto border-2 border-border rounded-lg overflow-hidden shadow-lg">
+        {/* Move sequence display */}
+        <div className="border border-border rounded-lg p-3 bg-card h-[calc(100%-3rem)] overflow-y-auto">
+          {selectedPath.length > 0 ? (
+            <div className="space-y-1">
+              {Array.from({ length: Math.ceil(selectedPath.length / 2) }).map((_, pairIndex) => {
+                const whiteMove = selectedPath[pairIndex * 2];
+                const blackMove = selectedPath[pairIndex * 2 + 1];
+                return (
+                  <div key={pairIndex} className="flex items-start gap-2 text-sm font-mono">
+                    <span className="text-muted-foreground w-6">{pairIndex + 1}.</span>
+                    <div className="flex gap-4 flex-1">
+                      <span className="font-semibold">{whiteMove}</span>
+                      {blackMove && <span className="font-semibold">{blackMove}</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No moves yet. Click on moves in the opening tree.</p>
+          )}
+        </div>
+      </div>
+
+      {/* Center: Chess Board */}
+      <div className="flex-1 flex items-center justify-center">
+        <div className="aspect-square w-full max-w-[min(calc(100vh-14rem),100%)] border-2 border-border rounded-lg overflow-hidden shadow-lg">
           <Chessboard 
             position={currentPosition}
             orientation="white"
@@ -76,31 +101,12 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
             }}
           />
         </div>
-
-        {/* Move sequence display */}
-        {selectedPath.length > 0 && (
-          <div className="p-4 bg-muted/50 rounded-lg">
-            <p className="text-sm text-muted-foreground mb-2">Move sequence:</p>
-            <code className="text-sm font-mono">
-              {selectedPath.map((san, index) => {
-                const moveNumber = Math.floor(index / 2) + 1;
-                const isWhiteMove = index % 2 === 0;
-                return (
-                  <span key={index}>
-                    {isWhiteMove ? `${moveNumber}. ` : ""}
-                    {san}{" "}
-                  </span>
-                );
-              })}
-            </code>
-          </div>
-        )}
       </div>
 
-      {/* Opening Tree */}
-      <div className="space-y-4">
-        <h3 className="text-lg font-semibold">Opening Moves</h3>
-        <div className="max-h-[600px] overflow-y-auto border border-border rounded-lg p-4 bg-card">
+      {/* Right: Opening Tree */}
+      <div className="w-96 flex-shrink-0 space-y-4">
+        <h3 className="text-sm font-semibold">Opening Tree</h3>
+        <div className="h-[calc(100%-2rem)] overflow-y-auto border border-border rounded-lg p-4 bg-card">
           <OpeningTreeViewer 
             node={node} 
             maxDepth={maxDepth}
