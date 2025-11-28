@@ -55,11 +55,9 @@ const Scout = () => {
 
       toast.loading("Fetching and analyzing games...");
 
-      // Initialize empty analysis
-      let analysis = createEmptyAnalysis(color as "white" | "black" | "both");
-      setCurrentAnalysis(analysis);
-
       const actualPlatform = platform === "auto" ? "lichess" : platform;
+      let analysis = createEmptyAnalysis(color as "white" | "black" | "both");
+      let hasNavigated = false;
       
       if (actualPlatform === "lichess") {
         await fetchLichessGames(
@@ -70,14 +68,35 @@ const Scout = () => {
             setProgress(count);
             
             if (count > 2000 && !warning) {
-              setWarning("Large dataset detected - analyzing continuously...");
+              setWarning("Large dataset - navigating to report early...");
             }
           },
           (gameBatch) => {
             // Analyze each batch as it arrives
             analysis = analyzeGamesIncremental(analysis, gameBatch, username);
-            setCurrentAnalysis({...analysis});
             setProgress(analysis.totalGames);
+            
+            // Navigate to report as soon as we have 50+ games analyzed
+            if (!hasNavigated && analysis.totalGames >= 50) {
+              hasNavigated = true;
+              const reportData = {
+                ...analysis,
+                openingTree: serializeOpeningTree(analysis.openingTree),
+              };
+              
+              toast.success("Opening report - analysis continuing...");
+              navigate(`/report/${username}`, { 
+                state: { 
+                  ...reportData,
+                  isLive: true,
+                  username,
+                  platform: actualPlatform,
+                  timeControl,
+                  color,
+                  dateFilter
+                } 
+              });
+            }
           }
         );
       } else {
@@ -89,9 +108,7 @@ const Scout = () => {
           return;
         }
 
-        // Analyze Chess.com games in one batch (already limited)
         analysis = analyzeGamesIncremental(analysis, games, username);
-        setCurrentAnalysis(analysis);
       }
 
       if (analysis.totalGames === 0) {
@@ -100,23 +117,37 @@ const Scout = () => {
         return;
       }
 
-      toast.success("Report generated!");
-      
-      const reportData = {
-        username,
-        platform: actualPlatform,
-        timeControl,
-        color,
-        dateFilter,
-        analysis: {
+      // Only cache smaller datasets (< 500 games) to avoid quota errors
+      if (analysis.totalGames < 500) {
+        try {
+          const reportData = {
+            username,
+            platform: actualPlatform,
+            timeControl,
+            color,
+            dateFilter,
+            analysis: {
+              ...analysis,
+              openingTree: serializeOpeningTree(analysis.openingTree),
+            },
+            timestamp: Date.now(),
+          };
+          localStorage.setItem(cacheKey, JSON.stringify(reportData));
+        } catch (e) {
+          console.warn("Cache failed - dataset too large:", e);
+        }
+      }
+
+      // If we haven't navigated yet (small dataset or Chess.com), navigate now
+      if (!hasNavigated) {
+        const reportData = {
           ...analysis,
           openingTree: serializeOpeningTree(analysis.openingTree),
-        },
-        timestamp: Date.now(),
-      };
-
-      localStorage.setItem(cacheKey, JSON.stringify(reportData));
-      navigate(`/report/${username}`, { state: reportData.analysis });
+        };
+        
+        toast.success("Report generated!");
+        navigate(`/report/${username}`, { state: reportData });
+      }
     } catch (error: any) {
       console.error("Scout error:", error);
       toast.error(error.message || "Failed to generate report. Try again.");
