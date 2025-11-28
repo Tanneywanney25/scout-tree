@@ -9,26 +9,75 @@ export interface GameData {
   timeControl?: string;
 }
 
+export interface FetchOptions {
+  timeControls?: string[];
+  mode?: "all" | "rated" | "casual";
+  dateFrom?: Date;
+  dateTo?: Date;
+  ratingMin?: number;
+  ratingMax?: number;
+  opponentName?: string;
+}
+
 export async function fetchLichessGames(
   username: string,
-  timeControl: string = "blitz",
-  dateFilter: "all" | "year" | "6months" = "all",
+  options: FetchOptions = {},
   onProgress?: (count: number) => void,
   onBatch?: (games: GameData[]) => void
 ): Promise<GameData[]> {
-  const perfType = timeControl === "all" ? "" : `&perfType=${timeControl}`;
+  const {
+    timeControls = ["blitz"],
+    mode = "all",
+    dateFrom,
+    dateTo,
+    ratingMin,
+    ratingMax,
+    opponentName
+  } = options;
+
+  // If multiple time controls selected, fetch all of them
+  if (timeControls.length > 1) {
+    const allGames: GameData[] = [];
+    let totalCount = 0;
+    
+    for (const tc of timeControls) {
+      const tcGames = await fetchLichessGames(
+        username,
+        { ...options, timeControls: [tc] },
+        (count) => {
+          totalCount += count;
+          if (onProgress) onProgress(totalCount);
+        },
+        onBatch
+      );
+      allGames.push(...tcGames);
+    }
+    
+    return allGames;
+  }
+
+  const perfType = timeControls[0] && timeControls[0] !== "all" ? `&perfType=${timeControls[0]}` : "";
   
-  // Calculate since timestamp for date filtering
+  // Date filtering
   let sinceParam = "";
-  if (dateFilter === "year") {
-    const yearAgo = Date.now() - (365 * 24 * 60 * 60 * 1000);
-    sinceParam = `&since=${yearAgo}`;
-  } else if (dateFilter === "6months") {
-    const sixMonthsAgo = Date.now() - (180 * 24 * 60 * 60 * 1000);
-    sinceParam = `&since=${sixMonthsAgo}`;
+  let untilParam = "";
+  if (dateFrom) {
+    sinceParam = `&since=${dateFrom.getTime()}`;
+  }
+  if (dateTo) {
+    untilParam = `&until=${dateTo.getTime()}`;
   }
   
-  const url = `https://lichess.org/api/games/user/${username}?${perfType}&pgnInJson=true&rated=true${sinceParam}`;
+  // Mode filtering (rated/casual/all)
+  let ratedParam = "";
+  if (mode === "rated") {
+    ratedParam = "&rated=true";
+  } else if (mode === "casual") {
+    ratedParam = "&rated=false";
+  }
+  // If mode === "all", don't add rated parameter to get both
+  
+  const url = `https://lichess.org/api/games/user/${username}?${perfType}&pgnInJson=true${ratedParam}${sinceParam}${untilParam}`;
 
   const response = await fetch(url, {
     headers: {
@@ -66,6 +115,35 @@ export async function fetchLichessGames(
         if (line.trim()) {
           try {
             const game = JSON.parse(line);
+            
+            // Apply client-side filters
+            let shouldInclude = true;
+            
+            // Opponent name filter
+            if (opponentName && opponentName.trim()) {
+              const opponent = game.players.white.user?.name === username.toLowerCase() 
+                ? game.players.black.user?.name 
+                : game.players.white.user?.name;
+              if (!opponent?.toLowerCase().includes(opponentName.toLowerCase())) {
+                shouldInclude = false;
+              }
+            }
+            
+            // Rating range filter
+            if (ratingMin !== undefined || ratingMax !== undefined) {
+              const playerIsWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
+              const playerRating = playerIsWhite ? game.players.white.rating : game.players.black.rating;
+              
+              if (ratingMin !== undefined && playerRating < ratingMin) {
+                shouldInclude = false;
+              }
+              if (ratingMax !== undefined && playerRating > ratingMax) {
+                shouldInclude = false;
+              }
+            }
+            
+            if (!shouldInclude) continue;
+            
             const gameData: GameData = {
               pgn: game.pgn,
               white: game.players.white.user?.name || "Unknown",
