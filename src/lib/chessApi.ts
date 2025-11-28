@@ -71,28 +71,33 @@ export async function fetchLichessGames(
     return allGames;
   }
 
-  const perfType = timeControls[0] && timeControls[0] !== "all" ? `&perfType=${timeControls[0]}` : "";
+  // Build query parameters properly
+  const params = new URLSearchParams();
+  
+  // Add perfType if specified
+  if (timeControls[0] && timeControls[0] !== "all") {
+    params.append('perfType', timeControls[0]);
+  }
+  
+  // Always include pgnInJson
+  params.append('pgnInJson', 'true');
   
   // Date filtering
-  let sinceParam = "";
-  let untilParam = "";
   if (dateFrom) {
-    sinceParam = `&since=${dateFrom.getTime()}`;
+    params.append('since', dateFrom.getTime().toString());
   }
   if (dateTo) {
-    untilParam = `&until=${dateTo.getTime()}`;
+    params.append('until', dateTo.getTime().toString());
   }
   
   // Mode filtering (rated/casual/all)
-  let ratedParam = "";
   if (mode === "rated") {
-    ratedParam = "&rated=true";
+    params.append('rated', 'true');
   } else if (mode === "casual") {
-    ratedParam = "&rated=false";
+    params.append('rated', 'false');
   }
-  // If mode === "all", don't add rated parameter to get both
   
-  const url = `https://lichess.org/api/games/user/${username}?${perfType}&pgnInJson=true${ratedParam}${sinceParam}${untilParam}`;
+  const url = `https://lichess.org/api/games/user/${username}?${params.toString()}`;
 
   const response = await fetch(url, {
     headers: {
