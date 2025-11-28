@@ -82,25 +82,33 @@ const Report = () => {
     const weakestLine = analysis.weakestLines[0];
     const strongestLine = analysis.strongestLines[0];
     
-    return `Player has ${analysis.totalGames} games analyzed as ${analysis.playerColor}. ` +
-           (weakestLine ? `Weakest opening: ${weakestLine.line} (${(weakestLine.winRate * 100).toFixed(0)}% win rate in ${weakestLine.count} games). ` : '') +
-           (strongestLine ? `Strongest opening: ${strongestLine.line} (${(strongestLine.winRate * 100).toFixed(0)}% win rate in ${strongestLine.count} games). ` : '') +
-           `Target their weak lines and avoid or deeply prepare against their strongest lines.`;
+    const opponentColor = analysis.playerColor === "white" ? "White" : "Black";
+    const yourColor = analysis.playerColor === "white" ? "Black" : "White";
+    
+    return `Analyzing ${id} playing as ${opponentColor} across ${analysis.totalGames} games. ` +
+           (weakestLine ? `They struggle most after ${weakestLine.line} (${(weakestLine.winRate * 100).toFixed(0)}% win rate, ${weakestLine.count} games). ` : '') +
+           (strongestLine ? `They excel after ${strongestLine.line} (${(strongestLine.winRate * 100).toFixed(0)}% win rate, ${strongestLine.count} games). ` : '') +
+           `As ${yourColor}, exploit their weaknesses and avoid their strongest lines.`;
   };
 
   const generateChecklist = () => {
     const items: string[] = [];
     
+    const opponentColor = analysis.playerColor === "white" ? "White" : "Black";
+    const yourColor = analysis.playerColor === "white" ? "Black" : "White";
+    
     if (analysis.weakestLines.length > 0) {
-      items.push(`Target ${analysis.weakestLines[0].line} - their weakest line at ${(analysis.weakestLines[0].winRate * 100).toFixed(0)}%`);
+      const line = analysis.weakestLines[0];
+      items.push(`Play ${line.line.split(' ').slice(1).join(' ')} - they score only ${(line.winRate * 100).toFixed(0)}% here`);
     }
     
     if (analysis.strongestLines.length > 0) {
-      items.push(`Avoid ${analysis.strongestLines[0].line} - they score ${(analysis.strongestLines[0].winRate * 100).toFixed(0)}% here`);
+      const line = analysis.strongestLines[0];
+      items.push(`Avoid ${line.line.split(' ').slice(1).join(' ')} - they score ${(line.winRate * 100).toFixed(0)}% here`);
     }
     
-    items.push(`${analysis.totalGames} games analyzed - data is ${analysis.totalGames > 100 ? 'highly' : 'moderately'} reliable`);
-    items.push(`Analyzed as ${analysis.playerColor} - prepare color-specific lines`);
+    items.push(`${analysis.totalGames} games analyzed as ${opponentColor} - ${analysis.totalGames > 100 ? 'highly' : 'moderately'} reliable dataset`);
+    items.push(`You play ${yourColor} - prepare your response repertoire`);
     
     return items;
   };
@@ -117,7 +125,7 @@ const Report = () => {
                 Scout Report: {id}
               </h1>
               <p className="text-muted-foreground">
-                {analysis.totalGames} games analyzed as {analysis.playerColor}
+                {analysis.totalGames} total games analyzed • Playing as {analysis.playerColor}
               </p>
             </div>
             <Button onClick={handleDownload} variant="outline">
@@ -169,10 +177,12 @@ const Report = () => {
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  {analysis.openingTree ? (
+                  {analysis.openingTree && analysis.openingTree.children && analysis.openingTree.children.length > 0 ? (
                     <InteractiveOpeningTree node={analysis.openingTree} maxDepth={15} />
                   ) : (
-                    <p className="text-sm text-muted-foreground">No opening tree data available</p>
+                    <div className="text-center py-8 text-muted-foreground">
+                      <p>No opening tree data available. The analysis may still be processing or no games were found.</p>
+                    </div>
                   )}
                 </CardContent>
               </Card>
@@ -181,7 +191,7 @@ const Report = () => {
                 <CardHeader>
                   <CardTitle>Weakest Opening Lines</CardTitle>
                   <CardDescription>
-                    Lines where {id} struggles most (minimum 3 games)
+                    Lines where {id} (playing {analysis.playerColor}) struggles most - exploit these as {analysis.playerColor === "white" ? "Black" : "White"}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -204,7 +214,7 @@ const Report = () => {
                           </Badge>
                         </div>
                         <p className="text-sm text-muted-foreground">
-                          {line.count} games • Target this line in your preparation
+                          {line.count} games • As {analysis.playerColor === "white" ? "Black" : "White"}, steer into this line
                         </p>
                       </div>
                     ))
@@ -216,7 +226,7 @@ const Report = () => {
                 <CardHeader>
                   <CardTitle>Strongest Opening Lines</CardTitle>
                   <CardDescription>
-                    Lines where {id} performs best - avoid or prepare deeply
+                    Lines where {id} (playing {analysis.playerColor}) performs best - avoid or prepare deeply as {analysis.playerColor === "white" ? "Black" : "White"}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -237,7 +247,7 @@ const Report = () => {
                         </div>
                         <div className="flex items-center justify-between">
                           <p className="text-sm text-muted-foreground">
-                            {line.count} games • Avoid this line or prepare deeply
+                            {line.count} games • Avoid this line or prepare counter-play
                           </p>
                           <Button
                             variant="ghost"

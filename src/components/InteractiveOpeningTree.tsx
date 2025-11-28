@@ -3,6 +3,7 @@ import { Chess } from "chess.js";
 import Chessboard from "chessboardjsx";
 import { Button } from "./ui/button";
 import { RotateCcw, FlipVertical } from "lucide-react";
+import { OpeningTreeViewer } from "./OpeningTreeViewer";
 
 interface MoveArrow {
   from: string;
@@ -182,10 +183,10 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
 
   return (
     <div className="flex gap-6 h-[calc(100vh-12rem)] max-w-7xl mx-auto">
-      {/* Left: Move List */}
-      <div className="w-72 flex-shrink-0 space-y-4">
+      {/* Left: Opening Tree Viewer */}
+      <div className="w-80 flex-shrink-0 space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Moves</h3>
+          <h3 className="text-sm font-semibold">Opening Tree</h3>
           <div className="flex gap-1">
             <Button
               variant="ghost"
@@ -207,42 +208,14 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
           </div>
         </div>
         
-        {/* Move sequence display */}
+        {/* Tree with clickable moves */}
         <div className="border border-border rounded-lg p-3 bg-card h-[calc(100%-3rem)] overflow-y-auto">
-          {selectedPath.length > 0 ? (
-            <div className="space-y-1">
-              {Array.from({ length: Math.ceil(selectedPath.length / 2) }).map((_, pairIndex) => {
-                const whiteMove = selectedPath[pairIndex * 2];
-                const blackMove = selectedPath[pairIndex * 2 + 1];
-                const whiteMoveIndex = pairIndex * 2;
-                const blackMoveIndex = pairIndex * 2 + 1;
-                
-                return (
-                  <div key={pairIndex} className="flex items-start gap-2 text-sm font-mono">
-                    <span className="text-muted-foreground w-6">{pairIndex + 1}.</span>
-                    <div className="flex gap-4 flex-1">
-                      <span 
-                        className="font-semibold cursor-pointer hover:text-primary transition-colors"
-                        onClick={() => handleJumpToMove(whiteMoveIndex + 1)}
-                      >
-                        {whiteMove}
-                      </span>
-                      {blackMove && (
-                        <span 
-                          className="font-semibold cursor-pointer hover:text-primary transition-colors"
-                          onClick={() => handleJumpToMove(blackMoveIndex + 1)}
-                        >
-                          {blackMove}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No moves yet. Use arrow keys or drag pieces on the board.</p>
-          )}
+          <OpeningTreeViewer 
+            node={node} 
+            maxDepth={maxDepth} 
+            onMoveClick={handleMoveClick}
+            selectedPath={selectedPath}
+          />
         </div>
       </div>
 
