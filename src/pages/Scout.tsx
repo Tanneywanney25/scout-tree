@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
 import { Search, Upload, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { fetchLichessGames, fetchChessComGames } from "@/lib/chessApi";
@@ -17,7 +18,10 @@ const Scout = () => {
   const [platform, setPlatform] = useState("lichess");
   const [color, setColor] = useState("both");
   const [timeControl, setTimeControl] = useState("blitz");
+  const [dateFilter, setDateFilter] = useState<"all" | "year" | "6months">("all");
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -28,10 +32,12 @@ const Scout = () => {
     }
 
     setLoading(true);
+    setProgress(null);
+    setWarning(null);
 
     try {
       // Check cache first
-      const cacheKey = `scout_${username}_${platform}_${timeControl}_${color}`;
+      const cacheKey = `scout_${username}_${platform}_${timeControl}_${color}_${dateFilter}`;
       const cached = localStorage.getItem(cacheKey);
       
       if (cached) {
@@ -54,9 +60,17 @@ const Scout = () => {
       const actualPlatform = platform === "auto" ? "lichess" : platform;
       
       if (actualPlatform === "lichess") {
-        games = await fetchLichessGames(username, timeControl, 500);
+        games = await fetchLichessGames(username, timeControl, dateFilter, (count) => {
+          setProgress(count);
+          
+          // Show warning for large datasets
+          if (count > 2000 && !warning) {
+            setWarning("Large dataset detected - analysis may take 30+ seconds");
+            toast.warning("Large dataset detected - this may take a while...");
+          }
+        });
       } else {
-        games = await fetchChessComGames(username, timeControl, 500);
+        games = await fetchChessComGames(username, timeControl);
       }
 
       if (games.length === 0) {
@@ -65,6 +79,7 @@ const Scout = () => {
         return;
       }
 
+      setProgress(games.length);
       toast.loading(`Analyzing ${games.length} games...`);
 
       // Analyze games
@@ -80,6 +95,7 @@ const Scout = () => {
         platform: actualPlatform,
         timeControl,
         color,
+        dateFilter,
         analysis: {
           ...analysis,
           openingTree: serializeOpeningTree(analysis.openingTree),
@@ -97,6 +113,8 @@ const Scout = () => {
       toast.error(error.message || "Failed to generate report. Try again.");
     } finally {
       setLoading(false);
+      setProgress(null);
+      setWarning(null);
     }
   };
 
@@ -179,6 +197,38 @@ const Scout = () => {
                   </div>
                 </div>
 
+                {platform === "lichess" && (
+                  <div className="space-y-2">
+                    <Label htmlFor="dateFilter">Date Range</Label>
+                    <Select value={dateFilter} onValueChange={(v) => setDateFilter(v as "all" | "year" | "6months")}>
+                      <SelectTrigger id="dateFilter">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All Time</SelectItem>
+                        <SelectItem value="year">Last Year</SelectItem>
+                        <SelectItem value="6months">Last 6 Months</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+
+                {progress !== null && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">Fetching games...</span>
+                      <span className="font-medium">{progress} loaded</span>
+                    </div>
+                    <Progress value={100} className="h-2" />
+                  </div>
+                )}
+
+                {warning && (
+                  <div className="rounded-md bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 p-3">
+                    <p className="text-sm text-amber-800 dark:text-amber-200">{warning}</p>
+                  </div>
+                )}
+
                 <Button 
                   type="submit" 
                   disabled={loading}
@@ -187,7 +237,7 @@ const Scout = () => {
                   {loading ? (
                     <>
                       <Loader2 className="mr-2 w-4 h-4 animate-spin" />
-                      Analyzing...
+                      {progress ? `Analyzing ${progress} games...` : "Analyzing..."}
                     </>
                   ) : (
                     <>
