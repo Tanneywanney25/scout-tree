@@ -13,7 +13,8 @@ export async function fetchLichessGames(
   username: string,
   timeControl: string = "blitz",
   dateFilter: "all" | "year" | "6months" = "all",
-  onProgress?: (count: number) => void
+  onProgress?: (count: number) => void,
+  onBatch?: (games: GameData[]) => void
 ): Promise<GameData[]> {
   const perfType = timeControl === "all" ? "" : `&perfType=${timeControl}`;
   
@@ -49,6 +50,7 @@ export async function fetchLichessGames(
   let buffer = '';
   const games: GameData[] = [];
   let count = 0;
+  let batchBuffer: GameData[] = [];
 
   try {
     while (true) {
@@ -58,23 +60,30 @@ export async function fetchLichessGames(
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       
-      // Keep incomplete line in buffer
       buffer = lines.pop() || '';
       
-      // Process all complete lines
       for (const line of lines) {
         if (line.trim()) {
           try {
             const game = JSON.parse(line);
-            games.push({
+            const gameData: GameData = {
               pgn: game.pgn,
               white: game.players.white.user?.name || "Unknown",
               black: game.players.black.user?.name || "Unknown",
               winner: game.winner,
               opening: game.opening?.name,
               timeControl: game.speed,
-            });
+            };
+            
+            games.push(gameData);
+            batchBuffer.push(gameData);
             count++;
+            
+            // Send batch every 25 games for immediate analysis
+            if (batchBuffer.length >= 25 && onBatch) {
+              onBatch([...batchBuffer]);
+              batchBuffer = [];
+            }
             
             // Update progress every 50 games
             if (count % 50 === 0 && onProgress) {
@@ -87,7 +96,11 @@ export async function fetchLichessGames(
       }
     }
     
-    // Final progress update
+    // Send remaining games in batch
+    if (batchBuffer.length > 0 && onBatch) {
+      onBatch([...batchBuffer]);
+    }
+    
     if (onProgress && count > 0) {
       onProgress(count);
     }
