@@ -7,7 +7,7 @@ import { Download, Copy, Check, ChevronRight } from "lucide-react";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import type { SerializedAnalysisResult } from "@/lib/chessAnalysis";
-import OpeningTreeViewer from "@/components/OpeningTreeViewer";
+import InteractiveOpeningTree from "@/components/InteractiveOpeningTree";
 
 const Report = () => {
   const { id } = useParams();
@@ -163,16 +163,14 @@ const Report = () => {
               {/* Opening Tree */}
               <Card>
                 <CardHeader>
-                  <CardTitle>Opening Repertoire Tree</CardTitle>
+                  <CardTitle>Interactive Opening Explorer</CardTitle>
                   <CardDescription>
-                    Interactive move tree showing frequencies and win rates
+                    Click on moves to explore the tree and see positions on the board
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
                   {analysis.openingTree ? (
-                    <div className="max-h-[600px] overflow-y-auto pr-2">
-                      <OpeningTreeViewer node={analysis.openingTree} maxDepth={15} />
-                    </div>
+                    <InteractiveOpeningTree node={analysis.openingTree} maxDepth={15} />
                   ) : (
                     <p className="text-sm text-muted-foreground">No opening tree data available</p>
                   )}

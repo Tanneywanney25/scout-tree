@@ -19,9 +19,19 @@ interface OpeningTreeViewerProps {
   node: SerializedOpeningNode;
   depth?: number;
   maxDepth?: number;
+  onMoveClick?: (movePath: string[]) => void;
+  selectedPath?: string[];
+  currentPath?: string[];
 }
 
-const OpeningTreeNode = ({ node, depth = 0, maxDepth = 10 }: OpeningTreeViewerProps) => {
+const OpeningTreeNode = ({ 
+  node, 
+  depth = 0, 
+  maxDepth = 10, 
+  onMoveClick,
+  selectedPath = [],
+  currentPath = []
+}: OpeningTreeViewerProps) => {
   const [isExpanded, setIsExpanded] = useState(depth < 2); // Auto-expand first 2 levels
   
   // Convert children from array format to actual array if needed
@@ -31,6 +41,14 @@ const OpeningTreeNode = ({ node, depth = 0, maxDepth = 10 }: OpeningTreeViewerPr
   
   const hasChildren = children.length > 0;
   const shouldShowChildren = depth < maxDepth;
+  
+  // Check if this node is selected
+  const isSelected = selectedPath.length === depth && 
+    selectedPath.every((san, i) => currentPath[i] === san) &&
+    (depth === 0 || selectedPath[depth - 1] === node.san);
+  
+  // Build the path to this node
+  const thisPath = depth === 0 ? [] : [...currentPath, node.san];
 
   const getWinRateColor = (winRate: number) => {
     if (winRate >= 0.6) return "text-green-600 dark:text-green-400";
@@ -54,20 +72,31 @@ const OpeningTreeNode = ({ node, depth = 0, maxDepth = 10 }: OpeningTreeViewerPr
             node={child}
             depth={1}
             maxDepth={maxDepth}
+            onMoveClick={onMoveClick}
+            selectedPath={selectedPath}
+            currentPath={[]}
           />
         ))}
       </div>
     );
   }
+  
+  const handleClick = () => {
+    if (onMoveClick) {
+      onMoveClick(thisPath);
+    }
+  };
 
   return (
     <div className="space-y-1">
       <div
         className={cn(
-          "group flex items-center gap-2 py-2 px-3 rounded-lg transition-colors hover:bg-muted/50",
+          "group flex items-center gap-2 py-2 px-3 rounded-lg transition-colors cursor-pointer",
+          isSelected ? "bg-primary/20 hover:bg-primary/30" : "hover:bg-muted/50",
           depth > 0 && "ml-6"
         )}
         style={{ marginLeft: depth > 0 ? `${(depth - 1) * 24}px` : 0 }}
+        onClick={handleClick}
       >
         {/* Expand/Collapse Button */}
         {hasChildren && shouldShowChildren ? (
@@ -123,6 +152,9 @@ const OpeningTreeNode = ({ node, depth = 0, maxDepth = 10 }: OpeningTreeViewerPr
                 node={child}
                 depth={depth + 1}
                 maxDepth={maxDepth}
+                onMoveClick={onMoveClick}
+                selectedPath={selectedPath}
+                currentPath={thisPath}
               />
             ))}
         </div>
@@ -131,10 +163,21 @@ const OpeningTreeNode = ({ node, depth = 0, maxDepth = 10 }: OpeningTreeViewerPr
   );
 };
 
-export const OpeningTreeViewer = ({ node, maxDepth = 10 }: Omit<OpeningTreeViewerProps, 'depth'>) => {
+export const OpeningTreeViewer = ({ 
+  node, 
+  maxDepth = 10, 
+  onMoveClick,
+  selectedPath 
+}: Omit<OpeningTreeViewerProps, 'depth' | 'currentPath'>) => {
   return (
     <div className="space-y-1">
-      <OpeningTreeNode node={node} depth={0} maxDepth={maxDepth} />
+      <OpeningTreeNode 
+        node={node} 
+        depth={0} 
+        maxDepth={maxDepth} 
+        onMoveClick={onMoveClick}
+        selectedPath={selectedPath}
+      />
     </div>
   );
 };
