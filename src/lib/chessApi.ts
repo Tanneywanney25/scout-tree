@@ -214,61 +214,166 @@ export async function fetchLichessGames(
 
 export async function fetchChessComGames(
   username: string,
-  timeControl: string = "blitz"
+  options: FetchOptions = {},
+  onProgress?: (count: number) => void,
+  onBatch?: (games: GameData[]) => void
 ): Promise<GameData[]> {
-  const maxGames = 500; // Chess.com: limited to prevent rate limiting
+  const {
+    timeControls = ["blitz"],
+    mode = "all",
+    dateFrom,
+    dateTo,
+    ratingMin,
+    ratingMax,
+    opponentName
+  } = options;
+
+  const maxGames = 1000;
+  
+  // Chess.com usernames must be lowercase
+  const normalizedUsername = username.toLowerCase().trim();
+  
   // First get archives list
-  const archivesUrl = `https://api.chess.com/pub/player/${username}/games/archives`;
+  const archivesUrl = `https://api.chess.com/pub/player/${normalizedUsername}/games/archives`;
   
-  const archivesResponse = await fetch(archivesUrl, {
-    headers: {
-      "User-Agent": "ScoutTree/1.0 (contact: support@scouttree.com)",
-    },
-  });
-
-  if (!archivesResponse.ok) {
-    throw new Error(`Chess.com API error: ${archivesResponse.status}`);
-  }
-
-  const { archives } = await archivesResponse.json();
-  
-  // Fetch games from recent archives (last 3 months)
-  const recentArchives = archives.slice(-3);
-  const allGames: GameData[] = [];
-
-  for (const archiveUrl of recentArchives) {
-    // Rate limiting: wait 1 second between requests
-    if (allGames.length > 0) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-
-    const response = await fetch(archiveUrl, {
+  try {
+    const archivesResponse = await fetch(archivesUrl, {
       headers: {
         "User-Agent": "ScoutTree/1.0 (contact: support@scouttree.com)",
       },
     });
 
-    if (!response.ok) continue;
+    if (!archivesResponse.ok) {
+      if (archivesResponse.status === 404) {
+        throw new Error(`Chess.com user "${username}" not found. Make sure the username is correct.`);
+      }
+      throw new Error(`Chess.com API error: ${archivesResponse.status}`);
+    }
 
-    const data = await response.json();
-    const games = data.games
-      .filter((game: any) => {
-        if (timeControl === "all") return true;
-        return game.time_class === timeControl;
-      })
-      .map((game: any) => ({
-        pgn: game.pgn,
-        white: game.white.username,
-        black: game.black.username,
-        winner: game.white.result === "win" ? "white" : 
-                game.black.result === "win" ? "black" : undefined,
-        timeControl: game.time_class,
-      }));
-
-    allGames.push(...games);
+    const { archives } = await archivesResponse.json();
     
-    if (allGames.length >= maxGames) break;
-  }
+    if (!archives || archives.length === 0) {
+      throw new Error(`No game archives found for Chess.com user "${username}"`);
+    }
+    
+    // Filter archives by date range
+    let filteredArchives = archives;
+    if (dateFrom || dateTo) {
+      filteredArchives = archives.filter((archiveUrl: string) => {
+        const match = archiveUrl.match(/\/(\d{4})\/(\d{2})$/);
+        if (!match) return true;
+        
+        const [, year, month] = match;
+        const archiveDate = new Date(parseInt(year), parseInt(month) - 1);
+        
+        if (dateFrom && archiveDate < new Date(dateFrom.getFullYear(), dateFrom.getMonth())) {
+          return false;
+        }
+        if (dateTo && archiveDate > new Date(dateTo.getFullYear(), dateTo.getMonth() + 1)) {
+          return false;
+        }
+        
+        return true;
+      });
+    }
+    
+    // Process recent archives (reversed to get newest first)
+    const recentArchives = filteredArchives.slice(-6).reverse();
+    const allGames: GameData[] = [];
+    let count = 0;
 
-  return allGames.slice(0, maxGames);
+    for (const archiveUrl of recentArchives) {
+      // Rate limiting: wait 500ms between archive requests
+      if (count > 0) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      try {
+        const response = await fetch(archiveUrl, {
+          headers: {
+            "User-Agent": "ScoutTree/1.0 (contact: support@scouttree.com)",
+          },
+        });
+
+        if (!response.ok) {
+          console.warn(`Failed to fetch archive ${archiveUrl}:`, response.status);
+          continue;
+        }
+
+        const data = await response.json();
+        const batchGames: GameData[] = [];
+        
+        for (const game of data.games || []) {
+          // Apply filters
+          if (mode === "rated" && !game.rated) continue;
+          if (mode === "casual" && game.rated) continue;
+          
+          // Time control filter
+          if (timeControls.length > 0 && !timeControls.includes("all")) {
+            if (!timeControls.includes(game.time_class)) continue;
+          }
+          
+          // Date range filter (end_time is in seconds)
+          if (dateFrom && game.end_time < dateFrom.getTime() / 1000) continue;
+          if (dateTo && game.end_time > dateTo.getTime() / 1000) continue;
+          
+          // Rating filter
+          const opponentRating = game.white.username.toLowerCase() === normalizedUsername
+            ? game.black.rating
+            : game.white.rating;
+          
+          if (ratingMin && opponentRating < ratingMin) continue;
+          if (ratingMax && opponentRating > ratingMax) continue;
+          
+          // Opponent name filter
+          if (opponentName) {
+            const opponent = game.white.username.toLowerCase() === normalizedUsername
+              ? game.black.username
+              : game.white.username;
+            
+            if (opponent.toLowerCase() !== opponentName.toLowerCase()) continue;
+          }
+          
+          batchGames.push({
+            pgn: game.pgn,
+            white: game.white.username,
+            black: game.black.username,
+            winner: game.white.result === "win" ? "white" : 
+                    game.black.result === "win" ? "black" : undefined,
+            timeControl: game.time_class,
+          });
+          
+          count++;
+          if (count >= maxGames) break;
+        }
+        
+        allGames.push(...batchGames);
+        
+        // Send batch update
+        if (batchGames.length > 0 && onBatch) {
+          onBatch(batchGames);
+        }
+        
+        if (onProgress) {
+          onProgress(count);
+        }
+        
+        if (count >= maxGames) break;
+      } catch (error) {
+        console.warn(`Error processing archive ${archiveUrl}:`, error);
+        continue;
+      }
+    }
+
+    if (allGames.length === 0) {
+      throw new Error(`No games found for Chess.com user "${username}" with the selected filters`);
+    }
+
+    return allGames;
+  } catch (error: any) {
+    if (error.message.includes('Chess.com')) {
+      throw error;
+    }
+    throw new Error(`Failed to fetch Chess.com games: ${error.message}`);
+  }
 }
