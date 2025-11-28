@@ -54,6 +54,12 @@ const Scout = () => {
       return;
     }
 
+    // Prevent multiple simultaneous requests
+    if (loading) {
+      toast.error("Analysis already in progress. Please wait.");
+      return;
+    }
+
     setLoading(true);
     setProgress(null);
     setWarning(null);
@@ -81,7 +87,7 @@ const Scout = () => {
         }
       }
 
-      toast.loading("Fetching and analyzing games...");
+      const loadingToast = toast.loading("Fetching and analyzing games...");
 
       const actualPlatform = platform === "auto" ? "lichess" : platform;
       let analysis = createEmptyAnalysis(color);
@@ -193,7 +199,16 @@ const Scout = () => {
       }
     } catch (error: any) {
       console.error("Scout error:", error);
-      toast.error(error.message || "Failed to generate report. Try again.");
+      toast.dismiss(); // Dismiss all toasts including the loading one
+      
+      // Show specific error message for rate limiting
+      if (error.message?.includes('429') || error.message?.includes('rate limit')) {
+        toast.error("Rate limit exceeded. Please wait 10-20 seconds before trying again.", {
+          duration: 5000
+        });
+      } else {
+        toast.error(error.message || "Failed to generate report. Try again.");
+      }
     } finally {
       setLoading(false);
       setProgress(null);
