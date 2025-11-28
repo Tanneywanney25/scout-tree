@@ -7,22 +7,44 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { Search, Upload, Loader2 } from "lucide-react";
+import { Search, Upload, Loader2, ChevronDown } from "lucide-react";
 import { toast } from "sonner";
 import { fetchLichessGames, fetchChessComGames } from "@/lib/chessApi";
 import { analyzeGames, serializeOpeningTree, createEmptyAnalysis, analyzeGamesIncremental, type AnalysisResult } from "@/lib/chessAnalysis";
+import { Checkbox } from "@/components/ui/checkbox";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Calendar } from "@/components/ui/calendar";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { format } from "date-fns";
+import { CalendarIcon } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 const Scout = () => {
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [platform, setPlatform] = useState("lichess");
-  const [color, setColor] = useState("both");
-  const [timeControl, setTimeControl] = useState("blitz");
-  const [dateFilter, setDateFilter] = useState<"all" | "year" | "6months">("all");
+  const [color, setColor] = useState<"white" | "black">("white");
+  const [timeControls, setTimeControls] = useState<string[]>(["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"]);
+  const [mode, setMode] = useState<"all" | "rated" | "casual">("all");
+  const [dateFrom, setDateFrom] = useState<Date | undefined>(undefined);
+  const [dateTo, setDateTo] = useState<Date | undefined>(new Date());
+  const [ratingMin, setRatingMin] = useState<string>("");
+  const [ratingMax, setRatingMax] = useState<string>("");
+  const [opponentName, setOpponentName] = useState<string>("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [currentAnalysis, setCurrentAnalysis] = useState<AnalysisResult | null>(null);
+
+  const toggleTimeControl = (tc: string) => {
+    setTimeControls(prev => 
+      prev.includes(tc) 
+        ? prev.filter(t => t !== tc)
+        : [...prev, tc]
+    );
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,7 +60,8 @@ const Scout = () => {
     setCurrentAnalysis(null);
 
     try {
-      const cacheKey = `scout_${username}_${platform}_${timeControl}_${color}_${dateFilter}`;
+      const timeControlKey = timeControls.sort().join(",");
+      const cacheKey = `scout_${username}_${platform}_${timeControlKey}_${color}_${mode}_${dateFrom?.getTime()}_${dateTo?.getTime()}_${ratingMin}_${ratingMax}_${opponentName}`;
       
       // CLEAR CACHE to force fresh analysis with new logic
       localStorage.removeItem(cacheKey);
@@ -61,14 +84,17 @@ const Scout = () => {
       toast.loading("Fetching and analyzing games...");
 
       const actualPlatform = platform === "auto" ? "lichess" : platform;
-      let analysis = createEmptyAnalysis(color as "white" | "black" | "both");
+      let analysis = createEmptyAnalysis(color);
       let hasNavigated = false;
+      
+      // Use first time control for now (multi-time control support needs API updates)
+      const primaryTimeControl = timeControls[0] || "blitz";
       
       if (actualPlatform === "lichess") {
         await fetchLichessGames(
           username,
-          timeControl,
-          dateFilter,
+          primaryTimeControl,
+          dateFrom && dateTo ? "all" : "all", // Will need custom date range support
           (count) => {
             setProgress(count);
             
@@ -96,16 +122,16 @@ const Scout = () => {
                   isLive: true,
                   username,
                   platform: actualPlatform,
-                  timeControl,
+                  timeControls,
                   color,
-                  dateFilter
-                } 
+                  mode
+                }
               });
             }
           }
         );
       } else {
-        const games = await fetchChessComGames(username, timeControl);
+        const games = await fetchChessComGames(username, primaryTimeControl);
         
         if (games.length === 0) {
           toast.error("No games found for this user");
@@ -128,9 +154,14 @@ const Scout = () => {
           const reportData = {
             username,
             platform: actualPlatform,
-            timeControl,
+            timeControls,
             color,
-            dateFilter,
+            mode,
+            dateFrom,
+            dateTo,
+            ratingMin,
+            ratingMax,
+            opponentName,
             analysis: {
               ...analysis,
               openingTree: serializeOpeningTree(analysis.openingTree),
@@ -212,52 +243,126 @@ const Scout = () => {
                   </Select>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="color">Your Color</Label>
-                    <Select value={color} onValueChange={setColor}>
-                      <SelectTrigger id="color">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="both">Both Colors</SelectItem>
-                        <SelectItem value="white">White</SelectItem>
-                        <SelectItem value="black">Black</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
+                <div className="space-y-2">
+                  <Label>Your Color</Label>
+                  <RadioGroup value={color} onValueChange={(v) => setColor(v as "white" | "black")}>
+                    <div className="flex items-center space-x-4">
+                      <div className="flex items-center space-x-2">
+                        <RadioGroupItem value="white" id="white" />
+                        <Label htmlFor="white" className="font-normal cursor-pointer">White</Label>
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <RadioGroupItem value="black" id="black" />
+                        <Label htmlFor="black" className="font-normal cursor-pointer">Black</Label>
+                      </div>
+                    </div>
+                  </RadioGroup>
+                </div>
 
-                  <div className="space-y-2">
-                    <Label htmlFor="timeControl">Time Control</Label>
-                    <Select value={timeControl} onValueChange={setTimeControl}>
-                      <SelectTrigger id="timeControl">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="blitz">Blitz</SelectItem>
-                        <SelectItem value="rapid">Rapid</SelectItem>
-                        <SelectItem value="bullet">Bullet</SelectItem>
-                        <SelectItem value="classical">Classical</SelectItem>
-                      </SelectContent>
-                    </Select>
+                <div className="space-y-2">
+                  <Label>Time Controls</Label>
+                  <div className="grid grid-cols-2 gap-3">
+                    {["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"].map(tc => (
+                      <div key={tc} className="flex items-center space-x-2">
+                        <Checkbox 
+                          id={tc}
+                          checked={timeControls.includes(tc)}
+                          onCheckedChange={() => toggleTimeControl(tc)}
+                        />
+                        <Label htmlFor={tc} className="font-normal cursor-pointer capitalize">
+                          {tc}
+                        </Label>
+                      </div>
+                    ))}
                   </div>
                 </div>
 
-                {platform === "lichess" && (
-                  <div className="space-y-2">
-                    <Label htmlFor="dateFilter">Date Range</Label>
-                    <Select value={dateFilter} onValueChange={(v) => setDateFilter(v as "all" | "year" | "6months")}>
-                      <SelectTrigger id="dateFilter">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">All Time</SelectItem>
-                        <SelectItem value="year">Last Year</SelectItem>
-                        <SelectItem value="6months">Last 6 Months</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
+                <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
+                  <CollapsibleTrigger asChild>
+                    <Button variant="outline" className="w-full flex items-center justify-between">
+                      <span>Advanced Filters</span>
+                      <ChevronDown className={cn("h-4 w-4 transition-transform", advancedOpen && "rotate-180")} />
+                    </Button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="space-y-4 mt-4">
+                    <div className="space-y-2">
+                      <Label>Game Mode</Label>
+                      <RadioGroup value={mode} onValueChange={(v) => setMode(v as "all" | "rated" | "casual")}>
+                        <div className="flex flex-col space-y-2">
+                          <div className="flex items-center space-x-2">
+                            <RadioGroupItem value="all" id="all" />
+                            <Label htmlFor="all" className="font-normal cursor-pointer">Rated and Casual</Label>
+                          </div>
+                          <div className="flex items-center space-x-2">
+                            <RadioGroupItem value="rated" id="rated" />
+                            <Label htmlFor="rated" className="font-normal cursor-pointer">Rated Only</Label>
+                          </div>
+                          <div className="flex items-center space-x-2">
+                            <RadioGroupItem value="casual" id="casual" />
+                            <Label htmlFor="casual" className="font-normal cursor-pointer">Casual Only</Label>
+                          </div>
+                        </div>
+                      </RadioGroup>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Date Range</Label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <Button variant="outline" className={cn("justify-start text-left font-normal", !dateFrom && "text-muted-foreground")}>
+                              <CalendarIcon className="mr-2 h-4 w-4" />
+                              {dateFrom ? format(dateFrom, "PPP") : "From: Forever"}
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-auto p-0" align="start">
+                            <Calendar mode="single" selected={dateFrom} onSelect={setDateFrom} initialFocus className="pointer-events-auto" />
+                          </PopoverContent>
+                        </Popover>
+
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <Button variant="outline" className={cn("justify-start text-left font-normal", !dateTo && "text-muted-foreground")}>
+                              <CalendarIcon className="mr-2 h-4 w-4" />
+                              {dateTo ? format(dateTo, "PPP") : "To: Now"}
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-auto p-0" align="start">
+                            <Calendar mode="single" selected={dateTo} onSelect={setDateTo} initialFocus className="pointer-events-auto" />
+                          </PopoverContent>
+                        </Popover>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Opponent Rating Range</Label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Input
+                          placeholder="Min (any)"
+                          type="number"
+                          value={ratingMin}
+                          onChange={(e) => setRatingMin(e.target.value)}
+                        />
+                        <Input
+                          placeholder="Max (any)"
+                          type="number"
+                          value={ratingMax}
+                          onChange={(e) => setRatingMax(e.target.value)}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="opponentName">Opponent Name</Label>
+                      <Input
+                        id="opponentName"
+                        placeholder="All opponents"
+                        value={opponentName}
+                        onChange={(e) => setOpponentName(e.target.value)}
+                      />
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
 
                 {progress !== null && (
                   <div className="space-y-2">
