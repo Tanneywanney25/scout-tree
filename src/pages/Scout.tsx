@@ -87,14 +87,21 @@ const Scout = () => {
       let analysis = createEmptyAnalysis(color);
       let hasNavigated = false;
       
-      // Use first time control for now (multi-time control support needs API updates)
-      const primaryTimeControl = timeControls[0] || "blitz";
+      // Build options object with all filters
+      const fetchOptions = {
+        timeControls,
+        mode,
+        dateFrom,
+        dateTo,
+        ratingMin: ratingMin ? parseInt(ratingMin) : undefined,
+        ratingMax: ratingMax ? parseInt(ratingMax) : undefined,
+        opponentName: opponentName || undefined
+      };
       
       if (actualPlatform === "lichess") {
         await fetchLichessGames(
           username,
-          primaryTimeControl,
-          dateFrom && dateTo ? "all" : "all", // Will need custom date range support
+          fetchOptions,
           (count) => {
             setProgress(count);
             
@@ -131,7 +138,7 @@ const Scout = () => {
           }
         );
       } else {
-        const games = await fetchChessComGames(username, primaryTimeControl);
+        const games = await fetchChessComGames(username, timeControls[0] || "blitz");
         
         if (games.length === 0) {
           toast.error("No games found for this user");
