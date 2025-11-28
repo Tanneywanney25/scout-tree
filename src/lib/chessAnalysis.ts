@@ -74,6 +74,8 @@ export function analyzeGamesIncremental(
   let totalGames = existingAnalysis.totalGames;
   const playerColor = existingAnalysis.playerColor;
 
+  console.log(`[ANALYSIS] Starting incremental analysis for ${targetUsername}, playerColor: ${playerColor}, newGames: ${newGames.length}`);
+
   for (const game of newGames) {
     const chess = new Chess();
     
@@ -88,9 +90,13 @@ export function analyzeGamesIncremental(
 
     if (playerColor === "white" && !isWhite) continue;
     if (playerColor === "black" && !isBlack) continue;
-    if (!isWhite && !isBlack) continue;
+    if (!isWhite && !isBlack) {
+      console.log(`[ANALYSIS] Skipping game - player not found. White: ${game.white}, Black: ${game.black}`);
+      continue;
+    }
 
     totalGames++;
+    console.log(`[ANALYSIS] Processing game #${totalGames}: ${game.white} vs ${game.black}, target is ${isWhite ? 'white' : 'black'}`);
 
     let result: "win" | "draw" | "loss";
     if (!game.winner) {
@@ -108,6 +114,8 @@ export function analyzeGamesIncremental(
     let currentNode = rootNode;
     const maxPlies = Math.min(20, history.length);
 
+    console.log(`[ANALYSIS] Game ${totalGames} has ${history.length} total moves, analyzing first ${maxPlies} plies`);
+
     // Determine which moves belong to the target player
     // White plays on even indices (0, 2, 4...), Black plays on odd indices (1, 3, 5...)
     const targetPlaysMoveAtIndex = (index: number) => {
@@ -122,17 +130,21 @@ export function analyzeGamesIncremental(
       return false;
     };
 
+    let trackedMovesCount = 0;
     for (let i = 0; i < maxPlies; i++) {
       const move = history[i];
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
       
-      // Debug logging (first game only)
-      if (totalGames === 1 && i < 6) {
-        console.log(`Move ${i}: ${move.san}, isWhite: ${isWhite}, isBlack: ${isBlack}, playerColor: ${playerColor}, tracking: ${targetPlaysMoveAtIndex(i)}`);
+      const shouldTrack = targetPlaysMoveAtIndex(i);
+      
+      // Debug logging (first 3 games)
+      if (totalGames <= 3) {
+        console.log(`  Move ${i}: ${move.san}, shouldTrack: ${shouldTrack}, isWhite: ${isWhite}, isBlack: ${isBlack}`);
       }
 
       // Only track moves made by the target player
-      if (targetPlaysMoveAtIndex(i)) {
+      if (shouldTrack) {
+        trackedMovesCount++;
         if (!currentNode.children.has(moveKey)) {
           currentNode.children.set(moveKey, {
             move: moveKey,
@@ -158,8 +170,11 @@ export function analyzeGamesIncremental(
           : 0;
       }
     }
+    
+    console.log(`[ANALYSIS] Game ${totalGames} tracked ${trackedMovesCount} moves for target player`);
   }
 
+  console.log(`[ANALYSIS] Complete. Total games analyzed: ${totalGames}`);
   rootNode.count = totalGames;
 
   const allLines = extractAllLines(rootNode, "", []);
