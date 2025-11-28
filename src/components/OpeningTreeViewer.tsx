@@ -158,19 +158,32 @@ const OpeningTreeNode = ({
       {/* Children */}
       {isExpanded && hasChildren && shouldShowChildren && (
         <div className="animate-accordion-down">
-          {children
-            .sort((a, b) => b.count - a.count) // Sort by frequency
-            .map((child, index) => (
-              <OpeningTreeNode
-                key={child.key || index}
-                node={child}
-                depth={depth + 1}
-                maxDepth={maxDepth}
-                onMoveClick={onMoveClick}
-                selectedPath={selectedPath}
-                currentPath={thisPath}
-              />
-            ))}
+          {(() => {
+            // Sort children by frequency (most common first)
+            const sortedChildren = [...children].sort((a, b) => b.count - a.count);
+            
+            // Calculate max count for opacity scaling
+            const maxCount = sortedChildren[0]?.count || 1;
+            
+            return sortedChildren.map((child, index) => {
+              // Calculate opacity: most frequent = 1.0, scale down to 0.4 minimum
+              const frequency = child.count / maxCount;
+              const opacity = Math.max(0.4, frequency);
+              
+              return (
+                <div key={child.key || index} style={{ opacity }}>
+                  <OpeningTreeNode
+                    node={child}
+                    depth={depth + 1}
+                    maxDepth={maxDepth}
+                    onMoveClick={onMoveClick}
+                    selectedPath={selectedPath}
+                    currentPath={thisPath}
+                  />
+                </div>
+              );
+            });
+          })()}
         </div>
       )}
     </div>
