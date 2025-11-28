@@ -119,14 +119,15 @@ export function analyzeGamesIncremental(
     // Determine which moves belong to the target player
     // White plays on even indices (0, 2, 4...), Black plays on odd indices (1, 3, 5...)
     const targetPlaysMoveAtIndex = (index: number) => {
+      // When tracking "both", we track moves made by the player in THIS specific game
       if (playerColor === "both") {
-        // When tracking both colors, only track moves made by this player in THIS game
-        if (isWhite) return index % 2 === 0; // White's moves
-        if (isBlack) return index % 2 === 1; // Black's moves
+        if (isWhite) return index % 2 === 0; // Track white's moves when target is white
+        if (isBlack) return index % 2 === 1; // Track black's moves when target is black
         return false;
       }
-      if (isWhite) return index % 2 === 0; // White's moves
-      if (isBlack) return index % 2 === 1; // Black's moves
+      // When tracking specific color, only track that color's moves
+      if (playerColor === "white") return index % 2 === 0;
+      if (playerColor === "black") return index % 2 === 1;
       return false;
     };
 
@@ -251,14 +252,15 @@ export function analyzeGames(
 
     // Determine which moves belong to the target player
     const targetPlaysMoveAtIndex = (index: number) => {
+      // When tracking "both", we track moves made by the player in THIS specific game
       if (playerColor === "both") {
-        // When tracking both colors, only track moves made by this player in THIS game
-        if (isWhite) return index % 2 === 0;
-        if (isBlack) return index % 2 === 1;
+        if (isWhite) return index % 2 === 0; // Track white's moves when target is white
+        if (isBlack) return index % 2 === 1; // Track black's moves when target is black
         return false;
       }
-      if (isWhite) return index % 2 === 0;
-      if (isBlack) return index % 2 === 1;
+      // When tracking specific color, only track that color's moves
+      if (playerColor === "white") return index % 2 === 0;
+      if (playerColor === "black") return index % 2 === 1;
       return false;
     };
 

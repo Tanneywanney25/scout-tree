@@ -109,7 +109,7 @@ const OpeningTreeNode = ({
               e.stopPropagation();
               setIsExpanded(!isExpanded);
             }}
-            className="shrink-0 hover:bg-muted rounded p-0.5 transition-colors flex items-center justify-center"
+            className="shrink-0 hover:bg-muted rounded p-0.5 transition-colors w-5 h-5 flex items-center justify-center"
           >
             {isExpanded ? (
               <ChevronDown className="w-4 h-4 text-muted-foreground" />
