@@ -111,7 +111,12 @@ export function analyzeGamesIncremental(
     // Determine which moves belong to the target player
     // White plays on even indices (0, 2, 4...), Black plays on odd indices (1, 3, 5...)
     const targetPlaysMoveAtIndex = (index: number) => {
-      if (playerColor === "both") return true;
+      if (playerColor === "both") {
+        // When tracking both colors, only track moves made by this player in THIS game
+        if (isWhite) return index % 2 === 0; // White's moves
+        if (isBlack) return index % 2 === 1; // Black's moves
+        return false;
+      }
       if (isWhite) return index % 2 === 0; // White's moves
       if (isBlack) return index % 2 === 1; // Black's moves
       return false;
@@ -231,7 +236,12 @@ export function analyzeGames(
 
     // Determine which moves belong to the target player
     const targetPlaysMoveAtIndex = (index: number) => {
-      if (playerColor === "both") return true;
+      if (playerColor === "both") {
+        // When tracking both colors, only track moves made by this player in THIS game
+        if (isWhite) return index % 2 === 0;
+        if (isBlack) return index % 2 === 1;
+        return false;
+      }
       if (isWhite) return index % 2 === 0;
       if (isBlack) return index % 2 === 1;
       return false;
