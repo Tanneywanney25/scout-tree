@@ -144,15 +144,40 @@ const Scout = () => {
           }
         );
       } else {
-        const games = await fetchChessComGames(username, timeControls[0] || "blitz");
-        
-        if (games.length === 0) {
-          toast.error("No games found for this user");
-          setLoading(false);
-          return;
-        }
-
-        analysis = analyzeGamesIncremental(analysis, games, username);
+        await fetchChessComGames(
+          username,
+          fetchOptions,
+          (count) => {
+            setProgress(count);
+          },
+          (gameBatch) => {
+            // Analyze each batch as it arrives
+            analysis = analyzeGamesIncremental(analysis, gameBatch, username);
+            setProgress(analysis.totalGames);
+            
+            // Navigate to report as soon as we have 50+ games analyzed
+            if (!hasNavigated && analysis.totalGames >= 50) {
+              hasNavigated = true;
+              const reportData = {
+                ...analysis,
+                openingTree: serializeOpeningTree(analysis.openingTree),
+              };
+              
+              toast.success("Opening report - analysis continuing...");
+              navigate(`/report/${username}`, { 
+                state: { 
+                  ...reportData,
+                  isLive: true,
+                  username,
+                  platform: actualPlatform,
+                  timeControls,
+                  color,
+                  mode
+                }
+              });
+            }
+          }
+        );
       }
 
       if (analysis.totalGames === 0) {
