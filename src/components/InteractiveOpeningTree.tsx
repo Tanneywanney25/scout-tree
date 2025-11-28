@@ -109,6 +109,35 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
     setSelectedPath([]);
   };
 
+  // Handle piece moves on the board
+  const onDrop = ({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string }) => {
+    const chess = new Chess(currentPosition);
+    
+    // Find current node in tree
+    let currentNode = node;
+    for (const san of selectedPath) {
+      const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
+      if (!child) return;
+      currentNode = child;
+    }
+
+    // Try to make the move
+    try {
+      const move = chess.move({ from: sourceSquare, to: targetSquare, promotion: 'q' });
+      if (!move) return;
+
+      // Check if this move exists in the opening tree
+      const matchingChild = currentNode.children?.find((c: SerializedOpeningNode) => c.san === move.san);
+      
+      if (matchingChild) {
+        // Valid move in the tree - add it to selected path
+        setSelectedPath([...selectedPath, move.san]);
+      }
+    } catch (error) {
+      console.error("Invalid move:", error);
+    }
+  };
+
   return (
     <div className="flex gap-4 h-[calc(100vh-12rem)]">
       {/* Left: Move List */}
@@ -155,7 +184,8 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
           <Chessboard 
             position={currentPosition}
             orientation="white"
-            draggable={false}
+            draggable={true}
+            onDrop={onDrop}
             boardStyle={{
               borderRadius: '0.5rem',
             }}
