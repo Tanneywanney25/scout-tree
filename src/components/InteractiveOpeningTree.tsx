@@ -63,41 +63,34 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
       return [];
     }
 
-    // Determine whose turn it is
-    const isWhiteToMove = selectedPath.length % 2 === 0;
+    // Sort children by frequency to find the most common move
+    const sortedChildren = [...currentNode.children].sort((a, b) => b.count - a.count);
+    const mostCommonChild = sortedChildren[0];
     
-    // Calculate total count for normalization
-    const totalCount = currentNode.children.reduce((sum: number, child: SerializedOpeningNode) => sum + child.count, 0);
+    if (!mostCommonChild) {
+      return [];
+    }
     
-    // Create arrows for each possible move
+    // Create arrow ONLY for the most common move
     const chess = new Chess(currentPosition);
     const moveArrows: MoveArrow[] = [];
     
-    currentNode.children.forEach((child: SerializedOpeningNode) => {
-      try {
-        const move = chess.move(child.san);
-        if (move) {
-          // Calculate opacity based on frequency - MORE DRAMATIC DIFFERENCES
-          // Most common move = 1.0 opacity, scale down to 0.3 minimum for rare moves
-          const frequency = child.count / totalCount;
-          const opacity = Math.max(0.3, frequency);
-          
-          // Dark green for white moves, red for black moves
-          const color = isWhiteToMove ? `rgba(46, 125, 50, ${opacity})` : `rgba(198, 40, 40, ${opacity})`;
-          
-          moveArrows.push({
-            from: move.from,
-            to: move.to,
-            color,
-            opacity
-          });
-          
-          chess.undo();
-        }
-      } catch (error) {
-        console.error("Error processing move for arrow:", error);
+    try {
+      const move = chess.move(mostCommonChild.san);
+      if (move) {
+        // Dark green with full opacity for the most common move only
+        const color = 'rgba(34, 139, 34, 1.0)'; // Forest green, fully opaque
+        
+        moveArrows.push({
+          from: move.from,
+          to: move.to,
+          color,
+          opacity: 1.0
+        });
       }
-    });
+    } catch (error) {
+      console.error("Error processing move for arrow:", error);
+    }
     
     return moveArrows;
   }, [node, selectedPath, currentPosition]);
@@ -280,18 +273,9 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
                 refX="2"
                 refY="2"
                 orient="auto"
+                markerUnits="strokeWidth"
               >
-                <polygon points="0 0, 4 2, 0 4" fill="rgb(46, 125, 50)" />
-              </marker>
-              <marker
-                id="arrowhead-red"
-                markerWidth="4"
-                markerHeight="4"
-                refX="2"
-                refY="2"
-                orient="auto"
-              >
-                <polygon points="0 0, 4 2, 0 4" fill="rgb(198, 40, 40)" />
+                <polygon points="0 0, 4 2, 0 4" fill="rgba(34, 139, 34, 0)" fillOpacity="0" />
               </marker>
             </defs>
             {arrows.map((arrow, idx) => {
@@ -313,8 +297,6 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
-              const isGreen = arrow.color.includes('46, 125, 50');
-              
               return (
                 <line
                   key={idx}
@@ -325,7 +307,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
                   stroke={arrow.color}
                   strokeWidth="0.18"
                   strokeLinecap="round"
-                  markerEnd={`url(#arrowhead-${isGreen ? 'green' : 'red'})`}
+                  markerEnd="url(#arrowhead-green)"
                 />
               );
             })}
