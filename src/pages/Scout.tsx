@@ -10,7 +10,7 @@ import { Progress } from "@/components/ui/progress";
 import { Search, Upload, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { fetchLichessGames, fetchChessComGames } from "@/lib/chessApi";
-import { analyzeGames, serializeOpeningTree } from "@/lib/chessAnalysis";
+import { analyzeGames, serializeOpeningTree, createEmptyAnalysis, analyzeGamesIncremental, type AnalysisResult } from "@/lib/chessAnalysis";
 
 const Scout = () => {
   const navigate = useNavigate();
@@ -22,6 +22,7 @@ const Scout = () => {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const [currentAnalysis, setCurrentAnalysis] = useState<AnalysisResult | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -34,9 +35,9 @@ const Scout = () => {
     setLoading(true);
     setProgress(null);
     setWarning(null);
+    setCurrentAnalysis(null);
 
     try {
-      // Check cache first
       const cacheKey = `scout_${username}_${platform}_${timeControl}_${color}_${dateFilter}`;
       const cached = localStorage.getItem(cacheKey);
       
@@ -44,7 +45,6 @@ const Scout = () => {
         const cachedData = JSON.parse(cached);
         const cacheAge = Date.now() - cachedData.timestamp;
         
-        // Cache valid for 24 hours
         if (cacheAge < 24 * 60 * 60 * 1000) {
           toast.success("Loading cached report...");
           navigate(`/report/${username}`, { state: cachedData.analysis });
@@ -53,43 +53,55 @@ const Scout = () => {
         }
       }
 
-      toast.loading("Fetching games...");
+      toast.loading("Fetching and analyzing games...");
 
-      // Fetch games based on platform
-      let games;
+      // Initialize empty analysis
+      let analysis = createEmptyAnalysis(color as "white" | "black" | "both");
+      setCurrentAnalysis(analysis);
+
       const actualPlatform = platform === "auto" ? "lichess" : platform;
       
       if (actualPlatform === "lichess") {
-        games = await fetchLichessGames(username, timeControl, dateFilter, (count) => {
-          setProgress(count);
-          
-          // Show warning for large datasets
-          if (count > 2000 && !warning) {
-            setWarning("Large dataset detected - analysis may take 30+ seconds");
-            toast.warning("Large dataset detected - this may take a while...");
+        await fetchLichessGames(
+          username,
+          timeControl,
+          dateFilter,
+          (count) => {
+            setProgress(count);
+            
+            if (count > 2000 && !warning) {
+              setWarning("Large dataset detected - analyzing continuously...");
+            }
+          },
+          (gameBatch) => {
+            // Analyze each batch as it arrives
+            analysis = analyzeGamesIncremental(analysis, gameBatch, username);
+            setCurrentAnalysis({...analysis});
+            setProgress(analysis.totalGames);
           }
-        });
+        );
       } else {
-        games = await fetchChessComGames(username, timeControl);
+        const games = await fetchChessComGames(username, timeControl);
+        
+        if (games.length === 0) {
+          toast.error("No games found for this user");
+          setLoading(false);
+          return;
+        }
+
+        // Analyze Chess.com games in one batch (already limited)
+        analysis = analyzeGamesIncremental(analysis, games, username);
+        setCurrentAnalysis(analysis);
       }
 
-      if (games.length === 0) {
+      if (analysis.totalGames === 0) {
         toast.error("No games found for this user");
         setLoading(false);
         return;
       }
 
-      setProgress(games.length);
-      toast.loading(`Analyzing ${games.length} games...`);
-
-      // Analyze games
-      const analysis = analyzeGames(
-        games,
-        username,
-        color as "white" | "black" | "both"
-      );
-
-      // Add metadata
+      toast.success("Report generated!");
+      
       const reportData = {
         username,
         platform: actualPlatform,
@@ -103,10 +115,7 @@ const Scout = () => {
         timestamp: Date.now(),
       };
 
-      // Cache results
       localStorage.setItem(cacheKey, JSON.stringify(reportData));
-
-      toast.success("Report generated!");
       navigate(`/report/${username}`, { state: reportData.analysis });
     } catch (error: any) {
       console.error("Scout error:", error);
@@ -115,6 +124,7 @@ const Scout = () => {
       setLoading(false);
       setProgress(null);
       setWarning(null);
+      setCurrentAnalysis(null);
     }
   };
 
@@ -216,10 +226,21 @@ const Scout = () => {
                 {progress !== null && (
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">Fetching games...</span>
-                      <span className="font-medium">{progress} loaded</span>
+                      <span className="text-muted-foreground">
+                        {currentAnalysis ? 'Analyzing games...' : 'Fetching games...'}
+                      </span>
+                      <span className="font-medium">{progress} games</span>
                     </div>
                     <Progress value={100} className="h-2" />
+                    
+                    {currentAnalysis && currentAnalysis.totalGames > 0 && (
+                      <div className="text-xs text-muted-foreground space-y-1">
+                        <div>✓ {currentAnalysis.totalGames} games analyzed</div>
+                        {currentAnalysis.openingTree.children.size > 0 && (
+                          <div>✓ {currentAnalysis.openingTree.children.size} opening moves found</div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 

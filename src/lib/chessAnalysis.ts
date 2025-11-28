@@ -44,6 +44,119 @@ export interface SerializedAnalysisResult {
   playerColor: "white" | "black" | "both";
 }
 
+export function createEmptyAnalysis(playerColor: "white" | "black" | "both" = "both"): AnalysisResult {
+  const rootNode: OpeningNode = {
+    move: "",
+    san: "Start",
+    count: 0,
+    wins: 0,
+    draws: 0,
+    losses: 0,
+    winRate: 0,
+    children: new Map(),
+  };
+
+  return {
+    totalGames: 0,
+    openingTree: rootNode,
+    weakestLines: [],
+    strongestLines: [],
+    playerColor,
+  };
+}
+
+export function analyzeGamesIncremental(
+  existingAnalysis: AnalysisResult,
+  newGames: GameData[],
+  targetUsername: string
+): AnalysisResult {
+  const rootNode = existingAnalysis.openingTree;
+  let totalGames = existingAnalysis.totalGames;
+  const playerColor = existingAnalysis.playerColor;
+
+  for (const game of newGames) {
+    const chess = new Chess();
+    
+    try {
+      chess.loadPgn(game.pgn);
+    } catch (e) {
+      continue;
+    }
+
+    const isWhite = game.white.toLowerCase() === targetUsername.toLowerCase();
+    const isBlack = game.black.toLowerCase() === targetUsername.toLowerCase();
+
+    if (playerColor === "white" && !isWhite) continue;
+    if (playerColor === "black" && !isBlack) continue;
+    if (!isWhite && !isBlack) continue;
+
+    totalGames++;
+
+    let result: "win" | "draw" | "loss";
+    if (!game.winner) {
+      result = "draw";
+    } else if (
+      (game.winner === "white" && isWhite) ||
+      (game.winner === "black" && isBlack)
+    ) {
+      result = "win";
+    } else {
+      result = "loss";
+    }
+
+    const history = chess.history({ verbose: true });
+    let currentNode = rootNode;
+    const maxPlies = Math.min(20, history.length);
+
+    for (let i = 0; i < maxPlies; i++) {
+      const move = history[i];
+      const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
+
+      if (!currentNode.children.has(moveKey)) {
+        currentNode.children.set(moveKey, {
+          move: moveKey,
+          san: move.san,
+          count: 0,
+          wins: 0,
+          draws: 0,
+          losses: 0,
+          winRate: 0,
+          children: new Map(),
+        });
+      }
+
+      currentNode = currentNode.children.get(moveKey)!;
+      currentNode.count++;
+
+      if (result === "win") currentNode.wins++;
+      else if (result === "draw") currentNode.draws++;
+      else currentNode.losses++;
+
+      currentNode.winRate = currentNode.count > 0 
+        ? (currentNode.wins + currentNode.draws * 0.5) / currentNode.count 
+        : 0;
+    }
+  }
+
+  rootNode.count = totalGames;
+
+  const allLines = extractAllLines(rootNode, "", []);
+  const sortedByWinRate = allLines
+    .filter(line => line.count >= 3)
+    .sort((a, b) => a.winRate - b.winRate);
+
+  const weakestLines = sortedByWinRate.slice(0, 5);
+  const strongestLines = sortedByWinRate.slice(-5).reverse();
+
+  return {
+    totalGames,
+    openingTree: rootNode,
+    weakestLines,
+    strongestLines,
+    playerColor,
+  };
+}
+
 export function analyzeGames(
   games: GameData[],
   targetUsername: string,
