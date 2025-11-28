@@ -5,6 +5,13 @@ import { OpeningTreeViewer } from "./OpeningTreeViewer";
 import { Button } from "./ui/button";
 import { RotateCcw } from "lucide-react";
 
+interface MoveArrow {
+  from: string;
+  to: string;
+  color: string;
+  opacity: number;
+}
+
 interface SerializedOpeningNode {
   move: string;
   san: string;
@@ -40,6 +47,59 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
     
     return chess.fen();
   }, [selectedPath]);
+
+  // Find current node in tree and calculate arrows
+  const arrows = useMemo(() => {
+    let currentNode = node;
+    
+    // Navigate to current position in tree
+    for (const san of selectedPath) {
+      const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
+      if (!child) break;
+      currentNode = child;
+    }
+
+    if (!currentNode.children || currentNode.children.length === 0) {
+      return [];
+    }
+
+    // Determine whose turn it is
+    const isWhiteToMove = selectedPath.length % 2 === 0;
+    
+    // Calculate total count for normalization
+    const totalCount = currentNode.children.reduce((sum: number, child: SerializedOpeningNode) => sum + child.count, 0);
+    
+    // Create arrows for each possible move
+    const chess = new Chess(currentPosition);
+    const moveArrows: MoveArrow[] = [];
+    
+    currentNode.children.forEach((child: SerializedOpeningNode) => {
+      try {
+        const move = chess.move(child.san);
+        if (move) {
+          // Calculate opacity based on frequency (0.3 to 1.0)
+          const frequency = child.count / totalCount;
+          const opacity = Math.max(0.3, Math.min(1.0, frequency * 2));
+          
+          // Green for white moves, red for black moves
+          const color = isWhiteToMove ? `rgba(34, 197, 94, ${opacity})` : `rgba(239, 68, 68, ${opacity})`;
+          
+          moveArrows.push({
+            from: move.from,
+            to: move.to,
+            color,
+            opacity
+          });
+          
+          chess.undo();
+        }
+      } catch (error) {
+        console.error("Error processing move for arrow:", error);
+      }
+    });
+    
+    return moveArrows;
+  }, [node, selectedPath, currentPosition]);
 
   const handleMoveClick = (movePath: string[]) => {
     setSelectedPath(movePath);
@@ -91,7 +151,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
 
       {/* Center: Chess Board */}
       <div className="flex-1 flex items-center justify-center">
-        <div className="aspect-square w-full max-w-[min(calc(100vh-14rem),100%)] border-2 border-border rounded-lg overflow-hidden shadow-lg">
+        <div className="relative aspect-square w-full max-w-[min(calc(100vh-14rem),100%)] border-2 border-border rounded-lg overflow-hidden shadow-lg">
           <Chessboard 
             position={currentPosition}
             orientation="white"
@@ -100,6 +160,71 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
               borderRadius: '0.5rem',
             }}
           />
+          
+          {/* Arrow overlay */}
+          <svg 
+            className="absolute inset-0 pointer-events-none" 
+            viewBox="0 0 8 8"
+            style={{ width: '100%', height: '100%' }}
+          >
+            <defs>
+              <marker
+                id="arrowhead-green"
+                markerWidth="4"
+                markerHeight="4"
+                refX="2"
+                refY="2"
+                orient="auto"
+              >
+                <polygon points="0 0, 4 2, 0 4" fill="rgb(34, 197, 94)" />
+              </marker>
+              <marker
+                id="arrowhead-red"
+                markerWidth="4"
+                markerHeight="4"
+                refX="2"
+                refY="2"
+                orient="auto"
+              >
+                <polygon points="0 0, 4 2, 0 4" fill="rgb(239, 68, 68)" />
+              </marker>
+            </defs>
+            {arrows.map((arrow, idx) => {
+              const fromFile = arrow.from.charCodeAt(0) - 97;
+              const fromRank = 8 - parseInt(arrow.from[1]);
+              const toFile = arrow.to.charCodeAt(0) - 97;
+              const toRank = 8 - parseInt(arrow.to[1]);
+              
+              const x1 = fromFile + 0.5;
+              const y1 = fromRank + 0.5;
+              const x2 = toFile + 0.5;
+              const y2 = toRank + 0.5;
+              
+              // Shorten arrow to prevent overlap with piece
+              const dx = x2 - x1;
+              const dy = y2 - y1;
+              const length = Math.sqrt(dx * dx + dy * dy);
+              const shortenBy = 0.25;
+              const x2Shortened = x2 - (dx / length) * shortenBy;
+              const y2Shortened = y2 - (dy / length) * shortenBy;
+              
+              const isGreen = arrow.color.includes('34, 197, 94');
+              
+              return (
+                <line
+                  key={idx}
+                  x1={x1}
+                  y1={y1}
+                  x2={x2Shortened}
+                  y2={y2Shortened}
+                  stroke={arrow.color}
+                  strokeWidth="0.15"
+                  strokeLinecap="round"
+                  markerEnd={`url(#arrowhead-${isGreen ? 'green' : 'red'})`}
+                />
+              );
+            })}
+          </svg>
         </div>
       </div>
 
