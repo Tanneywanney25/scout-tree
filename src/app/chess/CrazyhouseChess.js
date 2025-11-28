@@ -1,58 +1,71 @@
-// src/app/chess/CrazyhouseChess.js
+import Chess from 'chess.js'
 
-import { Chess } from 'chess.js'
-
-export default class CrazyhouseChess extends Chess {
-  constructor(fen) {
-    super(fen)
-    this.variant = 'crazyhouse'
-    this.pockets = {
-      white: [],
-      black: []
+export default class CrazyhouseChess {
+    constructor(fen){
+        if(process.env.NODE_ENV==="test") {
+            this.chess= new (Chess.Chess)(fen)
+        } else {
+            this.chess = new Chess(fen);
+        }
+        this.SQUARES = this.chess.SQUARES
     }
-  }
-
-  capture(move) {
-    const result = super.move(move)
-    if (result && result.captured) {
-      const color = this.turn() === 'w' ? 'black' : 'white'
-      let piece = result.captured
-      
-      // Pawns and promoted pieces become pawns
-      if (piece === 'p' || result.flags.includes('p')) {
-        piece = 'p'
-      }
-      
-      this.pockets[color].push(piece)
+    fen(){
+        return this.chess.fen()
     }
-    return result
-  }
+    turn() {
+        return this.chess.turn()
+    }
+    moves(options) {
+        return this.chess.moves(options)
+    }
+    load(fen) {
+        this.chess.load(fen)
+    }
+    move(moveObject, options) {
+        let move = this.chess.move(moveObject, options)
+        if(move) {
+            return move
+        }
+        if(typeof moveObject === "string") {
+            return this.moveSan(moveObject)
+        } else {
+            return this.moveSan(moveObject.san)
+        }
+    }
 
-  drop(piece, square) {
-    // Implement drop logic for Crazyhouse
-    const color = this.turn()
-    const pocketColor = color === 'w' ? 'white' : 'black'
+    moveSan(san) {
+        if(san.includes('@')){
+            let locationOfAt = san.indexOf('@')
+            let piece = ''
+            if(locationOfAt === 0) {
+                piece = this.chess.PAWN
+            } else {
+                piece = san.charAt(0).toLowerCase()
+            }
+            let location = san.slice(locationOfAt+1,locationOfAt+3)
+            let success = this.chess.put({type:piece, color:this.turn()}, location)
+            if(!success) {
+                return null
+            }
+            let color = this.turn()
+
+            this.toggleTurn()
+            return {
+                color: color,
+                from:location,
+                to:location,
+                san:san
+            }
+        }
+        return null
+    }
+    toggleTurn() {
+        var tokens = this.chess.fen().split(' ');
+        // switch the color
+        tokens[1] = tokens[1] === 'b'? 'w' : 'b'
+        // remove en passent
+        tokens[3] = '-'
+        this.chess.load(tokens.join(' '));
+    }
     
-    const index = this.pockets[pocketColor].indexOf(piece.toLowerCase())
-    if (index === -1) return null
-    
-    // Remove from pocket and place on board
-    this.pockets[pocketColor].splice(index, 1)
-    
-    // Create artificial move
-    return {
-      from: 'pocket',
-      to: square,
-      piece: piece,
-      color: color,
-      flags: 'd' // drop
-    }
-  }
-
-  move(move, options) {
-    if (typeof move === 'object' && move.from === 'pocket') {
-      return this.drop(move.piece, move.to)
-    }
-    return this.capture(move, options)
-  }
 }
