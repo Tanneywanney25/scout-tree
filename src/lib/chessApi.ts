@@ -35,22 +35,37 @@ export async function fetchLichessGames(
     opponentName
   } = options;
 
-  // If multiple time controls selected, fetch all of them
+  // If multiple time controls selected, fetch them SEQUENTIALLY to avoid 429 rate limit
   if (timeControls.length > 1) {
     const allGames: GameData[] = [];
     let totalCount = 0;
     
+    // SEQUENTIAL fetching - await each request before starting the next
     for (const tc of timeControls) {
-      const tcGames = await fetchLichessGames(
-        username,
-        { ...options, timeControls: [tc] },
-        (count) => {
-          totalCount += count;
-          if (onProgress) onProgress(totalCount);
-        },
-        onBatch
-      );
-      allGames.push(...tcGames);
+      try {
+        const tcGames = await fetchLichessGames(
+          username,
+          { ...options, timeControls: [tc] },
+          (count) => {
+            totalCount = allGames.length + count;
+            if (onProgress) onProgress(totalCount);
+          },
+          onBatch
+        );
+        allGames.push(...tcGames);
+        
+        // Add small delay between time controls to respect rate limits
+        if (timeControls.indexOf(tc) < timeControls.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      } catch (error: any) {
+        // If we hit rate limit, stop and return what we have
+        if (error.message.includes('429') || error.message.includes('rate limit')) {
+          console.warn(`Rate limit hit at time control ${tc}, returning ${allGames.length} games`);
+          break;
+        }
+        throw error;
+      }
     }
     
     return allGames;
@@ -86,6 +101,9 @@ export async function fetchLichessGames(
   });
 
   if (!response.ok) {
+    if (response.status === 429) {
+      throw new Error(`Rate limit exceeded. Lichess allows only 1 request at a time. Please wait a moment and try again.`);
+    }
     throw new Error(`Lichess API error: ${response.status} ${response.statusText}`);
   }
 
