@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { Chess } from "chess.js";
-import { Chessboard } from "react-chessboard";
+import Chessboard from "chessboardjsx";
 import { OpeningTreeViewer } from "./OpeningTreeViewer";
 import { Button } from "./ui/button";
 import { RotateCcw } from "lucide-react";
@@ -69,9 +69,9 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
         <div className="aspect-square w-full max-w-[500px] mx-auto border-2 border-border rounded-lg overflow-hidden shadow-lg">
           <Chessboard 
             position={currentPosition}
-            boardOrientation="white"
-            arePiecesDraggable={false}
-            customBoardStyle={{
+            orientation="white"
+            draggable={false}
+            boardStyle={{
               borderRadius: '0.5rem',
             }}
           />
