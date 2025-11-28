@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ChevronRight, ChevronDown } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { getOpeningName } from "@/lib/openings";
 
 interface SerializedOpeningNode {
   move: string;
@@ -49,6 +50,9 @@ const OpeningTreeNode = ({
   
   // Build the path to this node
   const thisPath = depth === 0 ? [] : [...currentPath, node.san];
+  
+  // Get opening name for this position
+  const openingName = thisPath.length > 0 ? getOpeningName(thisPath) : null;
 
   const getWinRateColor = (winRate: number) => {
     if (winRate >= 0.6) return "text-green-600 dark:text-green-400";
@@ -124,6 +128,13 @@ const OpeningTreeNode = ({
         <code className="font-mono text-sm font-semibold text-foreground min-w-[60px]">
           {node.san}
         </code>
+
+        {/* Opening Name */}
+        {openingName && (
+          <Badge variant="outline" className="text-xs shrink-0 bg-primary/10 text-primary border-primary/20">
+            {openingName}
+          </Badge>
+        )}
 
         {/* Frequency Badge */}
         <Badge variant="secondary" className="text-xs shrink-0">
