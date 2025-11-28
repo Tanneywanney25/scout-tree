@@ -68,13 +68,11 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
         
         <div className="aspect-square w-full max-w-[500px] mx-auto border-2 border-border rounded-lg overflow-hidden shadow-lg">
           <Chessboard 
-            options={{
-              position: currentPosition,
-              boardOrientation: "white",
-              allowDragging: false,
-              boardStyle: {
-                borderRadius: '0.5rem',
-              }
+            position={currentPosition}
+            boardOrientation="white"
+            arePiecesDraggable={false}
+            customBoardStyle={{
+              borderRadius: '0.5rem',
             }}
           />
         </div>
