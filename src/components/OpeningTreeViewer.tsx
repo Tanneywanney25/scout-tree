@@ -105,8 +105,11 @@ const OpeningTreeNode = ({
         {/* Expand/Collapse Button */}
         {hasChildren && shouldShowChildren ? (
           <button
-            onClick={() => setIsExpanded(!isExpanded)}
-            className="shrink-0 hover:bg-muted rounded p-0.5 transition-colors"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsExpanded(!isExpanded);
+            }}
+            className="shrink-0 hover:bg-muted rounded p-0.5 transition-colors flex items-center justify-center"
           >
             {isExpanded ? (
               <ChevronDown className="w-4 h-4 text-muted-foreground" />
