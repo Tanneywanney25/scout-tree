@@ -1,12 +1,8 @@
-import Chess from 'chess.js'
+import { Chess } from 'chess.js'
 
 export default class RacingKingsChess {
     constructor(fen){
-        if(process.env.NODE_ENV==="test") {
-            this.chess=new (Chess.Chess)(fen);
-        } else {
-            this.chess = new Chess(fen);
-        }
+        this.chess = new Chess(fen);
         this.SQUARES = this.chess.SQUARES
     }
     fen(){
