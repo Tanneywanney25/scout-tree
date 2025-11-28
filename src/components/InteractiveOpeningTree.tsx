@@ -1,9 +1,9 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Chess } from "chess.js";
 import Chessboard from "chessboardjsx";
 import { OpeningTreeViewer } from "./OpeningTreeViewer";
 import { Button } from "./ui/button";
-import { RotateCcw } from "lucide-react";
+import { RotateCcw, FlipVertical } from "lucide-react";
 
 interface MoveArrow {
   from: string;
@@ -31,6 +31,7 @@ interface InteractiveOpeningTreeProps {
 
 export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeningTreeProps) => {
   const [selectedPath, setSelectedPath] = useState<string[]>([]);
+  const [boardOrientation, setBoardOrientation] = useState<"white" | "black">("white");
 
   // Calculate the current position based on selected moves
   const currentPosition = useMemo(() => {
@@ -109,6 +110,54 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
     setSelectedPath([]);
   };
 
+  const handleFlipBoard = () => {
+    setBoardOrientation(prev => prev === "white" ? "black" : "white");
+  };
+
+  const handleMoveBack = () => {
+    if (selectedPath.length > 0) {
+      setSelectedPath(selectedPath.slice(0, -1));
+    }
+  };
+
+  const handleMoveForward = () => {
+    // Find current node
+    let currentNode = node;
+    for (const san of selectedPath) {
+      const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
+      if (!child) return;
+      currentNode = child;
+    }
+    
+    // Move to most popular child if available
+    if (currentNode.children && currentNode.children.length > 0) {
+      const mostPopular = currentNode.children.reduce((prev, curr) => 
+        curr.count > prev.count ? curr : prev
+      );
+      setSelectedPath([...selectedPath, mostPopular.san]);
+    }
+  };
+
+  const handleJumpToMove = (moveIndex: number) => {
+    setSelectedPath(selectedPath.slice(0, moveIndex));
+  };
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        handleMoveBack();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        handleMoveForward();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedPath, node]);
+
   // Handle piece moves on the board
   const onDrop = ({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string }) => {
     const chess = new Chess(currentPosition);
@@ -144,14 +193,25 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
       <div className="w-64 flex-shrink-0 space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold">Moves</h3>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleReset}
-            disabled={selectedPath.length === 0}
-          >
-            <RotateCcw className="w-4 h-4" />
-          </Button>
+          <div className="flex gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleFlipBoard}
+              title="Flip board"
+            >
+              <FlipVertical className="w-4 h-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleReset}
+              disabled={selectedPath.length === 0}
+              title="Reset to start"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </Button>
+          </div>
         </div>
         
         {/* Move sequence display */}
@@ -161,19 +221,34 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
               {Array.from({ length: Math.ceil(selectedPath.length / 2) }).map((_, pairIndex) => {
                 const whiteMove = selectedPath[pairIndex * 2];
                 const blackMove = selectedPath[pairIndex * 2 + 1];
+                const whiteMoveIndex = pairIndex * 2;
+                const blackMoveIndex = pairIndex * 2 + 1;
+                
                 return (
                   <div key={pairIndex} className="flex items-start gap-2 text-sm font-mono">
                     <span className="text-muted-foreground w-6">{pairIndex + 1}.</span>
                     <div className="flex gap-4 flex-1">
-                      <span className="font-semibold">{whiteMove}</span>
-                      {blackMove && <span className="font-semibold">{blackMove}</span>}
+                      <span 
+                        className="font-semibold cursor-pointer hover:text-primary transition-colors"
+                        onClick={() => handleJumpToMove(whiteMoveIndex + 1)}
+                      >
+                        {whiteMove}
+                      </span>
+                      {blackMove && (
+                        <span 
+                          className="font-semibold cursor-pointer hover:text-primary transition-colors"
+                          onClick={() => handleJumpToMove(blackMoveIndex + 1)}
+                        >
+                          {blackMove}
+                        </span>
+                      )}
                     </div>
                   </div>
                 );
               })}
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground">No moves yet. Click on moves in the opening tree.</p>
+            <p className="text-sm text-muted-foreground">No moves yet. Click on moves in the opening tree or use arrow keys.</p>
           )}
         </div>
       </div>
@@ -183,7 +258,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
         <div className="relative aspect-square w-full max-w-[min(calc(100vh-14rem),100%)] border-2 border-border rounded-lg overflow-hidden shadow-lg">
           <Chessboard 
             position={currentPosition}
-            orientation="white"
+            orientation={boardOrientation}
             draggable={true}
             onDrop={onDrop}
             boardStyle={{
