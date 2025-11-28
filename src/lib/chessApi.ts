@@ -12,10 +12,22 @@ export interface GameData {
 export async function fetchLichessGames(
   username: string,
   timeControl: string = "blitz",
-  maxGames: number = 500
+  dateFilter: "all" | "year" | "6months" = "all",
+  onProgress?: (count: number) => void
 ): Promise<GameData[]> {
   const perfType = timeControl === "all" ? "" : `&perfType=${timeControl}`;
-  const url = `https://lichess.org/api/games/user/${username}?max=${maxGames}${perfType}&pgnInJson=true`;
+  
+  // Calculate since timestamp for date filtering
+  let sinceParam = "";
+  if (dateFilter === "year") {
+    const yearAgo = Date.now() - (365 * 24 * 60 * 60 * 1000);
+    sinceParam = `&since=${yearAgo}`;
+  } else if (dateFilter === "6months") {
+    const sixMonthsAgo = Date.now() - (180 * 24 * 60 * 60 * 1000);
+    sinceParam = `&since=${sixMonthsAgo}`;
+  }
+  
+  const url = `https://lichess.org/api/games/user/${username}?${perfType}&pgnInJson=true&rated=true${sinceParam}`;
 
   const response = await fetch(url, {
     headers: {
@@ -27,29 +39,70 @@ export async function fetchLichessGames(
     throw new Error(`Lichess API error: ${response.status} ${response.statusText}`);
   }
 
-  const text = await response.text();
-  const lines = text.trim().split("\n").filter(line => line.trim());
-  
-  const games: GameData[] = lines.map(line => {
-    const game = JSON.parse(line);
-    return {
-      pgn: game.pgn,
-      white: game.players.white.user?.name || "Unknown",
-      black: game.players.black.user?.name || "Unknown",
-      winner: game.winner,
-      opening: game.opening?.name,
-      timeControl: game.speed,
-    };
-  });
+  // Stream processing for large datasets
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("Failed to get response reader");
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const games: GameData[] = [];
+  let count = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      
+      // Keep incomplete line in buffer
+      buffer = lines.pop() || '';
+      
+      // Process all complete lines
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const game = JSON.parse(line);
+            games.push({
+              pgn: game.pgn,
+              white: game.players.white.user?.name || "Unknown",
+              black: game.players.black.user?.name || "Unknown",
+              winner: game.winner,
+              opening: game.opening?.name,
+              timeControl: game.speed,
+            });
+            count++;
+            
+            // Update progress every 50 games
+            if (count % 50 === 0 && onProgress) {
+              onProgress(count);
+            }
+          } catch (e) {
+            console.warn("Failed to parse game line:", e);
+          }
+        }
+      }
+    }
+    
+    // Final progress update
+    if (onProgress && count > 0) {
+      onProgress(count);
+    }
+  } finally {
+    reader.releaseLock();
+  }
 
   return games;
 }
 
 export async function fetchChessComGames(
   username: string,
-  timeControl: string = "blitz",
-  maxGames: number = 500
+  timeControl: string = "blitz"
 ): Promise<GameData[]> {
+  const maxGames = 500; // Chess.com: limited to prevent rate limiting
   // First get archives list
   const archivesUrl = `https://api.chess.com/pub/player/${username}/games/archives`;
   
