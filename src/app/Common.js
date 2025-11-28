@@ -31,3 +31,18 @@ export function sanitizeHeaders(headers) {
 export function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
+
+export function lichessPerf(variant) {
+  const variantMap = {
+    'standard': 'standard',
+    'crazyhouse': 'crazyhouse',
+    'racingKings': 'racingKings',
+    'threeCheck': 'threeCheck',
+    'antichess': 'antichess',
+    'atomic': 'atomic',
+    'horde': 'horde',
+    'kingOfTheHill': 'kingOfTheHill'
+  }
+  
+  return variantMap[variant] || 'standard'
+}
