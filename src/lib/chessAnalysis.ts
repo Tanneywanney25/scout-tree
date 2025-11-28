@@ -108,33 +108,45 @@ export function analyzeGamesIncremental(
     let currentNode = rootNode;
     const maxPlies = Math.min(20, history.length);
 
+    // Determine which moves belong to the target player
+    // White plays on even indices (0, 2, 4...), Black plays on odd indices (1, 3, 5...)
+    const targetPlaysMoveAtIndex = (index: number) => {
+      if (playerColor === "both") return true;
+      if (isWhite) return index % 2 === 0; // White's moves
+      if (isBlack) return index % 2 === 1; // Black's moves
+      return false;
+    };
+
     for (let i = 0; i < maxPlies; i++) {
       const move = history[i];
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
 
-      if (!currentNode.children.has(moveKey)) {
-        currentNode.children.set(moveKey, {
-          move: moveKey,
-          san: move.san,
-          count: 0,
-          wins: 0,
-          draws: 0,
-          losses: 0,
-          winRate: 0,
-          children: new Map(),
-        });
+      // Only track moves made by the target player
+      if (targetPlaysMoveAtIndex(i)) {
+        if (!currentNode.children.has(moveKey)) {
+          currentNode.children.set(moveKey, {
+            move: moveKey,
+            san: move.san,
+            count: 0,
+            wins: 0,
+            draws: 0,
+            losses: 0,
+            winRate: 0,
+            children: new Map(),
+          });
+        }
+
+        currentNode = currentNode.children.get(moveKey)!;
+        currentNode.count++;
+
+        if (result === "win") currentNode.wins++;
+        else if (result === "draw") currentNode.draws++;
+        else currentNode.losses++;
+
+        currentNode.winRate = currentNode.count > 0 
+          ? (currentNode.wins + currentNode.draws * 0.5) / currentNode.count 
+          : 0;
       }
-
-      currentNode = currentNode.children.get(moveKey)!;
-      currentNode.count++;
-
-      if (result === "win") currentNode.wins++;
-      else if (result === "draw") currentNode.draws++;
-      else currentNode.losses++;
-
-      currentNode.winRate = currentNode.count > 0 
-        ? (currentNode.wins + currentNode.draws * 0.5) / currentNode.count 
-        : 0;
     }
   }
 
@@ -212,33 +224,44 @@ export function analyzeGames(
     let currentNode = rootNode;
     const maxPlies = Math.min(20, history.length);
 
+    // Determine which moves belong to the target player
+    const targetPlaysMoveAtIndex = (index: number) => {
+      if (playerColor === "both") return true;
+      if (isWhite) return index % 2 === 0;
+      if (isBlack) return index % 2 === 1;
+      return false;
+    };
+
     for (let i = 0; i < maxPlies; i++) {
       const move = history[i];
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
 
-      if (!currentNode.children.has(moveKey)) {
-        currentNode.children.set(moveKey, {
-          move: moveKey,
-          san: move.san,
-          count: 0,
-          wins: 0,
-          draws: 0,
-          losses: 0,
-          winRate: 0,
-          children: new Map(),
-        });
+      // Only track moves made by the target player
+      if (targetPlaysMoveAtIndex(i)) {
+        if (!currentNode.children.has(moveKey)) {
+          currentNode.children.set(moveKey, {
+            move: moveKey,
+            san: move.san,
+            count: 0,
+            wins: 0,
+            draws: 0,
+            losses: 0,
+            winRate: 0,
+            children: new Map(),
+          });
+        }
+
+        currentNode = currentNode.children.get(moveKey)!;
+        currentNode.count++;
+
+        if (result === "win") currentNode.wins++;
+        else if (result === "draw") currentNode.draws++;
+        else currentNode.losses++;
+
+        currentNode.winRate = currentNode.count > 0 
+          ? (currentNode.wins + currentNode.draws * 0.5) / currentNode.count 
+          : 0;
       }
-
-      currentNode = currentNode.children.get(moveKey)!;
-      currentNode.count++;
-
-      if (result === "win") currentNode.wins++;
-      else if (result === "draw") currentNode.draws++;
-      else currentNode.losses++;
-
-      currentNode.winRate = currentNode.count > 0 
-        ? (currentNode.wins + currentNode.draws * 0.5) / currentNode.count 
-        : 0;
     }
   }
 
