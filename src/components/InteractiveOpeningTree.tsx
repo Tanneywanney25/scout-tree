@@ -77,9 +77,10 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
       try {
         const move = chess.move(child.san);
         if (move) {
-          // Calculate opacity based on frequency (0.6 to 1.0 for better visibility)
+          // Calculate opacity based on frequency - MORE DRAMATIC DIFFERENCES
+          // Most common move = 1.0 opacity, scale down to 0.3 minimum for rare moves
           const frequency = child.count / totalCount;
-          const opacity = Math.max(0.6, Math.min(1.0, 0.6 + frequency * 0.4));
+          const opacity = Math.max(0.3, frequency);
           
           // Dark green for white moves, red for black moves
           const color = isWhiteToMove ? `rgba(46, 125, 50, ${opacity})` : `rgba(198, 40, 40, ${opacity})`;
