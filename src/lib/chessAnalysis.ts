@@ -116,63 +116,45 @@ export function analyzeGamesIncremental(
 
     console.log(`[ANALYSIS] Game ${totalGames} has ${history.length} total moves, analyzing first ${maxPlies} plies`);
 
-    // Determine which moves belong to the target player
-    // White plays on even indices (0, 2, 4...), Black plays on odd indices (1, 3, 5...)
-    const targetPlaysMoveAtIndex = (index: number) => {
-      // When tracking "both", we track moves made by the player in THIS specific game
-      if (playerColor === "both") {
-        if (isWhite) return index % 2 === 0; // Track white's moves when target is white
-        if (isBlack) return index % 2 === 1; // Track black's moves when target is black
-        return false;
-      }
-      // When tracking specific color, only track that color's moves
-      if (playerColor === "white") return index % 2 === 0;
-      if (playerColor === "black") return index % 2 === 1;
-      return false;
-    };
-
-    let trackedMovesCount = 0;
+    // Add ALL moves to create a continuous tree structure
+    // Statistics are tracked from target player's perspective for the entire game
     for (let i = 0; i < maxPlies; i++) {
       const move = history[i];
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
       
-      const shouldTrack = targetPlaysMoveAtIndex(i);
-      
       // Debug logging (first 3 games)
       if (totalGames <= 3) {
-        console.log(`  Move ${i}: ${move.san}, shouldTrack: ${shouldTrack}, isWhite: ${isWhite}, isBlack: ${isBlack}`);
+        console.log(`  Move ${i}: ${move.san} (${moveKey})`);
       }
 
-      // Only track moves made by the target player
-      if (shouldTrack) {
-        trackedMovesCount++;
-        if (!currentNode.children.has(moveKey)) {
-          currentNode.children.set(moveKey, {
-            move: moveKey,
-            san: move.san,
-            count: 0,
-            wins: 0,
-            draws: 0,
-            losses: 0,
-            winRate: 0,
-            children: new Map(),
-          });
-        }
-
-        currentNode = currentNode.children.get(moveKey)!;
-        currentNode.count++;
-
-        if (result === "win") currentNode.wins++;
-        else if (result === "draw") currentNode.draws++;
-        else currentNode.losses++;
-
-        currentNode.winRate = currentNode.count > 0 
-          ? (currentNode.wins + currentNode.draws * 0.5) / currentNode.count 
-          : 0;
+      // ALWAYS add the move to the tree (both players' moves)
+      if (!currentNode.children.has(moveKey)) {
+        currentNode.children.set(moveKey, {
+          move: moveKey,
+          san: move.san,
+          count: 0,
+          wins: 0,
+          draws: 0,
+          losses: 0,
+          winRate: 0,
+          children: new Map(),
+        });
       }
+
+      currentNode = currentNode.children.get(moveKey)!;
+      currentNode.count++;
+
+      // Statistics are tracked from target player's perspective
+      if (result === "win") currentNode.wins++;
+      else if (result === "draw") currentNode.draws++;
+      else currentNode.losses++;
+
+      currentNode.winRate = currentNode.count > 0 
+        ? (currentNode.wins + currentNode.draws * 0.5) / currentNode.count 
+        : 0;
     }
     
-    console.log(`[ANALYSIS] Game ${totalGames} tracked ${trackedMovesCount} moves for target player`);
+    console.log(`[ANALYSIS] Game ${totalGames} added all ${maxPlies} moves to tree`);
   }
 
   console.log(`[ANALYSIS] Complete. Total games analyzed: ${totalGames}`);
@@ -250,50 +232,37 @@ export function analyzeGames(
     let currentNode = rootNode;
     const maxPlies = Math.min(20, history.length);
 
-    // Determine which moves belong to the target player
-    const targetPlaysMoveAtIndex = (index: number) => {
-      // When tracking "both", we track moves made by the player in THIS specific game
-      if (playerColor === "both") {
-        if (isWhite) return index % 2 === 0; // Track white's moves when target is white
-        if (isBlack) return index % 2 === 1; // Track black's moves when target is black
-        return false;
-      }
-      // When tracking specific color, only track that color's moves
-      if (playerColor === "white") return index % 2 === 0;
-      if (playerColor === "black") return index % 2 === 1;
-      return false;
-    };
-
+    // Add ALL moves to create a continuous tree structure
+    // Statistics are tracked from target player's perspective for the entire game
     for (let i = 0; i < maxPlies; i++) {
       const move = history[i];
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
 
-      // Only track moves made by the target player
-      if (targetPlaysMoveAtIndex(i)) {
-        if (!currentNode.children.has(moveKey)) {
-          currentNode.children.set(moveKey, {
-            move: moveKey,
-            san: move.san,
-            count: 0,
-            wins: 0,
-            draws: 0,
-            losses: 0,
-            winRate: 0,
-            children: new Map(),
-          });
-        }
-
-        currentNode = currentNode.children.get(moveKey)!;
-        currentNode.count++;
-
-        if (result === "win") currentNode.wins++;
-        else if (result === "draw") currentNode.draws++;
-        else currentNode.losses++;
-
-        currentNode.winRate = currentNode.count > 0 
-          ? (currentNode.wins + currentNode.draws * 0.5) / currentNode.count 
-          : 0;
+      // ALWAYS add the move to the tree (both players' moves)
+      if (!currentNode.children.has(moveKey)) {
+        currentNode.children.set(moveKey, {
+          move: moveKey,
+          san: move.san,
+          count: 0,
+          wins: 0,
+          draws: 0,
+          losses: 0,
+          winRate: 0,
+          children: new Map(),
+        });
       }
+
+      currentNode = currentNode.children.get(moveKey)!;
+      currentNode.count++;
+
+      // Statistics are tracked from target player's perspective
+      if (result === "win") currentNode.wins++;
+      else if (result === "draw") currentNode.draws++;
+      else currentNode.losses++;
+
+      currentNode.winRate = currentNode.count > 0 
+        ? (currentNode.wins + currentNode.draws * 0.5) / currentNode.count 
+        : 0;
     }
   }
 
