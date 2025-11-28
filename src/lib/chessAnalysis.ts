@@ -112,7 +112,7 @@ export function analyzeGamesIncremental(
 
     const history = chess.history({ verbose: true });
     let currentNode = rootNode;
-    const maxPlies = Math.min(20, history.length);
+    const maxPlies = Math.min(10, history.length);
 
     console.log(`[ANALYSIS] Game ${totalGames} has ${history.length} total moves, analyzing first ${maxPlies} plies`);
 
@@ -227,10 +227,10 @@ export function analyzeGames(
       result = "loss";
     }
 
-    // Build opening tree (first 10 moves = 20 plies)
+    // Build opening tree (first 5 moves = 10 plies)
     const history = chess.history({ verbose: true });
     let currentNode = rootNode;
-    const maxPlies = Math.min(20, history.length);
+    const maxPlies = Math.min(10, history.length);
 
     // Add ALL moves to create a continuous tree structure
     // Statistics are tracked from target player's perspective for the entire game
