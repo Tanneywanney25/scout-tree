@@ -66,7 +66,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
           </Button>
         </div>
         
-        <div className="aspect-square w-full max-w-[500px] mx-auto border-2 border-border rounded-lg overflow-hidden shadow-lg">
+        <div className="aspect-square w-full mx-auto border-2 border-border rounded-lg overflow-hidden shadow-lg">
           <Chessboard 
             position={currentPosition}
             orientation="white"
