@@ -11,6 +11,7 @@ export default class ChessComIterator {
     this.monthUrls = []
     this.currentIterator = null
     this.gameCount = 0
+    this.totalGamesAvailable = null
   }
 
   async *iterate() {
@@ -43,15 +44,27 @@ export default class ChessComIterator {
             this.gameCount++
             
             if (this.options.maxGames && this.gameCount >= this.options.maxGames) {
+              this.totalGamesAvailable = this.gameCount
               return
             }
           }
         }
       }
+      
+      this.totalGamesAvailable = this.gameCount
     } catch (error) {
       console.error('ChessComIterator error:', error)
+      this.totalGamesAvailable = this.gameCount
       throw error
     }
+  }
+
+  isComplete() {
+    return this.totalGamesAvailable !== null
+  }
+
+  getTotalGames() {
+    return this.totalGamesAvailable || this.gameCount
   }
 
   filterArchivesByDate(archives) {

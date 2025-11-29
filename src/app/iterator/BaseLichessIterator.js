@@ -15,6 +15,7 @@ export default class BaseLichessIterator extends BaseUrlIterator {
     
     super(url, { ...options, headers })
     this.token = token
+    this.totalGamesAvailable = null
   }
 
   async *iterate() {
@@ -35,7 +36,10 @@ export default class BaseLichessIterator extends BaseUrlIterator {
       while (true) {
         const { done, value } = await reader.read()
         
-        if (done) break
+        if (done) {
+          this.totalGamesAvailable = this.gameCount
+          break
+        }
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
@@ -64,8 +68,17 @@ export default class BaseLichessIterator extends BaseUrlIterator {
       }
     } catch (error) {
       console.error('BaseLichessIterator error:', error)
+      this.totalGamesAvailable = this.gameCount
       throw error
     }
+  }
+
+  isComplete() {
+    return this.totalGamesAvailable !== null
+  }
+
+  getTotalGames() {
+    return this.totalGamesAvailable || this.gameCount
   }
 
   convertToPGN(gameData) {
