@@ -172,15 +172,26 @@ const Scout = () => {
                 return;
               }
               
-              console.log(`Processing batch of ${gameBatch.length} games...`);
               // Analyze each batch as it arrives with per-game progress callback
               analysis = analyzeGamesIncremental(analysis, gameBatch, username, (count) => {
                 // Update progress for EACH game (1, 2, 3, 4...)
                 setProgress(count);
+                
+                // CRITICAL: Update localStorage progress IMMEDIATELY for smooth counting
+                // Write lightweight progress update every 5 games for smooth real-time display
+                if (count % 5 === 0 || count === 1) {
+                  try {
+                    localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+                      totalGames: count,
+                      complete: false
+                    }));
+                  } catch (e) {
+                    console.warn('Failed to update progress:', e);
+                  }
+                }
               });
-              console.log(`Total games analyzed so far: ${analysis.totalGames}`);
               
-              // Save full analysis every 50 games for progressive updates
+              // Save full analysis every 50 games for progressive tree updates
               if (analysis.totalGames % 50 === 0) {
                 try {
                   const progressData = {
@@ -192,7 +203,6 @@ const Scout = () => {
                     timestamp: Date.now(),
                     complete: false
                   }));
-                  console.log(`Progress update: ${analysis.totalGames} games`);
                 } catch (e) {
                   console.warn('Failed to update progress:', e);
                 }
@@ -213,6 +223,11 @@ const Scout = () => {
           localStorage.setItem(cacheKey, JSON.stringify({ 
             analysis: finalData,
             timestamp: Date.now(),
+            complete: true
+          }));
+          // Mark progress as complete too
+          localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+            totalGames: analysis.totalGames,
             complete: true
           }));
         } catch (e) {
@@ -237,15 +252,26 @@ const Scout = () => {
                 return;
               }
               
-              console.log(`Processing batch of ${gameBatch.length} games...`);
               // Analyze each batch as it arrives with per-game progress callback
               analysis = analyzeGamesIncremental(analysis, gameBatch, username, (count) => {
                 // Update progress for EACH game (1, 2, 3, 4...)
                 setProgress(count);
+                
+                // CRITICAL: Update localStorage progress IMMEDIATELY for smooth counting
+                // Write lightweight progress update every 5 games for smooth real-time display
+                if (count % 5 === 0 || count === 1) {
+                  try {
+                    localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+                      totalGames: count,
+                      complete: false
+                    }));
+                  } catch (e) {
+                    console.warn('Failed to update progress:', e);
+                  }
+                }
               });
-              console.log(`Total games analyzed so far: ${analysis.totalGames}`);
               
-              // Save full analysis every 50 games for progressive updates
+              // Save full analysis every 50 games for progressive tree updates
               if (analysis.totalGames % 50 === 0) {
                 try {
                   const progressData = {
@@ -257,7 +283,6 @@ const Scout = () => {
                     timestamp: Date.now(),
                     complete: false
                   }));
-                  console.log(`Progress update: ${analysis.totalGames} games`);
                 } catch (e) {
                   console.warn('Failed to update progress:', e);
                 }
@@ -277,6 +302,11 @@ const Scout = () => {
           localStorage.setItem(cacheKey, JSON.stringify({ 
             analysis: finalData,
             timestamp: Date.now(),
+            complete: true
+          }));
+          // Mark progress as complete too
+          localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+            totalGames: analysis.totalGames,
             complete: true
           }));
         } catch (e) {
