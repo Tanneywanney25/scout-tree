@@ -154,7 +154,18 @@ const Scout = () => {
           username,
           fetchOptions,
           (count) => {
+            // Update local state
             setProgress(count);
+            
+            // CRITICAL: Write fetch progress directly to localStorage for Report page
+            try {
+              localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+                totalGames: count,
+                complete: false
+              }));
+            } catch (e) {
+              console.warn('Failed to write progress:', e);
+            }
             
             if (count > 2000 && !warning) {
               setWarning("Large dataset - processing all games...");
@@ -172,24 +183,18 @@ const Scout = () => {
                 return;
               }
               
-              // Analyze each batch as it arrives with per-game progress callback
-              analysis = analyzeGamesIncremental(analysis, gameBatch, username, (count) => {
-                // Update progress for EACH game (1, 2, 3, 4...)
-                setProgress(count);
-                
-                // CRITICAL: Update localStorage progress IMMEDIATELY for smooth counting
-                // Write lightweight progress update every 5 games for smooth real-time display
-                if (count % 5 === 0 || count === 1) {
-                  try {
-                    localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-                      totalGames: count,
-                      complete: false
-                    }));
-                  } catch (e) {
-                    console.warn('Failed to update progress:', e);
-                  }
-                }
-              });
+              // Analyze batch WITHOUT progress callback - fetch progress is already smooth!
+              analysis = analyzeGamesIncremental(analysis, gameBatch, username);
+              
+              // Update localStorage with current count for Report page
+              try {
+                localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+                  totalGames: analysis.totalGames,
+                  complete: false
+                }));
+              } catch (e) {
+                console.warn('Failed to update progress:', e);
+              }
               
               // Save full analysis every 50 games for progressive tree updates
               if (analysis.totalGames % 50 === 0) {
@@ -238,7 +243,18 @@ const Scout = () => {
           username,
           fetchOptions,
           (count) => {
+            // Update local state
             setProgress(count);
+            
+            // CRITICAL: Write fetch progress directly to localStorage for Report page
+            try {
+              localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+                totalGames: count,
+                complete: false
+              }));
+            } catch (e) {
+              console.warn('Failed to write progress:', e);
+            }
           },
           (gameBatch) => {
             try {
@@ -252,24 +268,18 @@ const Scout = () => {
                 return;
               }
               
-              // Analyze each batch as it arrives with per-game progress callback
-              analysis = analyzeGamesIncremental(analysis, gameBatch, username, (count) => {
-                // Update progress for EACH game (1, 2, 3, 4...)
-                setProgress(count);
-                
-                // CRITICAL: Update localStorage progress IMMEDIATELY for smooth counting
-                // Write lightweight progress update every 5 games for smooth real-time display
-                if (count % 5 === 0 || count === 1) {
-                  try {
-                    localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-                      totalGames: count,
-                      complete: false
-                    }));
-                  } catch (e) {
-                    console.warn('Failed to update progress:', e);
-                  }
-                }
-              });
+              // Analyze batch WITHOUT progress callback - fetch progress is already smooth!
+              analysis = analyzeGamesIncremental(analysis, gameBatch, username);
+              
+              // Update localStorage with current count for Report page
+              try {
+                localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+                  totalGames: analysis.totalGames,
+                  complete: false
+                }));
+              } catch (e) {
+                console.warn('Failed to update progress:', e);
+              }
               
               // Save full analysis every 50 games for progressive tree updates
               if (analysis.totalGames % 50 === 0) {

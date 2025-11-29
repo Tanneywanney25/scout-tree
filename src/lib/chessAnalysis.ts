@@ -157,7 +157,7 @@ export function analyzeGamesIncremental(
     
     console.log(`[ANALYSIS] Game ${totalGames} added all ${maxPlies} moves to tree`);
     
-    // CRITICAL: Call progress callback after EACH game for smooth counting (1, 2, 3...)
+    // Optional: Call progress callback after each game (not used anymore to avoid conflicts)
     if (onProgress) {
       onProgress(totalGames);
     }
