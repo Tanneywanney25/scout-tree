@@ -86,12 +86,13 @@ const Scout = () => {
       // Build cache key with proper handling of undefined values
       const cacheKey = `scout_${username}_${platform}_${variant}_${timeControlKey}_${color}_${mode}_${dateFrom?.getTime() || 'all'}_${dateTo?.getTime() || 'now'}_${ratingMin || 'any'}_${ratingMax || 'any'}_${opponentName || 'all'}`;
       
-      // CLEAR ALL SCOUT CACHES for this user to force fresh analysis
+      // CLEAR ALL CACHES - force fresh analysis every time
+      console.log('🧹 Clearing all localStorage caches...');
       const allKeys = Object.keys(localStorage);
       allKeys.forEach(key => {
-        if (key.startsWith(`scout_${username}_`)) {
+        if (key.startsWith('scout_') || key.startsWith('abort_')) {
           localStorage.removeItem(key);
-          console.log(`Cleared cache for: ${key}`);
+          console.log(`Cleared: ${key}`);
         }
       });
       
