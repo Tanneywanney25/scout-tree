@@ -10,6 +10,7 @@ export interface GameData {
 }
 
 export interface FetchOptions {
+  variant?: string;
   timeControls?: string[];
   mode?: "all" | "rated" | "casual";
   dateFrom?: Date;
@@ -27,6 +28,7 @@ export async function fetchLichessGames(
   signal?: AbortSignal
 ): Promise<GameData[]> {
   const {
+    variant = "standard",
     timeControls = ["blitz"],
     mode = "all",
     dateFrom,
@@ -86,8 +88,13 @@ export async function fetchLichessGames(
   // Build query parameters properly
   const params = new URLSearchParams();
   
-  // Add perfType if specified
-  if (timeControls[0] && timeControls[0] !== "all") {
+  // Add variant if not standard
+  if (variant && variant !== "standard") {
+    params.append('perfType', variant);
+  }
+  
+  // Add perfType (time control) if specified and no variant override
+  if ((!variant || variant === "standard") && timeControls[0] && timeControls[0] !== "all") {
     params.append('perfType', timeControls[0]);
   }
   
@@ -238,6 +245,7 @@ export async function fetchChessComGames(
   onBatch?: (games: GameData[]) => void
 ): Promise<GameData[]> {
   const {
+    variant = "standard",
     timeControls = ["blitz"],
     mode = "all",
     dateFrom,
@@ -324,6 +332,12 @@ export async function fetchChessComGames(
           // Apply filters
           if (mode === "rated" && !game.rated) continue;
           if (mode === "casual" && game.rated) continue;
+          
+          // Variant filter (Chess.com uses "rules" field)
+          if (variant && variant !== "standard") {
+            const gameRules = game.rules || "chess";
+            if (gameRules !== variant) continue;
+          }
           
           // Time control filter
           if (timeControls.length > 0 && !timeControls.includes("all")) {
