@@ -1,14 +1,15 @@
 import { useParams, useLocation } from "react-router-dom";
 import Header from "@/components/Header";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Download, ChevronRight } from "lucide-react";
+// import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+// import { Badge } from "@/components/ui/badge";
+import { Download } from "lucide-react";
+// import { ChevronRight } from "lucide-react";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import type { SerializedAnalysisResult } from "@/lib/chessAnalysis";
 import InteractiveOpeningTree from "@/components/InteractiveOpeningTree";
-import { OpeningLineBoard } from "@/components/OpeningLineBoard";
+// import { OpeningLineBoard } from "@/components/OpeningLineBoard";
 
 const Report = () => {
   const { id } = useParams();
@@ -128,97 +129,84 @@ const Report = () => {
             </Button>
           </div>
 
-          {/* Main Layout: Sidebar + Center Board + Content */}
-          <div className="grid lg:grid-cols-12 gap-6">
-            {/* Left Sidebar: Summary & Checklist */}
-            <div className="lg:col-span-2 space-y-6">
-              <Card>
-                <CardHeader>
-                  <CardTitle>60-Second Summary</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-sm text-foreground leading-relaxed">
-                    {generateSummary()}
-                  </p>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>Pregame Checklist</CardTitle>
-                  <CardDescription>Review before the game starts</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <ul className="space-y-3">
-                    {generateChecklist().map((item, i) => (
-                      <li key={i} className="flex items-start gap-2 text-sm">
-                        <ChevronRight className="w-4 h-4 text-primary shrink-0 mt-0.5" />
-                        <span className="text-foreground">{item}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </CardContent>
-              </Card>
-            </div>
-
-            {/* Center: Interactive Opening Board */}
-            <div className="lg:col-span-8 flex justify-center">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Interactive Opening Explorer</CardTitle>
-                  <CardDescription>
-                    Click on moves to explore the tree and see positions on the board
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  {analysis.openingTree && analysis.openingTree.children && analysis.openingTree.children.length > 0 ? (
-                    <InteractiveOpeningTree 
-                      node={analysis.openingTree} 
-                      maxDepth={15}
-                      playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
-                    />
-                  ) : (
-                    <div className="text-center py-8 text-muted-foreground">
-                      <p>No opening tree data available. The analysis may still be processing or no games were found.</p>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </div>
-
-            {/* Right Sidebar: Stats placeholder for future */}
-            <div className="lg:col-span-2 space-y-6">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Statistics</CardTitle>
-                  <CardDescription>Key metrics</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-4">
-                    <div>
-                      <p className="text-sm text-muted-foreground">Total Games</p>
-                      <p className="text-2xl font-bold text-foreground">{analysis.totalGames}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-muted-foreground">Playing As</p>
-                      <p className="text-xl font-semibold text-foreground capitalize">{analysis.playerColor}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-muted-foreground">Weak Lines</p>
-                      <p className="text-2xl font-bold text-destructive">{analysis.weakestLines.length}</p>
-                    </div>
-                    <div>
-                      <p className="text-sm text-muted-foreground">Strong Lines</p>
-                      <p className="text-2xl font-bold text-primary">{analysis.strongestLines.length}</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
+          {/* Main Layout: Board and Lines */}
+          <div className="flex justify-center">
+            {analysis.openingTree && analysis.openingTree.children && analysis.openingTree.children.length > 0 ? (
+              <InteractiveOpeningTree 
+                node={analysis.openingTree} 
+                maxDepth={15}
+                playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
+              />
+            ) : (
+              <div className="text-center py-8 text-muted-foreground">
+                <p>No opening tree data available. The analysis may still be processing or no games were found.</p>
+              </div>
+            )}
           </div>
 
-          {/* Bottom Section: Opening Lines */}
-          <div className="grid lg:grid-cols-2 gap-6 mt-6">
+          {/* COMMENTED OUT FOR LATER - Left Sidebar: Summary & Checklist */}
+          {/* <div className="lg:col-span-2 space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>60-Second Summary</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-foreground leading-relaxed">
+                  {generateSummary()}
+                </p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Pregame Checklist</CardTitle>
+                <CardDescription>Review before the game starts</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ul className="space-y-3">
+                  {generateChecklist().map((item, i) => (
+                    <li key={i} className="flex items-start gap-2 text-sm">
+                      <ChevronRight className="w-4 h-4 text-primary shrink-0 mt-0.5" />
+                      <span className="text-foreground">{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          </div> */}
+
+          {/* COMMENTED OUT FOR LATER - Right Sidebar: Stats */}
+          {/* <div className="lg:col-span-2 space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>Statistics</CardTitle>
+                <CardDescription>Key metrics</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-4">
+                  <div>
+                    <p className="text-sm text-muted-foreground">Total Games</p>
+                    <p className="text-2xl font-bold text-foreground">{analysis.totalGames}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-muted-foreground">Playing As</p>
+                    <p className="text-xl font-semibold text-foreground capitalize">{analysis.playerColor}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-muted-foreground">Weak Lines</p>
+                    <p className="text-2xl font-bold text-destructive">{analysis.weakestLines.length}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-muted-foreground">Strong Lines</p>
+                    <p className="text-2xl font-bold text-primary">{analysis.strongestLines.length}</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div> */}
+
+          {/* COMMENTED OUT FOR LATER - Bottom Section: Opening Lines */}
+          {/* <div className="grid lg:grid-cols-2 gap-6 mt-6">
             <Card>
               <CardHeader>
                 <CardTitle>Weakest Opening Lines</CardTitle>
@@ -276,10 +264,10 @@ const Report = () => {
                 )}
               </CardContent>
             </Card>
-          </div>
+          </div> */}
 
-          {/* Training Drill Section */}
-          <Card className="mt-6">
+          {/* COMMENTED OUT FOR LATER - Training Drill Section */}
+          {/* <Card className="mt-6">
             <CardHeader>
               <CardTitle>Training Drill</CardTitle>
               <CardDescription>3 positions to practice before your game</CardDescription>
@@ -291,7 +279,7 @@ const Report = () => {
                 </p>
               </div>
             </CardContent>
-          </Card>
+          </Card> */}
         </div>
       </main>
     </div>
