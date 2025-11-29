@@ -114,6 +114,33 @@ const Scout = () => {
         opponentName: opponentName || undefined
       };
       
+      // Navigate to report immediately for live updates
+      const initialReportData = {
+        ...analysis,
+        openingTree: serializeOpeningTree(analysis.openingTree),
+      };
+      
+      // Save initial state to cache
+      localStorage.setItem(cacheKey, JSON.stringify({ 
+        analysis: initialReportData,
+        timestamp: Date.now() 
+      }));
+      
+      // Navigate immediately to show live updates
+      toast.success("Loading report - analyzing games in real-time...");
+      navigate(`/report/${username}`, { 
+        state: { 
+          ...initialReportData,
+          isLive: true,
+          username,
+          platform: actualPlatform,
+          timeControls,
+          color,
+          mode,
+          variant
+        }
+      });
+      
       if (actualPlatform === "lichess") {
         await fetchLichessGames(
           username,
@@ -129,6 +156,16 @@ const Scout = () => {
             // Analyze each batch as it arrives
             analysis = analyzeGamesIncremental(analysis, gameBatch, username);
             setProgress(analysis.totalGames);
+            
+            // Update cache immediately for live updates
+            const updatedReportData = {
+              ...analysis,
+              openingTree: serializeOpeningTree(analysis.openingTree),
+            };
+            localStorage.setItem(cacheKey, JSON.stringify({ 
+              analysis: updatedReportData,
+              timestamp: Date.now() 
+            }));
           },
           abortControllerRef.current?.signal
         );
@@ -143,6 +180,16 @@ const Scout = () => {
             // Analyze each batch as it arrives
             analysis = analyzeGamesIncremental(analysis, gameBatch, username);
             setProgress(analysis.totalGames);
+            
+            // Update cache immediately for live updates
+            const updatedReportData = {
+              ...analysis,
+              openingTree: serializeOpeningTree(analysis.openingTree),
+            };
+            localStorage.setItem(cacheKey, JSON.stringify({ 
+              analysis: updatedReportData,
+              timestamp: Date.now() 
+            }));
           }
         );
       }
@@ -179,14 +226,18 @@ const Scout = () => {
         }
       }
 
-      // Navigate with complete analysis
-      const reportData = {
+      // Final update with complete analysis
+      const finalReportData = {
         ...analysis,
         openingTree: serializeOpeningTree(analysis.openingTree),
       };
       
-      toast.success(`Report generated! Analyzed ${analysis.totalGames} games.`);
-      navigate(`/report/${username}`, { state: reportData });
+      localStorage.setItem(cacheKey, JSON.stringify({ 
+        analysis: finalReportData,
+        timestamp: Date.now() 
+      }));
+      
+      toast.success(`Analysis complete! Analyzed ${analysis.totalGames} games.`);
     } catch (error: any) {
       console.error("Scout error:", error);
       toast.dismiss(); // Dismiss all toasts including the loading one

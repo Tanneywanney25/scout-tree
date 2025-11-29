@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 // import { Badge } from "@/components/ui/badge";
 import { Download } from "lucide-react";
 // import { ChevronRight } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import type { SerializedAnalysisResult } from "@/lib/chessAnalysis";
 import InteractiveOpeningTree from "@/components/InteractiveOpeningTree";
@@ -15,11 +15,30 @@ const Report = () => {
   const { id } = useParams();
   const location = useLocation();
   const [analysis, setAnalysis] = useState<SerializedAnalysisResult | null>(null);
+  const [isLive, setIsLive] = useState(false);
+  const updateIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     // Get analysis from navigation state or fallback to cache
     if (location.state) {
-      setAnalysis(location.state as SerializedAnalysisResult);
+      const state = location.state as any;
+      setAnalysis(state as SerializedAnalysisResult);
+      setIsLive(state.isLive || false);
+      
+      // If it's a live report, poll for updates
+      if (state.isLive) {
+        const cacheKey = `scout_${state.username}_${state.platform}_${state.color}_${(state.timeControls || []).join(',')}_${state.mode}`;
+        
+        updateIntervalRef.current = setInterval(() => {
+          const cached = localStorage.getItem(cacheKey);
+          if (cached) {
+            const { analysis: updatedAnalysis } = JSON.parse(cached);
+            if (updatedAnalysis) {
+              setAnalysis(updatedAnalysis);
+            }
+          }
+        }, 500); // Poll every 500ms for updates
+      }
     } else {
       // Try to load from cache
       const cacheKeys = Object.keys(localStorage).filter(key => key.startsWith('scout_'));
@@ -30,6 +49,12 @@ const Report = () => {
         }
       }
     }
+    
+    return () => {
+      if (updateIntervalRef.current) {
+        clearInterval(updateIntervalRef.current);
+      }
+    };
   }, [location.state]);
 
   const handleDownload = () => {
@@ -121,6 +146,7 @@ const Report = () => {
               </h1>
               <p className="text-muted-foreground">
                 {analysis.totalGames} total games analyzed • Playing as {analysis.playerColor}
+                {isLive && <span className="ml-2 text-primary animate-pulse">• Live updating...</span>}
               </p>
             </div>
             <Button onClick={handleDownload} variant="outline">

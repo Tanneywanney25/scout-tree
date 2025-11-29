@@ -372,10 +372,18 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               ))}
             </defs>
             {arrows.map((arrow, idx) => {
-              const fromFile = arrow.from.charCodeAt(0) - 97;
-              const fromRank = 8 - parseInt(arrow.from[1]);
-              const toFile = arrow.to.charCodeAt(0) - 97;
-              const toRank = 8 - parseInt(arrow.to[1]);
+              let fromFile = arrow.from.charCodeAt(0) - 97;
+              let fromRank = 8 - parseInt(arrow.from[1]);
+              let toFile = arrow.to.charCodeAt(0) - 97;
+              let toRank = 8 - parseInt(arrow.to[1]);
+              
+              // Flip coordinates if board is oriented for black
+              if (boardOrientation === "black") {
+                fromFile = 7 - fromFile;
+                fromRank = 7 - fromRank;
+                toFile = 7 - toFile;
+                toRank = 7 - toRank;
+              }
               
               const x1 = fromFile + 0.5;
               const y1 = fromRank + 0.5;
