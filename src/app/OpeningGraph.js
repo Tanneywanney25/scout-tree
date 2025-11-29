@@ -41,7 +41,7 @@ export default class OpeningGraph {
   }
 
   addGameResultOnFen(fullFen, resultIndex) {
-    const currNode = this.getNodeFromGraph(fullFen, true)
+    const currNode = this.getNodeFromGraph(simplifiedFen(fullFen), true)
     if (!currNode.gameResults) {
       currNode.gameResults = []
     }
@@ -49,7 +49,7 @@ export default class OpeningGraph {
   }
 
   addStatsToRoot(pgnStats, variant) {
-    const targetNode = this.getNodeFromGraph(rootFen(variant), true)
+    const targetNode = this.getNodeFromGraph(simplifiedFen(rootFen(variant)), true)
     if (!targetNode.details) {
       targetNode.details = emptyDetails()
     }
@@ -219,7 +219,7 @@ export default class OpeningGraph {
   }
 
   getMovesForFen(fen) {
-    const node = this.getNodeFromGraph(fen, false)
+    const node = this.getNodeFromGraph(simplifiedFen(fen), false)
     
     if (!node || !node.children) {
       return []
@@ -244,7 +244,7 @@ export default class OpeningGraph {
   }
 
   getGameResultsForFen(fen) {
-    const node = this.getNodeFromGraph(fen, false)
+    const node = this.getNodeFromGraph(simplifiedFen(fen), false)
     
     if (!node || !node.gameResults) {
       return []

@@ -377,12 +377,21 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
             onDrop={onDrop}
             onSquareClick={onSquareClick}
             squareStyles={{
-              ...possibleMoves.reduce((acc, square) => ({
-                ...acc,
-                [square]: {
-                  background: 'radial-gradient(circle, rgba(0, 120, 0, 0.9) 25%, transparent 25%)',
-                }
-              }), {})
+              ...possibleMoves.reduce((acc, square) => {
+                // Check if square is occupied (capture move)
+                const chess = new Chess(currentPosition);
+                const piece = chess.get(square as any);
+                const isCapture = piece !== null;
+                
+                return {
+                  ...acc,
+                  [square]: {
+                    background: isCapture 
+                      ? 'radial-gradient(circle, transparent 65%, rgba(0, 120, 0, 0.8) 65%, rgba(0, 120, 0, 0.8) 85%, transparent 85%)'
+                      : 'radial-gradient(circle, rgba(0, 120, 0, 0.9) 25%, transparent 25%)',
+                  }
+                };
+              }, {})
             }}
             boardStyle={{
               borderRadius: '0.5rem',
