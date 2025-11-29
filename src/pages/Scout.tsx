@@ -24,8 +24,8 @@ const Scout = () => {
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [platform, setPlatform] = useState("lichess");
-  const [variant, setVariant] = useState("standard");
   const [color, setColor] = useState<"white" | "black">("white");
+  const [variant, setVariant] = useState("standard");
   const [timeControls, setTimeControls] = useState<string[]>(["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"]);
   const [mode, setMode] = useState<"all" | "rated" | "casual">("all");
   const [dateFrom, setDateFrom] = useState<Date | undefined>(undefined);
@@ -178,16 +178,16 @@ const Scout = () => {
               setProgress(analysis.totalGames);
               console.log(`Total games analyzed so far: ${analysis.totalGames}`);
               
-              // Update cache immediately for live updates
-              const updatedReportData = {
-                ...analysis,
-                openingTree: serializeOpeningTree(analysis.openingTree),
-              };
-              localStorage.setItem(cacheKey, JSON.stringify({ 
-                analysis: updatedReportData,
-                timestamp: Date.now() 
-              }));
-              console.log(`Updated cache with ${analysis.totalGames} games`);
+              // Store only minimal progress data to avoid quota errors
+              try {
+                localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+                  totalGames: analysis.totalGames,
+                  timestamp: Date.now(),
+                  complete: false
+                }));
+              } catch (e) {
+                console.warn('Failed to update progress:', e);
+              }
             } catch (error) {
               console.error('Error processing game batch:', error);
             }
@@ -195,9 +195,25 @@ const Scout = () => {
           abortControllerRef.current?.signal
         );
         
-        // Clear cache after Lichess analysis completes to prevent crashes
-        console.log('Lichess analysis complete, clearing cache');
-        localStorage.removeItem(cacheKey);
+        // Mark analysis as complete
+        const finalData = {
+          ...analysis,
+          openingTree: serializeOpeningTree(analysis.openingTree),
+        };
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ 
+            analysis: finalData,
+            timestamp: Date.now(),
+            complete: true
+          }));
+          localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+            totalGames: analysis.totalGames,
+            timestamp: Date.now(),
+            complete: true
+          }));
+        } catch (e) {
+          console.warn('Failed to cache final analysis:', e);
+        }
       } else {
         await fetchChessComGames(
           username,
@@ -223,25 +239,41 @@ const Scout = () => {
               setProgress(analysis.totalGames);
               console.log(`Total games analyzed so far: ${analysis.totalGames}`);
               
-              // Update cache immediately for live updates
-              const updatedReportData = {
-                ...analysis,
-                openingTree: serializeOpeningTree(analysis.openingTree),
-              };
-              localStorage.setItem(cacheKey, JSON.stringify({ 
-                analysis: updatedReportData,
-                timestamp: Date.now() 
-              }));
-              console.log(`Updated cache with ${analysis.totalGames} games`);
+              // Store only minimal progress data to avoid quota errors
+              try {
+                localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+                  totalGames: analysis.totalGames,
+                  timestamp: Date.now(),
+                  complete: false
+                }));
+              } catch (e) {
+                console.warn('Failed to update progress:', e);
+              }
             } catch (error) {
               console.error('Error processing game batch:', error);
             }
           }
         );
         
-        // Clear cache after Chess.com analysis completes to prevent crashes
-        console.log('Chess.com analysis complete, clearing cache');
-        localStorage.removeItem(cacheKey);
+        // Mark analysis as complete
+        const finalData = {
+          ...analysis,
+          openingTree: serializeOpeningTree(analysis.openingTree),
+        };
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ 
+            analysis: finalData,
+            timestamp: Date.now(),
+            complete: true
+          }));
+          localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+            totalGames: analysis.totalGames,
+            timestamp: Date.now(),
+            complete: true
+          }));
+        } catch (e) {
+          console.warn('Failed to cache final analysis:', e);
+        }
       }
 
       if (analysis.totalGames === 0) {
@@ -365,22 +397,6 @@ const Scout = () => {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="variant">Chess Variant</Label>
-                  <Select value={variant} onValueChange={setVariant}>
-                    <SelectTrigger id="variant">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="standard">Standard rules</SelectItem>
-                      <SelectItem value="crazyhouse">Crazyhouse</SelectItem>
-                      <SelectItem value="threeCheck">Three check</SelectItem>
-                      <SelectItem value="kingOfTheHill">King of the hill</SelectItem>
-                      <SelectItem value="racingKings">Racing kings</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="space-y-2">
                   <Label>Your Color</Label>
                   <RadioGroup value={color} onValueChange={(v) => setColor(v as "white" | "black")}>
                     <div className="flex items-center space-x-4">
@@ -422,6 +438,22 @@ const Scout = () => {
                     </Button>
                   </CollapsibleTrigger>
                   <CollapsibleContent className="space-y-4 mt-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="variant-advanced">Chess Variant</Label>
+                      <Select value={variant} onValueChange={setVariant}>
+                        <SelectTrigger id="variant-advanced">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="standard">Standard rules</SelectItem>
+                          <SelectItem value="crazyhouse">Crazyhouse</SelectItem>
+                          <SelectItem value="threeCheck">Three check</SelectItem>
+                          <SelectItem value="kingOfTheHill">King of the hill</SelectItem>
+                          <SelectItem value="racingKings">Racing kings</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
                     <div className="space-y-2">
                       <Label>Game Mode</Label>
                       <RadioGroup value={mode} onValueChange={(v) => setMode(v as "all" | "rated" | "casual")}>
