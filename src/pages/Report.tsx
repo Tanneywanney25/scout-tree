@@ -3,16 +3,16 @@ import Header from "@/components/Header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Download, Copy, Check, ChevronRight } from "lucide-react";
+import { Download, ChevronRight } from "lucide-react";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import type { SerializedAnalysisResult } from "@/lib/chessAnalysis";
 import InteractiveOpeningTree from "@/components/InteractiveOpeningTree";
+import { OpeningLineBoard } from "@/components/OpeningLineBoard";
 
 const Report = () => {
   const { id } = useParams();
   const location = useLocation();
-  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [analysis, setAnalysis] = useState<SerializedAnalysisResult | null>(null);
 
   useEffect(() => {
@@ -58,12 +58,6 @@ const Report = () => {
     toast.success("Report downloaded");
   };
 
-  const handleCopy = (text: string, index: number) => {
-    navigator.clipboard.writeText(text);
-    setCopiedIndex(index);
-    toast.success("Copied to clipboard");
-    setTimeout(() => setCopiedIndex(null), 2000);
-  };
 
   if (!analysis) {
     return (
@@ -198,30 +192,24 @@ const Report = () => {
                     Lines where {id} (playing {analysis.playerColor}) struggles most - exploit these as {analysis.playerColor === "white" ? "Black" : "White"}
                   </CardDescription>
                 </CardHeader>
-                <CardContent className="space-y-4">
+                <CardContent>
                   {analysis.weakestLines.length === 0 ? (
                     <p className="text-sm text-muted-foreground">
                       Not enough game data to identify weak lines
                     </p>
                   ) : (
-                    analysis.weakestLines.map((line, index) => (
-                      <div key={index} className="border border-border rounded-lg p-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <code className="font-mono text-sm bg-muted px-2 py-1 rounded">
-                            {line.line}
-                          </code>
-                          <Badge variant={
-                            line.winRate < 0.3 ? "default" :
-                            line.winRate < 0.4 ? "secondary" : "outline"
-                          }>
-                            {(line.winRate * 100).toFixed(0)}% win rate
-                          </Badge>
-                        </div>
-                        <p className="text-sm text-muted-foreground">
-                          {line.count} games • As {analysis.playerColor === "white" ? "Black" : "White"}, steer into this line
-                        </p>
-                      </div>
-                    ))
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {analysis.weakestLines.map((line, index) => (
+                        <OpeningLineBoard
+                          key={index}
+                          line={line.line}
+                          winRate={line.winRate}
+                          count={line.count}
+                          isWeakLine={true}
+                          playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
+                        />
+                      ))}
+                    </div>
                   )}
                 </CardContent>
               </Card>
@@ -233,41 +221,24 @@ const Report = () => {
                     Lines where {id} (playing {analysis.playerColor}) performs best - avoid or prepare deeply as {analysis.playerColor === "white" ? "Black" : "White"}
                   </CardDescription>
                 </CardHeader>
-                <CardContent className="space-y-4">
+                <CardContent>
                   {analysis.strongestLines.length === 0 ? (
                     <p className="text-sm text-muted-foreground">
                       Not enough game data to identify strong lines
                     </p>
                   ) : (
-                    analysis.strongestLines.map((line, index) => (
-                      <div key={index} className="border border-border rounded-lg p-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <code className="font-mono text-sm bg-muted px-2 py-1 rounded">
-                            {line.line}
-                          </code>
-                          <Badge variant="default">
-                            {(line.winRate * 100).toFixed(0)}% win rate
-                          </Badge>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <p className="text-sm text-muted-foreground">
-                            {line.count} games • Avoid this line or prepare counter-play
-                          </p>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleCopy(line.line, index)}
-                            className="h-8 w-8 p-0"
-                          >
-                            {copiedIndex === index ? (
-                              <Check className="w-3 h-3" />
-                            ) : (
-                              <Copy className="w-3 h-3" />
-                            )}
-                          </Button>
-                        </div>
-                      </div>
-                    ))
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {analysis.strongestLines.map((line, index) => (
+                        <OpeningLineBoard
+                          key={index}
+                          line={line.line}
+                          winRate={line.winRate}
+                          count={line.count}
+                          isWeakLine={false}
+                          playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
+                        />
+                      ))}
+                    </div>
                   )}
                 </CardContent>
               </Card>
