@@ -35,7 +35,7 @@ export default class OpeningManager {
       this.reader = await new PGNReaderWorker(this.variant)
 
       const notify = async (limit, count, parsedGame) => {
-        // Add to opening graph
+        // Add to opening graph IMMEDIATELY
         this.openingGraph.addPGN(
           parsedGame.pgnStats,
           parsedGame.parsedMoves,
@@ -43,7 +43,7 @@ export default class OpeningManager {
           parsedGame.playerColor
         )
 
-        // Notify progress
+        // Update UI IMMEDIATELY for EVERY game (smooth counting 1, 2, 3...)
         if (onProgress) {
           onProgress({
             gamesProcessed: this.openingGraph.graph.pgnStats.length,
