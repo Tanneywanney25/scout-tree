@@ -26,18 +26,30 @@ const Report = () => {
       setIsLive(state.isLive || false);
       
       // If it's a live report, poll for updates
-      if (state.isLive) {
-        const cacheKey = `scout_${state.username}_${state.platform}_${state.color}_${(state.timeControls || []).join(',')}_${state.mode}`;
+      if (state.isLive && state.cacheKey) {
+        console.log('Starting live polling with cache key:', state.cacheKey);
         
         updateIntervalRef.current = setInterval(() => {
-          const cached = localStorage.getItem(cacheKey);
+          const cached = localStorage.getItem(state.cacheKey);
           if (cached) {
-            const { analysis: updatedAnalysis } = JSON.parse(cached);
-            if (updatedAnalysis) {
+            const parsedCache = JSON.parse(cached);
+            const updatedAnalysis = parsedCache.analysis;
+            
+            if (updatedAnalysis && updatedAnalysis.totalGames > 0) {
+              console.log('Updating analysis with', updatedAnalysis.totalGames, 'games');
               setAnalysis(updatedAnalysis);
             }
+            
+            // Stop polling if analysis is complete
+            if (parsedCache.complete) {
+              console.log('Analysis complete, stopping polling');
+              setIsLive(false);
+              if (updateIntervalRef.current) {
+                clearInterval(updateIntervalRef.current);
+              }
+            }
           }
-        }, 500); // Poll every 500ms for updates
+        }, 300); // Poll every 300ms for fast updates
       }
     } else {
       // Try to load from cache

@@ -127,11 +127,13 @@ const Scout = () => {
       }));
       
       // Navigate immediately to show live updates
+      toast.dismiss(loadingToast);
       toast.success("Loading report - analyzing games in real-time...");
       navigate(`/report/${username}`, { 
         state: { 
           ...initialReportData,
           isLive: true,
+          cacheKey,  // Pass the cache key so Report knows where to poll
           username,
           platform: actualPlatform,
           timeControls,
@@ -234,7 +236,8 @@ const Scout = () => {
       
       localStorage.setItem(cacheKey, JSON.stringify({ 
         analysis: finalReportData,
-        timestamp: Date.now() 
+        timestamp: Date.now(),
+        complete: true  // Signal that analysis is finished
       }));
       
       toast.success(`Analysis complete! Analyzed ${analysis.totalGames} games.`);
