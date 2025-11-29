@@ -131,7 +131,7 @@ const Report = () => {
           {/* Main Layout: Sidebar + Center Board + Content */}
           <div className="grid lg:grid-cols-12 gap-6">
             {/* Left Sidebar: Summary & Checklist */}
-            <div className="lg:col-span-3 space-y-6">
+            <div className="lg:col-span-2 space-y-6">
               <Card>
                 <CardHeader>
                   <CardTitle>60-Second Summary</CardTitle>
@@ -162,7 +162,7 @@ const Report = () => {
             </div>
 
             {/* Center: Interactive Opening Board */}
-            <div className="lg:col-span-6">
+            <div className="lg:col-span-8 flex justify-center">
               <Card>
                 <CardHeader>
                   <CardTitle>Interactive Opening Explorer</CardTitle>
@@ -187,7 +187,7 @@ const Report = () => {
             </div>
 
             {/* Right Sidebar: Stats placeholder for future */}
-            <div className="lg:col-span-3 space-y-6">
+            <div className="lg:col-span-2 space-y-6">
               <Card>
                 <CardHeader>
                   <CardTitle>Statistics</CardTitle>
