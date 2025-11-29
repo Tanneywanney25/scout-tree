@@ -33,23 +33,19 @@ const Report = () => {
         
         updateIntervalRef.current = setInterval(() => {
           try {
-            // CRITICAL: Always read BOTH progress and full cache on every poll
             const progressData = localStorage.getItem(`${state.cacheKey}_progress`);
             const fullData = localStorage.getItem(state.cacheKey);
             
+            let latestGameCount = 0;
+            
+            // Get latest game count from progress
             if (progressData) {
               const progress = JSON.parse(progressData);
-              console.log('📊 Progress update:', progress.totalGames, 'games');
-              
-              // ALWAYS update total games count for smooth counting (1, 2, 3...)
-              setAnalysis(prev => {
-                if (!prev) return null;
-                return { ...prev, totalGames: progress.totalGames };
-              });
+              latestGameCount = progress.totalGames || 0;
               
               // Check if complete
               if (progress.complete) {
-                console.log('✅ Analysis complete, loading final data');
+                console.log('✅ Analysis complete');
                 if (fullData) {
                   const parsedCache = JSON.parse(fullData);
                   if (parsedCache.analysis) {
@@ -65,23 +61,32 @@ const Report = () => {
               }
             }
             
-            // Load full analysis with opening tree every 50 games
+            // Load full analysis with opening tree
             if (fullData) {
               const parsedCache = JSON.parse(fullData);
-              if (parsedCache.analysis && parsedCache.analysis.totalGames > 0) {
-                const currentCount = parsedCache.analysis.totalGames;
+              if (parsedCache.analysis) {
+                // CRITICAL: Always use the LATEST game count from progress, never go backwards
+                setAnalysis(prev => {
+                  const treeData = parsedCache.analysis;
+                  // Keep the higher count to prevent backwards jumps
+                  const finalCount = Math.max(latestGameCount, prev?.totalGames || 0, treeData.totalGames || 0);
+                  
+                  return {
+                    ...treeData,
+                    totalGames: finalCount  // Force latest count
+                  };
+                });
                 
-                // Only update full tree every 50 games to avoid performance issues
-                if (currentCount % 50 === 0 || currentCount < 50) {
-                  console.log('🌳 Loading tree update at game', currentCount);
-                  setAnalysis(parsedCache.analysis);
-                }
+                console.log(`🌳 Tree updated: ${parsedCache.analysis.totalGames} games (showing ${latestGameCount})`);
               }
+            } else if (latestGameCount > 0) {
+              // Only progress exists, update count without tree
+              setAnalysis(prev => prev ? { ...prev, totalGames: latestGameCount } : null);
             }
           } catch (error) {
             console.error('Error polling for updates:', error);
           }
-        }, 100); // Poll every 100ms for ultra-smooth counting
+        }, 150); // Poll every 150ms for smooth updates
       }
     } else {
       // Try to load from cache

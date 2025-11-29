@@ -133,10 +133,14 @@ const Scout = () => {
         openingTree: serializeOpeningTree(analysis.openingTree),
       };
       
-      // Save initial state to cache
+      // Initialize both caches
       localStorage.setItem(cacheKey, JSON.stringify({ 
         analysis: initialReportData,
         timestamp: Date.now() 
+      }));
+      localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
+        totalGames: 0,
+        complete: false
       }));
       
       // Navigate immediately to show live updates
@@ -146,7 +150,7 @@ const Scout = () => {
         state: { 
           ...initialReportData,
           isLive: true,
-          cacheKey,  // Pass the cache key so Report knows where to poll
+          cacheKey,
           username,
           platform: actualPlatform,
           timeControls,
@@ -203,8 +207,12 @@ const Scout = () => {
                 console.warn('Failed to update progress:', e);
               }
               
-              // Save full analysis every 50 games for progressive tree updates
-              if (analysis.totalGames % 50 === 0) {
+              // Save full analysis frequently at start (every 10 games until 50), then every 50 games
+              const shouldSave = analysis.totalGames <= 50 
+                ? analysis.totalGames % 10 === 0 
+                : analysis.totalGames % 50 === 0;
+              
+              if (shouldSave) {
                 try {
                   const progressData = {
                     ...analysis,
@@ -215,6 +223,7 @@ const Scout = () => {
                     timestamp: Date.now(),
                     complete: false
                   }));
+                  console.log(`💾 Saved tree update at ${analysis.totalGames} games`);
                 } catch (e) {
                   console.warn('Failed to update progress:', e);
                 }
@@ -288,8 +297,12 @@ const Scout = () => {
                 console.warn('Failed to update progress:', e);
               }
               
-              // Save full analysis every 50 games for progressive tree updates
-              if (analysis.totalGames % 50 === 0) {
+              // Save full analysis frequently at start (every 10 games until 50), then every 50 games
+              const shouldSave = analysis.totalGames <= 50 
+                ? analysis.totalGames % 10 === 0 
+                : analysis.totalGames % 50 === 0;
+              
+              if (shouldSave) {
                 try {
                   const progressData = {
                     ...analysis,
@@ -300,6 +313,7 @@ const Scout = () => {
                     timestamp: Date.now(),
                     complete: false
                   }));
+                  console.log(`💾 Saved tree update at ${analysis.totalGames} games`);
                 } catch (e) {
                   console.warn('Failed to update progress:', e);
                 }
