@@ -106,7 +106,11 @@ export default class OpeningGraph {
   }
 
   addMoveForFen(sourceFen, targetFen, moveSan, pgnStats) {
-    const sourceNode = this.getNodeFromGraph(sourceFen, true)
+    // KEY FIX: Use simplified FEN for TRANSPOSITION DETECTION
+    const simplifiedSource = simplifiedFen(sourceFen)
+    const simplifiedTarget = simplifiedFen(targetFen)
+    
+    const sourceNode = this.getNodeFromGraph(simplifiedSource, true)
     
     if (!sourceNode.children) {
       sourceNode.children = {}
@@ -114,7 +118,7 @@ export default class OpeningGraph {
     
     if (!sourceNode.children[moveSan]) {
       sourceNode.children[moveSan] = {
-        fen: targetFen,
+        fen: simplifiedTarget,
         details: pgnStats.index
       }
     } else {

@@ -68,7 +68,8 @@ export function createEmptyAnalysis(playerColor: "white" | "black" | "both" = "b
 export function analyzeGamesIncremental(
   existingAnalysis: AnalysisResult,
   newGames: GameData[],
-  targetUsername: string
+  targetUsername: string,
+  onProgress?: (count: number) => void
 ): AnalysisResult {
   const rootNode = existingAnalysis.openingTree;
   let totalGames = existingAnalysis.totalGames;
@@ -155,6 +156,11 @@ export function analyzeGamesIncremental(
     }
     
     console.log(`[ANALYSIS] Game ${totalGames} added all ${maxPlies} moves to tree`);
+    
+    // CRITICAL: Call progress callback after EACH game for smooth counting (1, 2, 3...)
+    if (onProgress) {
+      onProgress(totalGames);
+    }
   }
 
   console.log(`[ANALYSIS] Complete. Total games analyzed: ${totalGames}`);

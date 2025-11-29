@@ -173,9 +173,11 @@ const Scout = () => {
               }
               
               console.log(`Processing batch of ${gameBatch.length} games...`);
-              // Analyze each batch as it arrives
-              analysis = analyzeGamesIncremental(analysis, gameBatch, username);
-              // Don't call setProgress here - let the per-game callback handle smooth counting
+              // Analyze each batch as it arrives with per-game progress callback
+              analysis = analyzeGamesIncremental(analysis, gameBatch, username, (count) => {
+                // Update progress for EACH game (1, 2, 3, 4...)
+                setProgress(count);
+              });
               console.log(`Total games analyzed so far: ${analysis.totalGames}`);
               
               // Save full analysis every 50 games for progressive updates
@@ -236,9 +238,11 @@ const Scout = () => {
               }
               
               console.log(`Processing batch of ${gameBatch.length} games...`);
-              // Analyze each batch as it arrives
-              analysis = analyzeGamesIncremental(analysis, gameBatch, username);
-              // Don't call setProgress here - let the per-game callback handle smooth counting
+              // Analyze each batch as it arrives with per-game progress callback
+              analysis = analyzeGamesIncremental(analysis, gameBatch, username, (count) => {
+                // Update progress for EACH game (1, 2, 3, 4...)
+                setProgress(count);
+              });
               console.log(`Total games analyzed so far: ${analysis.totalGames}`);
               
               // Save full analysis every 50 games for progressive updates

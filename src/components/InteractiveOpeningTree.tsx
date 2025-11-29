@@ -380,7 +380,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               ...possibleMoves.reduce((acc, square) => ({
                 ...acc,
                 [square]: {
-                  background: 'radial-gradient(circle, rgba(0, 100, 0, 0.8) 20%, transparent 20%)',
+                  background: 'radial-gradient(circle, rgba(0, 120, 0, 0.9) 25%, transparent 25%)',
                 }
               }), {})
             }}
