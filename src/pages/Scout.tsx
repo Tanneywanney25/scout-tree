@@ -194,6 +194,10 @@ const Scout = () => {
           },
           abortControllerRef.current?.signal
         );
+        
+        // Clear cache after Lichess analysis completes to prevent crashes
+        console.log('Lichess analysis complete, clearing cache');
+        localStorage.removeItem(cacheKey);
       } else {
         await fetchChessComGames(
           username,
@@ -234,6 +238,10 @@ const Scout = () => {
             }
           }
         );
+        
+        // Clear cache after Chess.com analysis completes to prevent crashes
+        console.log('Chess.com analysis complete, clearing cache');
+        localStorage.removeItem(cacheKey);
       }
 
       if (analysis.totalGames === 0) {

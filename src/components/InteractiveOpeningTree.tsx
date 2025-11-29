@@ -336,11 +336,6 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
             onDrop={onDrop}
             onSquareClick={onSquareClick}
             squareStyles={{
-              ...(selectedSquare && {
-                [selectedSquare]: { 
-                  backgroundColor: 'rgba(34, 139, 34, 0.6)',
-                }
-              }),
               ...possibleMoves.reduce((acc, square) => ({
                 ...acc,
                 [square]: {
