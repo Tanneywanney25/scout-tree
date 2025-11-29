@@ -143,6 +143,7 @@ export async function fetchLichessGames(
   const games: GameData[] = [];
   let count = 0;
   let batchBuffer: GameData[] = [];
+  const MAX_GAMES = 3000; // Limit to prevent crashes
 
   try {
     while (true) {
@@ -150,6 +151,12 @@ export async function fetchLichessGames(
       if (signal?.aborted) {
         reader.releaseLock();
         throw new DOMException('Request aborted', 'AbortError');
+      }
+      
+      // Stop if we've reached the game limit
+      if (count >= MAX_GAMES) {
+        console.log(`Reached maximum of ${MAX_GAMES} games, stopping fetch`);
+        break;
       }
       
       const { done, value } = await reader.read();
@@ -306,8 +313,14 @@ export async function fetchChessComGames(
     const recentArchives = filteredArchives.reverse();
     const allGames: GameData[] = [];
     let count = 0;
+    const MAX_GAMES = 3000; // Limit to prevent crashes
 
     for (const archiveUrl of recentArchives) {
+      // Stop if we've reached the game limit
+      if (count >= MAX_GAMES) {
+        console.log(`Reached maximum of ${MAX_GAMES} games, stopping fetch`);
+        break;
+      }
       // Rate limiting: wait 500ms between archive requests
       if (count > 0) {
         await new Promise(resolve => setTimeout(resolve, 500));

@@ -318,6 +318,17 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       {/* Chess Board */}
       <div className="flex items-center justify-center flex-1">
         <div className="relative aspect-square w-full max-w-[700px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
+          <style>{`
+            /* Fix dragged piece size */
+            .piece-417db {
+              width: 100% !important;
+              height: 100% !important;
+            }
+            img[data-piece] {
+              max-width: 100% !important;
+              max-height: 100% !important;
+            }
+          `}</style>
           <Chessboard 
             position={currentPosition}
             orientation={boardOrientation}
