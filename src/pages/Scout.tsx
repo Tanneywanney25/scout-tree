@@ -162,6 +162,16 @@ const Scout = () => {
           },
           (gameBatch) => {
             try {
+              // Check if user clicked stop button
+              if (localStorage.getItem(`abort_${cacheKey}`)) {
+                console.log('Abort flag detected, stopping analysis');
+                localStorage.removeItem(`abort_${cacheKey}`);
+                if (abortControllerRef.current) {
+                  abortControllerRef.current.abort();
+                }
+                return;
+              }
+              
               console.log(`Processing batch of ${gameBatch.length} games...`);
               // Analyze each batch as it arrives
               analysis = analyzeGamesIncremental(analysis, gameBatch, username);
@@ -193,6 +203,16 @@ const Scout = () => {
           },
           (gameBatch) => {
             try {
+              // Check if user clicked stop button
+              if (localStorage.getItem(`abort_${cacheKey}`)) {
+                console.log('Abort flag detected, stopping analysis');
+                localStorage.removeItem(`abort_${cacheKey}`);
+                if (abortControllerRef.current) {
+                  abortControllerRef.current.abort();
+                }
+                return;
+              }
+              
               console.log(`Processing batch of ${gameBatch.length} games...`);
               // Analyze each batch as it arrives
               analysis = analyzeGamesIncremental(analysis, gameBatch, username);

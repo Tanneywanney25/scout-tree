@@ -16,6 +16,7 @@ const Report = () => {
   const location = useLocation();
   const [analysis, setAnalysis] = useState<SerializedAnalysisResult | null>(null);
   const [isLive, setIsLive] = useState(false);
+  const [cacheKey, setCacheKey] = useState<string | null>(null);
   const updateIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
@@ -24,6 +25,7 @@ const Report = () => {
       const state = location.state as any;
       setAnalysis(state as SerializedAnalysisResult);
       setIsLive(state.isLive || false);
+      setCacheKey(state.cacheKey || null);
       
       // If it's a live report, poll for updates
       if (state.isLive && state.cacheKey) {
@@ -102,6 +104,20 @@ const Report = () => {
     toast.success("Report downloaded");
   };
 
+  const handleStop = () => {
+    if (cacheKey) {
+      // Set abort flag in localStorage
+      localStorage.setItem(`abort_${cacheKey}`, 'true');
+      toast.info("Stopping analysis...");
+    }
+    
+    // Stop polling
+    setIsLive(false);
+    if (updateIntervalRef.current) {
+      clearInterval(updateIntervalRef.current);
+    }
+  };
+
 
   if (!analysis) {
     return (
@@ -167,10 +183,17 @@ const Report = () => {
                 {isLive && <span className="ml-2 text-primary animate-pulse">• Live updating...</span>}
               </p>
             </div>
-            <Button onClick={handleDownload} variant="outline">
-              <Download className="mr-2 w-4 h-4" />
-              Download JSON
-            </Button>
+            <div className="flex gap-2">
+              {isLive && (
+                <Button onClick={handleStop} variant="destructive">
+                  Stop Analysis
+                </Button>
+              )}
+              <Button onClick={handleDownload} variant="outline">
+                <Download className="mr-2 w-4 h-4" />
+                Download JSON
+              </Button>
+            </div>
           </div>
 
           {/* Main Layout: Board and Lines */}
