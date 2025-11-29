@@ -139,8 +139,30 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   }, []);
 
   const handleMoveBack = useCallback(() => {
-    setSelectedPath(prev => prev.length > 0 ? prev.slice(0, -1) : prev);
-  }, []);
+    setSelectedPath(prev => {
+      if (prev.length === 0) return prev;
+      const newPath = prev.slice(0, -1);
+      
+      // Check if we're back on the tree - if so, clear off-tree state
+      let currentNode = node;
+      let isOnTree = true;
+      for (const san of newPath) {
+        const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
+        if (!child) {
+          isOnTree = false;
+          break;
+        }
+        currentNode = child;
+      }
+      
+      // If we're back on tree, clear the off-tree flag
+      if (isOnTree) {
+        setIsOffTree(false);
+      }
+      
+      return newPath;
+    });
+  }, [node]);
 
   const handleMoveForward = useCallback(() => {
     setSelectedPath(prev => {
@@ -358,7 +380,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               ...possibleMoves.reduce((acc, square) => ({
                 ...acc,
                 [square]: {
-                  background: 'radial-gradient(circle, rgba(0, 200, 0, 0.6) 20%, transparent 20%)',
+                  background: 'radial-gradient(circle, rgba(0, 100, 0, 0.8) 20%, transparent 20%)',
                 }
               }), {})
             }}
