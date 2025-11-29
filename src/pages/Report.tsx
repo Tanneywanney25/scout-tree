@@ -128,9 +128,10 @@ const Report = () => {
             </Button>
           </div>
 
-          <div className="grid lg:grid-cols-3 gap-6">
-            {/* Left Column: Summary & Checklist */}
-            <div className="lg:col-span-1 space-y-6">
+          {/* Main Layout: Sidebar + Center Board + Content */}
+          <div className="grid lg:grid-cols-12 gap-6">
+            {/* Left Sidebar: Summary & Checklist */}
+            <div className="lg:col-span-3 space-y-6">
               <Card>
                 <CardHeader>
                   <CardTitle>60-Second Summary</CardTitle>
@@ -160,9 +161,8 @@ const Report = () => {
               </Card>
             </div>
 
-            {/* Right Column: Detailed Analysis */}
-            <div className="lg:col-span-2 space-y-6">
-              {/* Opening Tree */}
+            {/* Center: Interactive Opening Board */}
+            <div className="lg:col-span-6">
               <Card>
                 <CardHeader>
                   <CardTitle>Interactive Opening Explorer</CardTitle>
@@ -184,80 +184,114 @@ const Report = () => {
                   )}
                 </CardContent>
               </Card>
+            </div>
 
+            {/* Right Sidebar: Stats placeholder for future */}
+            <div className="lg:col-span-3 space-y-6">
               <Card>
                 <CardHeader>
-                  <CardTitle>Weakest Opening Lines</CardTitle>
-                  <CardDescription>
-                    Lines where {id} (playing {analysis.playerColor}) struggles most - exploit these as {analysis.playerColor === "white" ? "Black" : "White"}
-                  </CardDescription>
+                  <CardTitle>Statistics</CardTitle>
+                  <CardDescription>Key metrics</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  {analysis.weakestLines.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">
-                      Not enough game data to identify weak lines
-                    </p>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {analysis.weakestLines.map((line, index) => (
-                        <OpeningLineBoard
-                          key={index}
-                          line={line.line}
-                          winRate={line.winRate}
-                          count={line.count}
-                          isWeakLine={true}
-                          playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
-                        />
-                      ))}
+                  <div className="space-y-4">
+                    <div>
+                      <p className="text-sm text-muted-foreground">Total Games</p>
+                      <p className="text-2xl font-bold text-foreground">{analysis.totalGames}</p>
                     </div>
-                  )}
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>Strongest Opening Lines</CardTitle>
-                  <CardDescription>
-                    Lines where {id} (playing {analysis.playerColor}) performs best - avoid or prepare deeply as {analysis.playerColor === "white" ? "Black" : "White"}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  {analysis.strongestLines.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">
-                      Not enough game data to identify strong lines
-                    </p>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {analysis.strongestLines.map((line, index) => (
-                        <OpeningLineBoard
-                          key={index}
-                          line={line.line}
-                          winRate={line.winRate}
-                          count={line.count}
-                          isWeakLine={false}
-                          playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
-                        />
-                      ))}
+                    <div>
+                      <p className="text-sm text-muted-foreground">Playing As</p>
+                      <p className="text-xl font-semibold text-foreground capitalize">{analysis.playerColor}</p>
                     </div>
-                  )}
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>Training Drill</CardTitle>
-                  <CardDescription>3 positions to practice before your game</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="bg-muted/30 border border-border rounded-lg p-8 text-center">
-                    <p className="text-sm text-muted-foreground">
-                      Training positions coming soon - requires engine analysis
-                    </p>
+                    <div>
+                      <p className="text-sm text-muted-foreground">Weak Lines</p>
+                      <p className="text-2xl font-bold text-destructive">{analysis.weakestLines.length}</p>
+                    </div>
+                    <div>
+                      <p className="text-sm text-muted-foreground">Strong Lines</p>
+                      <p className="text-2xl font-bold text-primary">{analysis.strongestLines.length}</p>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
             </div>
           </div>
+
+          {/* Bottom Section: Opening Lines */}
+          <div className="grid lg:grid-cols-2 gap-6 mt-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>Weakest Opening Lines</CardTitle>
+                <CardDescription>
+                  Lines where {id} (playing {analysis.playerColor}) struggles most - exploit these as {analysis.playerColor === "white" ? "Black" : "White"}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {analysis.weakestLines.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    Not enough game data to identify weak lines
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 gap-4">
+                    {analysis.weakestLines.map((line, index) => (
+                      <OpeningLineBoard
+                        key={index}
+                        line={line.line}
+                        winRate={line.winRate}
+                        count={line.count}
+                        isWeakLine={true}
+                        playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
+                      />
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Strongest Opening Lines</CardTitle>
+                <CardDescription>
+                  Lines where {id} (playing {analysis.playerColor}) performs best - avoid or prepare deeply as {analysis.playerColor === "white" ? "Black" : "White"}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {analysis.strongestLines.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    Not enough game data to identify strong lines
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 gap-4">
+                    {analysis.strongestLines.map((line, index) => (
+                      <OpeningLineBoard
+                        key={index}
+                        line={line.line}
+                        winRate={line.winRate}
+                        count={line.count}
+                        isWeakLine={false}
+                        playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
+                      />
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Training Drill Section */}
+          <Card className="mt-6">
+            <CardHeader>
+              <CardTitle>Training Drill</CardTitle>
+              <CardDescription>3 positions to practice before your game</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="bg-muted/30 border border-border rounded-lg p-8 text-center">
+                <p className="text-sm text-muted-foreground">
+                  Training positions coming soon - requires engine analysis
+                </p>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       </main>
     </div>
