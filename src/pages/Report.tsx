@@ -33,29 +33,25 @@ const Report = () => {
         
         updateIntervalRef.current = setInterval(() => {
           try {
-            // Check progress updates
-            const progressData = localStorage.getItem(`${state.cacheKey}_progress`);
-            if (progressData) {
-              const progress = JSON.parse(progressData);
-              console.log('Progress update:', progress.totalGames, 'games');
+            // Check for updated analysis data
+            const cached = localStorage.getItem(state.cacheKey);
+            if (cached) {
+              const parsedCache = JSON.parse(cached);
+              console.log('Progress update:', parsedCache.analysis?.totalGames, 'games');
               
-              // Update the game count in the UI
-              setAnalysis(prev => prev ? { ...prev, totalGames: progress.totalGames } : null);
+              // Update the full analysis including opening tree
+              if (parsedCache.analysis) {
+                setAnalysis(parsedCache.analysis);
+              }
               
-              // If complete, load the full analysis
-              if (progress.complete) {
+              // If complete, stop polling
+              if (parsedCache.complete) {
                 console.log('Analysis complete, loading full data');
-                const cached = localStorage.getItem(state.cacheKey);
-                if (cached) {
-                  const parsedCache = JSON.parse(cached);
-                  setAnalysis(parsedCache.analysis);
-                }
                 setIsLive(false);
                 if (updateIntervalRef.current) {
                   clearInterval(updateIntervalRef.current);
                 }
-                // Clean up progress key
-                localStorage.removeItem(`${state.cacheKey}_progress`);
+                // Clean up cache
                 localStorage.removeItem(state.cacheKey);
               }
             }
