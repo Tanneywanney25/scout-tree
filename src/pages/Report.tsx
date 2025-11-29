@@ -33,26 +33,31 @@ const Report = () => {
         
         updateIntervalRef.current = setInterval(() => {
           try {
-            const cached = localStorage.getItem(state.cacheKey);
-            if (cached) {
-              const parsedCache = JSON.parse(cached);
-              const updatedAnalysis = parsedCache.analysis;
+            // Check progress updates
+            const progressData = localStorage.getItem(`${state.cacheKey}_progress`);
+            if (progressData) {
+              const progress = JSON.parse(progressData);
+              console.log('Progress update:', progress.totalGames, 'games');
               
-              if (updatedAnalysis) {
-                console.log('Updating analysis with', updatedAnalysis.totalGames, 'games');
-                setAnalysis(updatedAnalysis);
-              }
+              // Update the game count in the UI
+              setAnalysis(prev => prev ? { ...prev, totalGames: progress.totalGames } : null);
               
-              // Stop polling if analysis is complete
-              if (parsedCache.complete) {
-                console.log('Analysis complete, stopping polling');
+              // If complete, load the full analysis
+              if (progress.complete) {
+                console.log('Analysis complete, loading full data');
+                const cached = localStorage.getItem(state.cacheKey);
+                if (cached) {
+                  const parsedCache = JSON.parse(cached);
+                  setAnalysis(parsedCache.analysis);
+                }
                 setIsLive(false);
                 if (updateIntervalRef.current) {
                   clearInterval(updateIntervalRef.current);
                 }
+                // Clean up progress key
+                localStorage.removeItem(`${state.cacheKey}_progress`);
+                localStorage.removeItem(state.cacheKey);
               }
-            } else {
-              console.log('No cached data found for key:', state.cacheKey);
             }
           } catch (error) {
             console.error('Error polling for updates:', error);
