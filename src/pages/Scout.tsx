@@ -77,11 +77,17 @@ const Scout = () => {
 
     try {
       const timeControlKey = timeControls.sort().join(",");
-      const cacheKey = `scout_${username}_${platform}_${variant}_${timeControlKey}_${color}_${mode}_${dateFrom?.getTime()}_${dateTo?.getTime()}_${ratingMin}_${ratingMax}_${opponentName}`;
+      // Build cache key with proper handling of undefined values
+      const cacheKey = `scout_${username}_${platform}_${variant}_${timeControlKey}_${color}_${mode}_${dateFrom?.getTime() || 'all'}_${dateTo?.getTime() || 'now'}_${ratingMin || 'any'}_${ratingMax || 'any'}_${opponentName || 'all'}`;
       
-      // CLEAR CACHE to force fresh analysis with new logic
-      localStorage.removeItem(cacheKey);
-      console.log(`Cleared cache for: ${cacheKey}`);
+      // CLEAR ALL SCOUT CACHES for this user to force fresh analysis
+      const allKeys = Object.keys(localStorage);
+      allKeys.forEach(key => {
+        if (key.startsWith(`scout_${username}_`)) {
+          localStorage.removeItem(key);
+          console.log(`Cleared cache for: ${key}`);
+        }
+      });
       
       const cached = localStorage.getItem(cacheKey);
       
@@ -155,19 +161,26 @@ const Scout = () => {
             }
           },
           (gameBatch) => {
-            // Analyze each batch as it arrives
-            analysis = analyzeGamesIncremental(analysis, gameBatch, username);
-            setProgress(analysis.totalGames);
-            
-            // Update cache immediately for live updates
-            const updatedReportData = {
-              ...analysis,
-              openingTree: serializeOpeningTree(analysis.openingTree),
-            };
-            localStorage.setItem(cacheKey, JSON.stringify({ 
-              analysis: updatedReportData,
-              timestamp: Date.now() 
-            }));
+            try {
+              console.log(`Processing batch of ${gameBatch.length} games...`);
+              // Analyze each batch as it arrives
+              analysis = analyzeGamesIncremental(analysis, gameBatch, username);
+              setProgress(analysis.totalGames);
+              console.log(`Total games analyzed so far: ${analysis.totalGames}`);
+              
+              // Update cache immediately for live updates
+              const updatedReportData = {
+                ...analysis,
+                openingTree: serializeOpeningTree(analysis.openingTree),
+              };
+              localStorage.setItem(cacheKey, JSON.stringify({ 
+                analysis: updatedReportData,
+                timestamp: Date.now() 
+              }));
+              console.log(`Updated cache with ${analysis.totalGames} games`);
+            } catch (error) {
+              console.error('Error processing game batch:', error);
+            }
           },
           abortControllerRef.current?.signal
         );
@@ -179,19 +192,26 @@ const Scout = () => {
             setProgress(count);
           },
           (gameBatch) => {
-            // Analyze each batch as it arrives
-            analysis = analyzeGamesIncremental(analysis, gameBatch, username);
-            setProgress(analysis.totalGames);
-            
-            // Update cache immediately for live updates
-            const updatedReportData = {
-              ...analysis,
-              openingTree: serializeOpeningTree(analysis.openingTree),
-            };
-            localStorage.setItem(cacheKey, JSON.stringify({ 
-              analysis: updatedReportData,
-              timestamp: Date.now() 
-            }));
+            try {
+              console.log(`Processing batch of ${gameBatch.length} games...`);
+              // Analyze each batch as it arrives
+              analysis = analyzeGamesIncremental(analysis, gameBatch, username);
+              setProgress(analysis.totalGames);
+              console.log(`Total games analyzed so far: ${analysis.totalGames}`);
+              
+              // Update cache immediately for live updates
+              const updatedReportData = {
+                ...analysis,
+                openingTree: serializeOpeningTree(analysis.openingTree),
+              };
+              localStorage.setItem(cacheKey, JSON.stringify({ 
+                analysis: updatedReportData,
+                timestamp: Date.now() 
+              }));
+              console.log(`Updated cache with ${analysis.totalGames} games`);
+            } catch (error) {
+              console.error('Error processing game batch:', error);
+            }
           }
         );
       }
