@@ -178,7 +178,11 @@ const Report = () => {
                 </CardHeader>
                 <CardContent>
                   {analysis.openingTree && analysis.openingTree.children && analysis.openingTree.children.length > 0 ? (
-                    <InteractiveOpeningTree node={analysis.openingTree} maxDepth={15} />
+                    <InteractiveOpeningTree 
+                      node={analysis.openingTree} 
+                      maxDepth={15}
+                      playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
+                    />
                   ) : (
                     <div className="text-center py-8 text-muted-foreground">
                       <p>No opening tree data available. The analysis may still be processing or no games were found.</p>

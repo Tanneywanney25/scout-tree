@@ -27,9 +27,10 @@ interface SerializedOpeningNode {
 interface InteractiveOpeningTreeProps {
   node: SerializedOpeningNode;
   maxDepth?: number;
+  playerColor: "white" | "black";
 }
 
-export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeningTreeProps) => {
+export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: InteractiveOpeningTreeProps) => {
   const [selectedPath, setSelectedPath] = useState<string[]>([]);
   const [boardOrientation, setBoardOrientation] = useState<"white" | "black">("white");
 
@@ -74,6 +75,11 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
     // Find the most common move's count for opacity scaling
     const maxCount = sortedChildren[0].count;
     
+    // Determine whose turn it is at the current position
+    // White moves first (even number of moves = white's turn)
+    const isWhiteTurn = selectedPath.length % 2 === 0;
+    const isScoutedPlayerTurn = (playerColor === "white" && isWhiteTurn) || (playerColor === "black" && !isWhiteTurn);
+    
     // Create arrows for ALL moves with varying opacity
     const chess = new Chess(currentPosition);
     const moveArrows: MoveArrow[] = [];
@@ -86,8 +92,9 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
           const frequency = child.count / maxCount;
           const opacity = Math.max(0.2, frequency);
           
-          // Dark green with varying opacity
-          const color = `rgba(34, 139, 34, ${opacity})`;
+          // Green for scouted player, red for opponent
+          const baseColor = isScoutedPlayerTurn ? '34, 139, 34' : '220, 38, 38'; // green : red
+          const color = `rgba(${baseColor}, ${opacity})`;
           
           moveArrows.push({
             from: move.from,
@@ -260,6 +267,17 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
               >
                 <polygon points="0 0, 4 2, 0 4" fill="rgb(34, 139, 34)" fillOpacity="1" />
               </marker>
+              <marker
+                id="arrowhead-red"
+                markerWidth="4"
+                markerHeight="4"
+                refX="2.5"
+                refY="2"
+                orient="auto"
+                markerUnits="strokeWidth"
+              >
+                <polygon points="0 0, 4 2, 0 4" fill="rgb(220, 38, 38)" fillOpacity="1" />
+              </marker>
             </defs>
             {arrows.map((arrow, idx) => {
               const fromFile = arrow.from.charCodeAt(0) - 97;
@@ -280,6 +298,11 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
+              // Determine arrowhead color based on whose turn it is
+              const isWhiteTurn = selectedPath.length % 2 === 0;
+              const isScoutedPlayerTurn = (playerColor === "white" && isWhiteTurn) || (playerColor === "black" && !isWhiteTurn);
+              const markerEnd = isScoutedPlayerTurn ? "url(#arrowhead-green)" : "url(#arrowhead-red)";
+              
               return (
                 <line
                   key={idx}
@@ -290,7 +313,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10 }: InteractiveOpeni
                   stroke={arrow.color}
                   strokeWidth="0.18"
                   strokeLinecap="round"
-                  markerEnd="url(#arrowhead-green)"
+                  markerEnd={markerEnd}
                 />
               );
             })}
