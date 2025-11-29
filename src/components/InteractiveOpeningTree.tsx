@@ -34,6 +34,8 @@ interface InteractiveOpeningTreeProps {
 export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: InteractiveOpeningTreeProps) => {
   const [selectedPath, setSelectedPath] = useState<string[]>([]);
   const [boardOrientation, setBoardOrientation] = useState<"white" | "black">("white");
+  const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
+  const [possibleMoves, setPossibleMoves] = useState<string[]>([]);
 
   // Calculate the current position based on selected moves
   const currentPosition = useMemo(() => {
@@ -174,8 +176,58 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleMoveBack, handleMoveForward]);
 
-  // Handle piece moves on the board
+  // Handle square clicks for click-to-move
+  const onSquareClick = useCallback((square: string) => {
+    const chess = new Chess(currentPosition);
+    
+    // Find current node in tree
+    let currentNode = node;
+    for (const san of selectedPath) {
+      const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
+      if (!child) return;
+      currentNode = child;
+    }
+
+    // If a square is already selected, try to move
+    if (selectedSquare) {
+      try {
+        const move = chess.move({ from: selectedSquare, to: square, promotion: 'q' });
+        if (move) {
+          // Check if this move exists in the opening tree
+          const matchingChild = currentNode.children?.find((c: SerializedOpeningNode) => c.san === move.san);
+          
+          if (matchingChild) {
+            // Valid move in the tree - add it to selected path
+            setSelectedPath(prev => [...prev, move.san]);
+          }
+        }
+      } catch (error) {
+        // Invalid move, try selecting the clicked square instead
+      }
+      
+      // Clear selection
+      setSelectedSquare(null);
+      setPossibleMoves([]);
+    } else {
+      // Select the square and show possible moves
+      const piece = chess.get(square as any);
+      if (piece) {
+        setSelectedSquare(square);
+        
+        // Get all legal moves from this square
+        const moves = chess.moves({ square: square as any, verbose: true }) as any[];
+        const destinations = moves.map((m: any) => m.to);
+        setPossibleMoves(destinations);
+      }
+    }
+  }, [node, selectedPath, currentPosition, selectedSquare]);
+
+  // Handle piece drops (for drag-and-drop)
   const onDrop = useCallback(({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string }) => {
+    // Clear any selection
+    setSelectedSquare(null);
+    setPossibleMoves([]);
+    
     const chess = new Chess(currentPosition);
     
     // Find current node in tree
@@ -271,9 +323,26 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
             orientation={boardOrientation}
             draggable={true}
             onDrop={onDrop}
+            onSquareClick={onSquareClick}
+            squareStyles={{
+              ...(selectedSquare && {
+                [selectedSquare]: { 
+                  backgroundColor: 'rgba(34, 139, 34, 0.6)',
+                }
+              }),
+              ...possibleMoves.reduce((acc, square) => ({
+                ...acc,
+                [square]: {
+                  background: 'radial-gradient(circle, rgba(34, 139, 34, 0.5) 25%, transparent 25%)',
+                  borderRadius: '50%',
+                }
+              }), {})
+            }}
             boardStyle={{
               borderRadius: '0.5rem',
             }}
+            lightSquareStyle={{ backgroundColor: '#f0d9b5' }}
+            darkSquareStyle={{ backgroundColor: '#b58863' }}
           />
           
           {/* Arrow overlay */}
