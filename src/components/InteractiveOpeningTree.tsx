@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { Chess } from "chess.js";
 import Chessboard from "chessboardjsx";
 import { Button } from "./ui/button";
@@ -115,47 +115,48 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     });
     
     return moveArrows;
-  }, [node, selectedPath, currentPosition]);
+  }, [node, selectedPath, currentPosition, playerColor]);
 
-  const handleMoveClick = (movePath: string[]) => {
+  const handleMoveClick = useCallback((movePath: string[]) => {
     setSelectedPath(movePath);
-  };
+  }, []);
 
-  const handleReset = () => {
+  const handleReset = useCallback(() => {
     setSelectedPath([]);
-  };
+  }, []);
 
-  const handleFlipBoard = () => {
+  const handleFlipBoard = useCallback(() => {
     setBoardOrientation(prev => prev === "white" ? "black" : "white");
-  };
+  }, []);
 
-  const handleMoveBack = () => {
-    if (selectedPath.length > 0) {
-      setSelectedPath(selectedPath.slice(0, -1));
-    }
-  };
+  const handleMoveBack = useCallback(() => {
+    setSelectedPath(prev => prev.length > 0 ? prev.slice(0, -1) : prev);
+  }, []);
 
-  const handleMoveForward = () => {
-    // Find current node
-    let currentNode = node;
-    for (const san of selectedPath) {
-      const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
-      if (!child) return;
-      currentNode = child;
-    }
-    
-    // Move to most popular child if available
-    if (currentNode.children && currentNode.children.length > 0) {
-      const mostPopular = currentNode.children.reduce((prev, curr) => 
-        curr.count > prev.count ? curr : prev
-      );
-      setSelectedPath([...selectedPath, mostPopular.san]);
-    }
-  };
+  const handleMoveForward = useCallback(() => {
+    setSelectedPath(prev => {
+      // Find current node
+      let currentNode = node;
+      for (const san of prev) {
+        const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
+        if (!child) return prev;
+        currentNode = child;
+      }
+      
+      // Move to most popular child if available
+      if (currentNode.children && currentNode.children.length > 0) {
+        const mostPopular = currentNode.children.reduce((prevChild, curr) => 
+          curr.count > prevChild.count ? curr : prevChild
+        );
+        return [...prev, mostPopular.san];
+      }
+      return prev;
+    });
+  }, [node]);
 
-  const handleJumpToMove = (moveIndex: number) => {
-    setSelectedPath(selectedPath.slice(0, moveIndex));
-  };
+  const handleJumpToMove = useCallback((moveIndex: number) => {
+    setSelectedPath(prev => prev.slice(0, moveIndex));
+  }, []);
 
   // Keyboard navigation
   useEffect(() => {
@@ -171,10 +172,10 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedPath, node]);
+  }, [handleMoveBack, handleMoveForward]);
 
   // Handle piece moves on the board
-  const onDrop = ({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string }) => {
+  const onDrop = useCallback(({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string }) => {
     const chess = new Chess(currentPosition);
     
     // Find current node in tree
@@ -195,12 +196,12 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       
       if (matchingChild) {
         // Valid move in the tree - add it to selected path
-        setSelectedPath([...selectedPath, move.san]);
+        setSelectedPath(prev => [...prev, move.san]);
       }
     } catch (error) {
       console.error("Invalid move:", error);
     }
-  };
+  }, [node, selectedPath, currentPosition]);
 
   return (
     <div className="flex flex-col items-center gap-4 h-[calc(100vh-12rem)] max-w-7xl mx-auto">
