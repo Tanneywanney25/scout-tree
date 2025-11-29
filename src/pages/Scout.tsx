@@ -24,6 +24,7 @@ const Scout = () => {
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [platform, setPlatform] = useState("lichess");
+  const [variant, setVariant] = useState("standard");
   const [color, setColor] = useState<"white" | "black">("white");
   const [timeControls, setTimeControls] = useState<string[]>(["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"]);
   const [mode, setMode] = useState<"all" | "rated" | "casual">("all");
@@ -76,7 +77,7 @@ const Scout = () => {
 
     try {
       const timeControlKey = timeControls.sort().join(",");
-      const cacheKey = `scout_${username}_${platform}_${timeControlKey}_${color}_${mode}_${dateFrom?.getTime()}_${dateTo?.getTime()}_${ratingMin}_${ratingMax}_${opponentName}`;
+      const cacheKey = `scout_${username}_${platform}_${variant}_${timeControlKey}_${color}_${mode}_${dateFrom?.getTime()}_${dateTo?.getTime()}_${ratingMin}_${ratingMax}_${opponentName}`;
       
       // CLEAR CACHE to force fresh analysis with new logic
       localStorage.removeItem(cacheKey);
@@ -104,6 +105,7 @@ const Scout = () => {
       
       // Build options object with all filters
       const fetchOptions = {
+        variant,
         timeControls,
         mode,
         dateFrom,
@@ -303,6 +305,22 @@ const Scout = () => {
                     <SelectContent>
                       <SelectItem value="lichess">Lichess</SelectItem>
                       <SelectItem value="chesscom">Chess.com (may hit CORS)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="variant">Chess Variant</Label>
+                  <Select value={variant} onValueChange={setVariant}>
+                    <SelectTrigger id="variant">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="standard">Standard rules</SelectItem>
+                      <SelectItem value="crazyhouse">Crazyhouse</SelectItem>
+                      <SelectItem value="threeCheck">Three check</SelectItem>
+                      <SelectItem value="kingOfTheHill">King of the hill</SelectItem>
+                      <SelectItem value="racingKings">Racing kings</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
