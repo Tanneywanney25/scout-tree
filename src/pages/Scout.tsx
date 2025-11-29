@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import Header from "@/components/Header";
 import { Button } from "@/components/ui/button";
@@ -37,6 +37,7 @@ const Scout = () => {
   const [progress, setProgress] = useState<number | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [currentAnalysis, setCurrentAnalysis] = useState<AnalysisResult | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const toggleTimeControl = (tc: string) => {
     setTimeControls(prev => 
@@ -59,6 +60,14 @@ const Scout = () => {
       toast.error("Analysis already in progress. Please wait.");
       return;
     }
+
+    // Cancel any previous request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    // Create new abort controller for this request
+    abortControllerRef.current = new AbortController();
 
     setLoading(true);
     setProgress(null);
@@ -141,7 +150,8 @@ const Scout = () => {
                 }
               });
             }
-          }
+          },
+          abortControllerRef.current?.signal
         );
       } else {
         await fetchChessComGames(
@@ -226,15 +236,22 @@ const Scout = () => {
       console.error("Scout error:", error);
       toast.dismiss(); // Dismiss all toasts including the loading one
       
+      // Ignore abort errors (user cancelled)
+      if (error.name === 'AbortError') {
+        toast.info("Analysis cancelled");
+        return;
+      }
+      
       // Show specific error message for rate limiting
       if (error.message?.includes('429') || error.message?.includes('rate limit')) {
-        toast.error("Rate limit exceeded. Please wait 10-20 seconds before trying again.", {
-          duration: 5000
+        toast.error("Rate limit exceeded. Lichess allows only 1 request at a time. Please wait 20 seconds before trying again.", {
+          duration: 6000
         });
       } else {
         toast.error(error.message || "Failed to generate report. Try again.");
       }
     } finally {
+      abortControllerRef.current = null;
       setLoading(false);
       setProgress(null);
       setWarning(null);

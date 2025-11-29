@@ -23,7 +23,8 @@ export async function fetchLichessGames(
   username: string,
   options: FetchOptions = {},
   onProgress?: (count: number) => void,
-  onBatch?: (games: GameData[]) => void
+  onBatch?: (games: GameData[]) => void,
+  signal?: AbortSignal
 ): Promise<GameData[]> {
   const {
     timeControls = ["blitz"],
@@ -42,6 +43,11 @@ export async function fetchLichessGames(
     
     // SEQUENTIAL fetching - await each request before starting the next
     for (const tc of timeControls) {
+      // Check if aborted
+      if (signal?.aborted) {
+        throw new DOMException('Request aborted', 'AbortError');
+      }
+      
       try {
         const tcGames = await fetchLichessGames(
           username,
@@ -50,15 +56,21 @@ export async function fetchLichessGames(
             totalCount = allGames.length + count;
             if (onProgress) onProgress(totalCount);
           },
-          onBatch
+          onBatch,
+          signal
         );
         allGames.push(...tcGames);
         
-        // Add small delay between time controls to respect rate limits
+        // Add delay between time controls to respect rate limits
         if (timeControls.indexOf(tc) < timeControls.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 500));
+          await new Promise(resolve => setTimeout(resolve, 1000)); // Increased to 1 second
         }
       } catch (error: any) {
+        // If aborted, propagate the error
+        if (error.name === 'AbortError') {
+          throw error;
+        }
+        
         // If we hit rate limit, stop and return what we have
         if (error.message.includes('429') || error.message.includes('rate limit')) {
           console.warn(`Rate limit hit at time control ${tc}, returning ${allGames.length} games`);
@@ -103,6 +115,7 @@ export async function fetchLichessGames(
     headers: {
       Accept: "application/x-ndjson",
     },
+    signal, // Add abort signal to fetch
   });
 
   if (!response.ok) {
@@ -126,6 +139,12 @@ export async function fetchLichessGames(
 
   try {
     while (true) {
+      // Check if aborted during streaming
+      if (signal?.aborted) {
+        reader.releaseLock();
+        throw new DOMException('Request aborted', 'AbortError');
+      }
+      
       const { done, value } = await reader.read();
       if (done) break;
 
