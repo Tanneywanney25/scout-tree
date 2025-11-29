@@ -178,8 +178,8 @@ const Scout = () => {
               setProgress(analysis.totalGames);
               console.log(`Total games analyzed so far: ${analysis.totalGames}`);
               
-              // Save full analysis every 100 games for progressive updates
-              if (analysis.totalGames % 100 === 0 || analysis.totalGames < 100) {
+              // Save full analysis every 50 games for progressive updates
+              if (analysis.totalGames % 50 === 0) {
                 try {
                   const progressData = {
                     ...analysis,
@@ -241,8 +241,8 @@ const Scout = () => {
               setProgress(analysis.totalGames);
               console.log(`Total games analyzed so far: ${analysis.totalGames}`);
               
-              // Save full analysis every 100 games for progressive updates
-              if (analysis.totalGames % 100 === 0 || analysis.totalGames < 100) {
+              // Save full analysis every 50 games for progressive updates
+              if (analysis.totalGames % 50 === 0) {
                 try {
                   const progressData = {
                     ...analysis,
