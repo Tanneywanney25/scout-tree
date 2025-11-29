@@ -30,24 +30,30 @@ const Report = () => {
         console.log('Starting live polling with cache key:', state.cacheKey);
         
         updateIntervalRef.current = setInterval(() => {
-          const cached = localStorage.getItem(state.cacheKey);
-          if (cached) {
-            const parsedCache = JSON.parse(cached);
-            const updatedAnalysis = parsedCache.analysis;
-            
-            if (updatedAnalysis && updatedAnalysis.totalGames > 0) {
-              console.log('Updating analysis with', updatedAnalysis.totalGames, 'games');
-              setAnalysis(updatedAnalysis);
-            }
-            
-            // Stop polling if analysis is complete
-            if (parsedCache.complete) {
-              console.log('Analysis complete, stopping polling');
-              setIsLive(false);
-              if (updateIntervalRef.current) {
-                clearInterval(updateIntervalRef.current);
+          try {
+            const cached = localStorage.getItem(state.cacheKey);
+            if (cached) {
+              const parsedCache = JSON.parse(cached);
+              const updatedAnalysis = parsedCache.analysis;
+              
+              if (updatedAnalysis) {
+                console.log('Updating analysis with', updatedAnalysis.totalGames, 'games');
+                setAnalysis(updatedAnalysis);
               }
+              
+              // Stop polling if analysis is complete
+              if (parsedCache.complete) {
+                console.log('Analysis complete, stopping polling');
+                setIsLive(false);
+                if (updateIntervalRef.current) {
+                  clearInterval(updateIntervalRef.current);
+                }
+              }
+            } else {
+              console.log('No cached data found for key:', state.cacheKey);
             }
+          } catch (error) {
+            console.error('Error polling for updates:', error);
           }
         }, 300); // Poll every 300ms for fast updates
       }
