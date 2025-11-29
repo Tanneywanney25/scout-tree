@@ -33,32 +33,51 @@ const Report = () => {
         
         updateIntervalRef.current = setInterval(() => {
           try {
-            // Check for updated analysis data
-            const cached = localStorage.getItem(state.cacheKey);
-            if (cached) {
-              const parsedCache = JSON.parse(cached);
-              console.log('Progress update:', parsedCache.analysis?.totalGames, 'games');
+            // FAST: Poll lightweight progress key for immediate game count updates
+            const progressData = localStorage.getItem(`${state.cacheKey}_progress`);
+            if (progressData) {
+              const progress = JSON.parse(progressData);
               
-              // Update the full analysis including opening tree
-              if (parsedCache.analysis) {
-                setAnalysis(parsedCache.analysis);
+              // Update total games count immediately for smooth counting (1, 2, 3...)
+              if (progress.totalGames && analysis) {
+                setAnalysis(prev => prev ? { ...prev, totalGames: progress.totalGames } : null);
               }
               
-              // If complete, stop polling
-              if (parsedCache.complete) {
+              // Check if complete
+              if (progress.complete) {
                 console.log('Analysis complete, loading full data');
+                const cached = localStorage.getItem(state.cacheKey);
+                if (cached) {
+                  const parsedCache = JSON.parse(cached);
+                  if (parsedCache.analysis) {
+                    setAnalysis(parsedCache.analysis);
+                  }
+                }
                 setIsLive(false);
                 if (updateIntervalRef.current) {
                   clearInterval(updateIntervalRef.current);
                 }
-                // Clean up cache
-                localStorage.removeItem(state.cacheKey);
+                // Clean up progress cache
+                localStorage.removeItem(`${state.cacheKey}_progress`);
+              }
+            }
+            
+            // SLOW: Load full analysis with opening tree every 50 games for progressive updates
+            // This is expensive so we don't do it every poll
+            if (analysis && analysis.totalGames % 50 === 0) {
+              const cached = localStorage.getItem(state.cacheKey);
+              if (cached) {
+                const parsedCache = JSON.parse(cached);
+                if (parsedCache.analysis) {
+                  console.log('Loading full tree update at game', parsedCache.analysis.totalGames);
+                  setAnalysis(parsedCache.analysis);
+                }
               }
             }
           } catch (error) {
             console.error('Error polling for updates:', error);
           }
-        }, 300); // Poll every 300ms for fast updates
+        }, 100); // Poll every 100ms for ultra-smooth counting
       }
     } else {
       // Try to load from cache
