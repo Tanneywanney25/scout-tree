@@ -62,9 +62,15 @@ const Scout = () => {
       return;
     }
 
-    // Cancel any previous request
+    // Cancel any previous request and wait for cleanup
     if (abortControllerRef.current) {
+      console.log('Aborting previous request...');
       abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      
+      // CRITICAL: Wait for Lichess to process the abort before starting new request
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      toast.info("Starting new analysis...");
     }
 
     // Create new abort controller for this request
@@ -388,7 +394,10 @@ const Scout = () => {
         toast.error(error.message || "Failed to generate report. Try again.");
       }
     } finally {
-      abortControllerRef.current = null;
+      // Clear abort controller reference
+      if (abortControllerRef.current) {
+        abortControllerRef.current = null;
+      }
       setLoading(false);
       setProgress(null);
       setWarning(null);

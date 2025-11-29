@@ -149,7 +149,12 @@ export async function fetchLichessGames(
     while (true) {
       // Check if aborted during streaming
       if (signal?.aborted) {
-        reader.releaseLock();
+        console.log('Abort signal detected, stopping stream...');
+        try {
+          await reader.cancel();
+        } catch (e) {
+          console.warn('Reader cancel error:', e);
+        }
         throw new DOMException('Request aborted', 'AbortError');
       }
       
@@ -238,8 +243,20 @@ export async function fetchLichessGames(
     if (onProgress && count > 0) {
       onProgress(count);
     }
+  } catch (error: any) {
+    // Ensure reader is properly closed
+    try {
+      await reader.cancel();
+    } catch (e) {
+      // Ignore cancel errors
+    }
+    throw error;
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch (e) {
+      // Reader might already be released
+    }
   }
 
   return games;
