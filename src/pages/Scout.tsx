@@ -101,7 +101,6 @@ const Scout = () => {
 
       const actualPlatform = platform === "auto" ? "lichess" : platform;
       let analysis = createEmptyAnalysis(color);
-      let hasNavigated = false;
       
       // Build options object with all filters
       const fetchOptions = {
@@ -123,35 +122,13 @@ const Scout = () => {
             setProgress(count);
             
             if (count > 2000 && !warning) {
-              setWarning("Large dataset - navigating to report early...");
+              setWarning("Large dataset - processing all games...");
             }
           },
           (gameBatch) => {
             // Analyze each batch as it arrives
             analysis = analyzeGamesIncremental(analysis, gameBatch, username);
             setProgress(analysis.totalGames);
-            
-            // Navigate to report as soon as we have 50+ games analyzed
-            if (!hasNavigated && analysis.totalGames >= 50) {
-              hasNavigated = true;
-              const reportData = {
-                ...analysis,
-                openingTree: serializeOpeningTree(analysis.openingTree),
-              };
-              
-              toast.success("Opening report - analysis continuing...");
-              navigate(`/report/${username}`, { 
-                state: { 
-                  ...reportData,
-                  isLive: true,
-                  username,
-                  platform: actualPlatform,
-                  timeControls,
-                  color,
-                  mode
-                }
-              });
-            }
           },
           abortControllerRef.current?.signal
         );
@@ -166,28 +143,6 @@ const Scout = () => {
             // Analyze each batch as it arrives
             analysis = analyzeGamesIncremental(analysis, gameBatch, username);
             setProgress(analysis.totalGames);
-            
-            // Navigate to report as soon as we have 50+ games analyzed
-            if (!hasNavigated && analysis.totalGames >= 50) {
-              hasNavigated = true;
-              const reportData = {
-                ...analysis,
-                openingTree: serializeOpeningTree(analysis.openingTree),
-              };
-              
-              toast.success("Opening report - analysis continuing...");
-              navigate(`/report/${username}`, { 
-                state: { 
-                  ...reportData,
-                  isLive: true,
-                  username,
-                  platform: actualPlatform,
-                  timeControls,
-                  color,
-                  mode
-                }
-              });
-            }
           }
         );
       }
@@ -224,16 +179,14 @@ const Scout = () => {
         }
       }
 
-      // If we haven't navigated yet (small dataset or Chess.com), navigate now
-      if (!hasNavigated) {
-        const reportData = {
-          ...analysis,
-          openingTree: serializeOpeningTree(analysis.openingTree),
-        };
-        
-        toast.success("Report generated!");
-        navigate(`/report/${username}`, { state: reportData });
-      }
+      // Navigate with complete analysis
+      const reportData = {
+        ...analysis,
+        openingTree: serializeOpeningTree(analysis.openingTree),
+      };
+      
+      toast.success(`Report generated! Analyzed ${analysis.totalGames} games.`);
+      navigate(`/report/${username}`, { state: reportData });
     } catch (error: any) {
       console.error("Scout error:", error);
       toast.dismiss(); // Dismiss all toasts including the loading one
