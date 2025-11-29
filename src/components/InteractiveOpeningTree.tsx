@@ -36,6 +36,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   const [boardOrientation, setBoardOrientation] = useState<"white" | "black">("white");
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [possibleMoves, setPossibleMoves] = useState<string[]>([]);
+  const [isOffTree, setIsOffTree] = useState(false);
 
   // Calculate the current position based on selected moves
   const currentPosition = useMemo(() => {
@@ -55,6 +56,11 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
 
   // Find current node in tree and calculate arrows
   const arrows = useMemo(() => {
+    // Don't show arrows if we're off the tree
+    if (isOffTree) {
+      return [];
+    }
+    
     let currentNode = node;
     
     // Navigate to current position in tree
@@ -117,7 +123,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     });
     
     return moveArrows;
-  }, [node, selectedPath, currentPosition, playerColor]);
+  }, [node, selectedPath, currentPosition, playerColor, isOffTree]);
 
   const handleMoveClick = useCallback((movePath: string[]) => {
     setSelectedPath(movePath);
@@ -125,6 +131,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
 
   const handleReset = useCallback(() => {
     setSelectedPath([]);
+    setIsOffTree(false);
   }, []);
 
   const handleFlipBoard = useCallback(() => {
@@ -180,12 +187,14 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   const onSquareClick = useCallback((square: string) => {
     const chess = new Chess(currentPosition);
     
-    // Find current node in tree
+    // Find current node in tree (only if not off tree)
     let currentNode = node;
-    for (const san of selectedPath) {
-      const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
-      if (!child) return;
-      currentNode = child;
+    if (!isOffTree) {
+      for (const san of selectedPath) {
+        const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
+        if (!child) break;
+        currentNode = child;
+      }
     }
 
     // If a square is already selected, try to move
@@ -193,12 +202,16 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       try {
         const move = chess.move({ from: selectedSquare, to: square, promotion: 'q' });
         if (move) {
-          // Check if this move exists in the opening tree
-          const matchingChild = currentNode.children?.find((c: SerializedOpeningNode) => c.san === move.san);
+          // Allow ANY legal move
+          setSelectedPath(prev => [...prev, move.san]);
           
-          if (matchingChild) {
-            // Valid move in the tree - add it to selected path
-            setSelectedPath(prev => [...prev, move.san]);
+          // Check if this move exists in the opening tree
+          if (!isOffTree) {
+            const matchingChild = currentNode.children?.find((c: SerializedOpeningNode) => c.san === move.san);
+            if (!matchingChild) {
+              // Move not in tree - mark as off tree
+              setIsOffTree(true);
+            }
           }
         }
       } catch (error) {
@@ -220,7 +233,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         setPossibleMoves(destinations);
       }
     }
-  }, [node, selectedPath, currentPosition, selectedSquare]);
+  }, [node, selectedPath, currentPosition, selectedSquare, isOffTree]);
 
   // Handle piece drops (for drag-and-drop)
   const onDrop = useCallback(({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string }) => {
@@ -230,12 +243,14 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     
     const chess = new Chess(currentPosition);
     
-    // Find current node in tree
+    // Find current node in tree (only if not off tree)
     let currentNode = node;
-    for (const san of selectedPath) {
-      const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
-      if (!child) return;
-      currentNode = child;
+    if (!isOffTree) {
+      for (const san of selectedPath) {
+        const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
+        if (!child) return;
+        currentNode = child;
+      }
     }
 
     // Try to make the move
@@ -243,17 +258,21 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       const move = chess.move({ from: sourceSquare, to: targetSquare, promotion: 'q' });
       if (!move) return;
 
-      // Check if this move exists in the opening tree
-      const matchingChild = currentNode.children?.find((c: SerializedOpeningNode) => c.san === move.san);
+      // Allow ANY legal move
+      setSelectedPath(prev => [...prev, move.san]);
       
-      if (matchingChild) {
-        // Valid move in the tree - add it to selected path
-        setSelectedPath(prev => [...prev, move.san]);
+      // Check if this move exists in the opening tree
+      if (!isOffTree) {
+        const matchingChild = currentNode.children?.find((c: SerializedOpeningNode) => c.san === move.san);
+        if (!matchingChild) {
+          // Move not in tree - mark as off tree
+          setIsOffTree(true);
+        }
       }
     } catch (error) {
       console.error("Invalid move:", error);
     }
-  }, [node, selectedPath, currentPosition]);
+  }, [node, selectedPath, currentPosition, isOffTree]);
 
   return (
     <div className="flex flex-col items-center gap-4 h-[calc(100vh-12rem)] max-w-7xl mx-auto">
@@ -339,8 +358,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               ...possibleMoves.reduce((acc, square) => ({
                 ...acc,
                 [square]: {
-                  background: 'radial-gradient(circle, rgba(34, 139, 34, 0.5) 25%, transparent 25%)',
-                  borderRadius: '50%',
+                  background: 'radial-gradient(circle, rgba(0, 200, 0, 0.6) 20%, transparent 20%)',
                 }
               }), {})
             }}

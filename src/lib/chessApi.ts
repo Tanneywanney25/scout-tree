@@ -213,15 +213,15 @@ export async function fetchLichessGames(
             batchBuffer.push(gameData);
             count++;
             
+            // Update progress every game for smooth counting
+            if (onProgress) {
+              onProgress(count);
+            }
+            
             // Send batch every 25 games for immediate analysis
             if (batchBuffer.length >= 25 && onBatch) {
               onBatch([...batchBuffer]);
               batchBuffer = [];
-            }
-            
-            // Update progress every 50 games
-            if (count % 50 === 0 && onProgress) {
-              onProgress(count);
             }
           } catch (e) {
             console.warn("Failed to parse game line:", e);
