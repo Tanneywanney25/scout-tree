@@ -178,15 +178,22 @@ const Scout = () => {
               setProgress(analysis.totalGames);
               console.log(`Total games analyzed so far: ${analysis.totalGames}`);
               
-              // Store only minimal progress data to avoid quota errors
-              try {
-                localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-                  totalGames: analysis.totalGames,
-                  timestamp: Date.now(),
-                  complete: false
-                }));
-              } catch (e) {
-                console.warn('Failed to update progress:', e);
+              // Save full analysis every 100 games for progressive updates
+              if (analysis.totalGames % 100 === 0 || analysis.totalGames < 100) {
+                try {
+                  const progressData = {
+                    ...analysis,
+                    openingTree: serializeOpeningTree(analysis.openingTree),
+                  };
+                  localStorage.setItem(cacheKey, JSON.stringify({ 
+                    analysis: progressData,
+                    timestamp: Date.now(),
+                    complete: false
+                  }));
+                  console.log(`Progress update: ${analysis.totalGames} games`);
+                } catch (e) {
+                  console.warn('Failed to update progress:', e);
+                }
               }
             } catch (error) {
               console.error('Error processing game batch:', error);
@@ -203,11 +210,6 @@ const Scout = () => {
         try {
           localStorage.setItem(cacheKey, JSON.stringify({ 
             analysis: finalData,
-            timestamp: Date.now(),
-            complete: true
-          }));
-          localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-            totalGames: analysis.totalGames,
             timestamp: Date.now(),
             complete: true
           }));
@@ -239,15 +241,22 @@ const Scout = () => {
               setProgress(analysis.totalGames);
               console.log(`Total games analyzed so far: ${analysis.totalGames}`);
               
-              // Store only minimal progress data to avoid quota errors
-              try {
-                localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-                  totalGames: analysis.totalGames,
-                  timestamp: Date.now(),
-                  complete: false
-                }));
-              } catch (e) {
-                console.warn('Failed to update progress:', e);
+              // Save full analysis every 100 games for progressive updates
+              if (analysis.totalGames % 100 === 0 || analysis.totalGames < 100) {
+                try {
+                  const progressData = {
+                    ...analysis,
+                    openingTree: serializeOpeningTree(analysis.openingTree),
+                  };
+                  localStorage.setItem(cacheKey, JSON.stringify({ 
+                    analysis: progressData,
+                    timestamp: Date.now(),
+                    complete: false
+                  }));
+                  console.log(`Progress update: ${analysis.totalGames} games`);
+                } catch (e) {
+                  console.warn('Failed to update progress:', e);
+                }
               }
             } catch (error) {
               console.error('Error processing game batch:', error);
@@ -263,11 +272,6 @@ const Scout = () => {
         try {
           localStorage.setItem(cacheKey, JSON.stringify({ 
             analysis: finalData,
-            timestamp: Date.now(),
-            complete: true
-          }));
-          localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-            totalGames: analysis.totalGames,
             timestamp: Date.now(),
             complete: true
           }));
