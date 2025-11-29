@@ -3,7 +3,7 @@ import { Chess } from "chess.js";
 import Chessboard from "chessboardjsx";
 import { Button } from "./ui/button";
 import { RotateCcw, FlipVertical } from "lucide-react";
-import { OpeningTreeViewer } from "./OpeningTreeViewer";
+// import { OpeningTreeViewer } from "./OpeningTreeViewer";
 
 interface MoveArrow {
   from: string;
@@ -203,9 +203,32 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   };
 
   return (
-    <div className="flex gap-6 h-[calc(100vh-12rem)] max-w-7xl mx-auto">
-      {/* Left: Opening Tree Viewer */}
-      <div className="w-80 flex-shrink-0 space-y-4">
+    <div className="flex flex-col items-center gap-4 h-[calc(100vh-12rem)] max-w-7xl mx-auto">
+      {/* Control buttons */}
+      <div className="flex gap-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleFlipBoard}
+          title="Flip board"
+        >
+          <FlipVertical className="w-4 h-4 mr-2" />
+          Flip Board
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleReset}
+          disabled={selectedPath.length === 0}
+          title="Reset to start"
+        >
+          <RotateCcw className="w-4 h-4 mr-2" />
+          Reset
+        </Button>
+      </div>
+
+      {/* COMMENTED OUT FOR LATER - Left: Opening Tree Viewer */}
+      {/* <div className="w-80 flex-shrink-0 space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold">Opening Tree</h3>
           <div className="flex gap-1">
@@ -229,7 +252,6 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
           </div>
         </div>
         
-        {/* Tree with clickable moves */}
         <div className="border border-border rounded-lg p-3 bg-card h-[calc(100%-3rem)] overflow-y-auto">
           <OpeningTreeViewer 
             node={node} 
@@ -238,11 +260,11 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
             selectedPath={selectedPath}
           />
         </div>
-      </div>
+      </div> */}
 
-      {/* Right: Chess Board */}
-      <div className="flex-1 flex items-center justify-center">
-        <div className="relative aspect-square w-full max-w-[600px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
+      {/* Chess Board */}
+      <div className="flex items-center justify-center flex-1">
+        <div className="relative aspect-square w-full max-w-[700px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
           <Chessboard 
             position={currentPosition}
             orientation={boardOrientation}
