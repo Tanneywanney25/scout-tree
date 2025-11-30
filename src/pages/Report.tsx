@@ -1,4 +1,4 @@
-import { useParams, useLocation } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import Header from "@/components/Header";
 import { Button } from "@/components/ui/button";
 import { Download } from "lucide-react";
@@ -6,20 +6,35 @@ import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import type { SerializedAnalysisResult } from "@/lib/chessAnalysis";
 import InteractiveOpeningTree from "@/components/InteractiveOpeningTree";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 const Report = () => {
   const { id } = useParams();
-  const location = useLocation();
   const [analysis, setAnalysis] = useState<SerializedAnalysisResult | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    const stateData = location.state as any;
-    
-    if (stateData) {
-      console.log('[REPORT] Received state:', stateData);
-      setAnalysis(stateData);
+    const storedAnalysis = sessionStorage.getItem('scoutAnalysis');
+    if (storedAnalysis) {
+      try {
+        const parsed = JSON.parse(storedAnalysis);
+        
+        // Validate tree structure
+        if (!parsed.openingTree || typeof parsed.totalGames !== 'number') {
+          throw new Error('Invalid analysis data structure');
+        }
+        
+        console.log('[REPORT] Loaded analysis from sessionStorage:', parsed.totalGames, 'games');
+        setAnalysis(parsed);
+        sessionStorage.removeItem('scoutAnalysis'); // Clean up after use
+      } catch (e) {
+        console.error('Failed to parse analysis:', e);
+        setLoadError('Failed to load analysis data. The data may be corrupted.');
+      }
+    } else {
+      setLoadError('No analysis data found. Please generate a new scout report.');
     }
-  }, [location.state]);
+  }, []);
 
   const handleDownload = () => {
     if (!analysis) return;
@@ -50,14 +65,18 @@ const Report = () => {
 
 
 
-  if (!analysis) {
+  if (!analysis || loadError) {
     return (
       <div className="min-h-screen flex flex-col bg-background">
         <Header />
         <main className="flex-1 py-8">
           <div className="container mx-auto px-4 text-center space-y-4">
-            <p className="text-muted-foreground">No analysis data available.</p>
-            <p className="text-sm text-muted-foreground">The report may have expired or the link is invalid.</p>
+            <p className="text-muted-foreground">
+              {loadError || 'No analysis data available.'}
+            </p>
+            <p className="text-sm text-muted-foreground">
+              Please generate a new scout report.
+            </p>
             <Button onClick={() => window.location.href = '/scout'}>
               Return to Scout
             </Button>
@@ -126,11 +145,18 @@ const Report = () => {
           {/* Main Layout: Board and Lines */}
           <div className="flex justify-center">
             {analysis.openingTree && analysis.totalGames > 0 ? (
-              <InteractiveOpeningTree 
-                node={analysis.openingTree} 
-                maxDepth={15}
-                playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
-              />
+              <ErrorBoundary fallback={
+                <div className="p-8 text-center border border-destructive/50 rounded-lg bg-destructive/10">
+                  <p className="text-destructive font-semibold">Error rendering opening tree</p>
+                  <p className="text-sm text-muted-foreground mt-2">The tree data may be too large or corrupted.</p>
+                </div>
+              }>
+                <InteractiveOpeningTree 
+                  node={analysis.openingTree} 
+                  maxDepth={15}
+                  playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
+                />
+              </ErrorBoundary>
             ) : (
               <div className="text-center py-8 text-muted-foreground">
                 <p>No opening tree data available. No games were found or analysis incomplete.</p>
