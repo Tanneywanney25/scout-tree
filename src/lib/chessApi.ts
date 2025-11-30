@@ -216,6 +216,14 @@ export async function fetchLichessGames(
               }
             }
             
+            // Time control filter - validate API returned correct time control
+            if (timeControls.length > 0 && !timeControls.includes("all")) {
+              const gameSpeed = game.speed; // bullet, blitz, rapid, etc.
+              if (!timeControls.includes(gameSpeed)) {
+                shouldInclude = false;
+              }
+            }
+            
             if (!shouldInclude) continue;
             
             const gameData: GameData = {
