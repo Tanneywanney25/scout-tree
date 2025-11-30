@@ -102,11 +102,18 @@ const Scout = () => {
 
       const progressToast = toast.loading("Fetching games...", { duration: Infinity });
       
-      // Create update callback for live updates
+      // Create update callback for live updates (throttled to prevent blocking)
+      let lastUpdateTime = 0;
       const sendUpdate = (updatedAnalysis: AnalysisResult) => {
-        window.dispatchEvent(new CustomEvent('analysisUpdate', {
-          detail: { analysisId, analysis: updatedAnalysis }
-        }));
+        const now = Date.now();
+        if (now - lastUpdateTime > 100) { // Throttle to max 10 updates/sec
+          lastUpdateTime = now;
+          requestAnimationFrame(() => {
+            window.dispatchEvent(new CustomEvent('analysisUpdate', {
+              detail: { analysisId, analysis: updatedAnalysis }
+            }));
+          });
+        }
       };
       
       if (actualPlatform === "lichess") {
@@ -120,9 +127,9 @@ const Scout = () => {
               setWarning("Large dataset - processing all games...");
             }
           },
-          (gameBatch) => {
+          async (gameBatch) => {
             try {
-              analysis = analyzeGamesIncremental(analysis, gameBatch, username);
+              analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
               sendUpdate(analysis);
             } catch (error) {
               console.error('Error processing game batch:', error);
@@ -139,9 +146,9 @@ const Scout = () => {
             setProgress(count);
             toast.loading(`Analyzing ${count} games...`, { id: progressToast, duration: Infinity });
           },
-          (gameBatch) => {
+          async (gameBatch) => {
             try {
-              analysis = analyzeGamesIncremental(analysis, gameBatch, username);
+              analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
               sendUpdate(analysis);
             } catch (error) {
               console.error('Error processing game batch:', error);

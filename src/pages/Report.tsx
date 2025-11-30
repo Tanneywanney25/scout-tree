@@ -133,11 +133,17 @@ const Report = () => {
         <div className="container mx-auto px-4 max-w-6xl">
           <div className="flex items-center justify-between mb-6">
             <div>
-              <h1 className="text-3xl font-bold text-foreground mb-2">
+              <h1 className="text-3xl font-bold text-foreground mb-2 flex items-center gap-3">
                 Scout Report: {id}
+                {isLive && (
+                  <span className="px-3 py-1 text-sm bg-primary/20 text-primary rounded-full animate-pulse">
+                    Live
+                  </span>
+                )}
               </h1>
               <p className="text-muted-foreground">
                 {analysis.totalGames} total games analyzed • Playing as {analysis.playerColor}
+                {isLive && " • Analyzing..."}
               </p>
             </div>
             <Button onClick={handleDownload} variant="outline">
@@ -148,7 +154,7 @@ const Report = () => {
 
           {/* Main Layout: Board and Lines */}
           <div className="flex justify-center">
-            {analysis.openingTree && analysis.openingTree.children && analysis.openingTree.children.length > 0 ? (
+            {analysis.openingTree && analysis.totalGames > 0 ? (
               <InteractiveOpeningTree 
                 node={analysis.openingTree} 
                 maxDepth={15}
@@ -156,7 +162,12 @@ const Report = () => {
               />
             ) : (
               <div className="text-center py-8 text-muted-foreground">
-                <p>No opening tree data available. The analysis may still be processing or no games were found.</p>
+                <p>
+                  {isLive 
+                    ? `Analyzing games... ${analysis.totalGames} processed so far.` 
+                    : 'No opening tree data available. The analysis may still be processing or no games were found.'
+                  }
+                </p>
               </div>
             )}
           </div>

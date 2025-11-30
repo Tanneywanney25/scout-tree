@@ -65,20 +65,26 @@ export function createEmptyAnalysis(playerColor: "white" | "black" | "both" = "b
   };
 }
 
-export function analyzeGamesIncremental(
+export async function analyzeGamesIncremental(
   existingAnalysis: AnalysisResult,
   newGames: GameData[],
   targetUsername: string,
   onProgress?: (count: number) => void
-): AnalysisResult {
+): Promise<AnalysisResult> {
   const rootNode = existingAnalysis.openingTree;
   let totalGames = existingAnalysis.totalGames;
   const playerColor = existingAnalysis.playerColor;
 
   console.log(`[ANALYSIS] Starting incremental analysis for ${targetUsername}, playerColor: ${playerColor}, newGames: ${newGames.length}`);
 
-  for (const game of newGames) {
+  for (let i = 0; i < newGames.length; i++) {
+    const game = newGames[i];
     const chess = new Chess();
+    
+    // Yield to browser every 5 games to prevent freezing
+    if (i > 0 && i % 5 === 0) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
     
     try {
       chess.loadPgn(game.pgn);
