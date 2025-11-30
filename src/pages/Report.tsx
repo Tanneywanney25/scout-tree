@@ -1,27 +1,50 @@
 import { useParams, useLocation } from "react-router-dom";
 import Header from "@/components/Header";
 import { Button } from "@/components/ui/button";
-// import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-// import { Badge } from "@/components/ui/badge";
 import { Download } from "lucide-react";
-// import { ChevronRight } from "lucide-react";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import type { SerializedAnalysisResult } from "@/lib/chessAnalysis";
 import InteractiveOpeningTree from "@/components/InteractiveOpeningTree";
-// import { OpeningLineBoard } from "@/components/OpeningLineBoard";
 
 const Report = () => {
   const { id } = useParams();
   const location = useLocation();
   const [analysis, setAnalysis] = useState<SerializedAnalysisResult | null>(null);
   const [isLive, setIsLive] = useState(false);
-  const [cacheKey, setCacheKey] = useState<string | null>(null);
-  const updateIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    if (location.state) {
-      setAnalysis(location.state as SerializedAnalysisResult);
+    const stateData = location.state as any;
+    
+    if (stateData) {
+      setIsLive(stateData.isLive || false);
+      setAnalysis(stateData);
+      
+      // Listen for live updates if this is a live analysis
+      if (stateData.isLive && stateData.analysisId) {
+        const handleUpdate = (event: Event) => {
+          const customEvent = event as CustomEvent;
+          if (customEvent.detail.analysisId === stateData.analysisId) {
+            setAnalysis(customEvent.detail.analysis);
+          }
+        };
+        
+        const handleComplete = (event: Event) => {
+          const customEvent = event as CustomEvent;
+          if (customEvent.detail.analysisId === stateData.analysisId) {
+            setIsLive(false);
+            setAnalysis(customEvent.detail.analysis);
+          }
+        };
+        
+        window.addEventListener('analysisUpdate', handleUpdate);
+        window.addEventListener('analysisComplete', handleComplete);
+        
+        return () => {
+          window.removeEventListener('analysisUpdate', handleUpdate);
+          window.removeEventListener('analysisComplete', handleComplete);
+        };
+      }
     }
   }, [location.state]);
 

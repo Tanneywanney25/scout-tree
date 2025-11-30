@@ -56,52 +56,27 @@ const Scout = () => {
       return;
     }
 
-    // Prevent multiple simultaneous requests
     if (loading) {
       toast.error("Analysis already in progress. Please wait.");
       return;
     }
 
-    // Cancel any previous request and wait for cleanup
     if (abortControllerRef.current) {
-      console.log('Aborting previous request...');
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
-      
-      // CRITICAL: Wait for Lichess to process the abort before starting new request
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      toast.info("Starting new analysis...");
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
-    // Create new abort controller for this request
     abortControllerRef.current = new AbortController();
 
     setLoading(true);
     setProgress(null);
     setWarning(null);
-    setCurrentAnalysis(null);
 
     try {
-      const timeControlKey = timeControls.sort().join(",");
-      // Build cache key with proper handling of undefined values
-      const cacheKey = `scout_${username}_${platform}_${variant}_${timeControlKey}_${color}_${mode}_${dateFrom?.getTime() || 'all'}_${dateTo?.getTime() || 'now'}_${ratingMin || 'any'}_${ratingMax || 'any'}_${opponentName || 'all'}`;
-      
-      // CLEAR ALL CACHES - force fresh analysis every time
-      console.log('🧹 Clearing all localStorage caches...');
-      const allKeys = Object.keys(localStorage);
-      allKeys.forEach(key => {
-        if (key.startsWith('scout_') || key.startsWith('abort_')) {
-          localStorage.removeItem(key);
-          console.log(`Cleared: ${key}`);
-        }
-      });
-      
-      const loadingToast = toast.loading("Fetching and analyzing games...");
-
       const actualPlatform = platform === "auto" ? "lichess" : platform;
       let analysis = createEmptyAnalysis(color);
       
-      // Build options object with all filters
       const fetchOptions = {
         variant,
         timeControls,
@@ -113,8 +88,26 @@ const Scout = () => {
         opponentName: opponentName || undefined
       };
       
-      toast.dismiss(loadingToast);
+      // Navigate to report IMMEDIATELY with live flag
+      const analysisId = `${username}_${Date.now()}`;
+      navigate(`/report/${username}`, { 
+        state: { 
+          isLive: true,
+          analysisId,
+          username,
+          color,
+          ...createEmptyAnalysis(color)
+        }
+      });
+
       const progressToast = toast.loading("Fetching games...", { duration: Infinity });
+      
+      // Create update callback for live updates
+      const sendUpdate = (updatedAnalysis: AnalysisResult) => {
+        window.dispatchEvent(new CustomEvent('analysisUpdate', {
+          detail: { analysisId, analysis: updatedAnalysis }
+        }));
+      };
       
       if (actualPlatform === "lichess") {
         await fetchLichessGames(
@@ -122,8 +115,7 @@ const Scout = () => {
           fetchOptions,
           (count) => {
             setProgress(count);
-            toast.loading(`Fetched ${count} games...`, { id: progressToast, duration: Infinity });
-            
+            toast.loading(`Analyzing ${count} games...`, { id: progressToast, duration: Infinity });
             if (count > 2000 && !warning) {
               setWarning("Large dataset - processing all games...");
             }
@@ -131,15 +123,13 @@ const Scout = () => {
           (gameBatch) => {
             try {
               analysis = analyzeGamesIncremental(analysis, gameBatch, username);
-              setCurrentAnalysis(analysis);
-              toast.loading(`Analyzing ${analysis.totalGames} games...`, { id: progressToast, duration: Infinity });
+              sendUpdate(analysis);
             } catch (error) {
               console.error('Error processing game batch:', error);
             }
           },
           abortControllerRef.current?.signal
         );
-        
         toast.dismiss(progressToast);
       } else {
         await fetchChessComGames(
@@ -147,59 +137,46 @@ const Scout = () => {
           fetchOptions,
           (count) => {
             setProgress(count);
-            toast.loading(`Fetched ${count} games...`, { id: progressToast, duration: Infinity });
+            toast.loading(`Analyzing ${count} games...`, { id: progressToast, duration: Infinity });
           },
           (gameBatch) => {
             try {
               analysis = analyzeGamesIncremental(analysis, gameBatch, username);
-              setCurrentAnalysis(analysis);
-              toast.loading(`Analyzing ${analysis.totalGames} games...`, { id: progressToast, duration: Infinity });
+              sendUpdate(analysis);
             } catch (error) {
               console.error('Error processing game batch:', error);
             }
           }
         );
-        
         toast.dismiss(progressToast);
       }
 
       if (analysis.totalGames === 0) {
         toast.error("No games found for this user");
-        setLoading(false);
         return;
       }
 
       toast.success(`Analysis complete! Analyzed ${analysis.totalGames} games.`);
       
-      // Navigate to report with final data
-      const finalReportData = {
-        ...analysis,
-        openingTree: serializeOpeningTree(analysis.openingTree),
-      };
-      
-      navigate(`/report/${username}`, { 
-        state: finalReportData
-      });
+      // Send final update
+      window.dispatchEvent(new CustomEvent('analysisComplete', {
+        detail: { analysisId, analysis }
+      }));
     } catch (error: any) {
       console.error("Scout error:", error);
-      toast.dismiss(); // Dismiss all toasts including the loading one
+      toast.dismiss();
       
-      // Ignore abort errors (user cancelled)
       if (error.name === 'AbortError') {
         toast.info("Analysis cancelled");
         return;
       }
       
-      // Show specific error message for rate limiting
       if (error.message?.includes('429') || error.message?.includes('rate limit')) {
-        toast.error("Rate limit exceeded. Lichess allows only 1 request at a time. Please wait 20 seconds before trying again.", {
-          duration: 6000
-        });
+        toast.error("Rate limit exceeded. Please wait before trying again.", { duration: 6000 });
       } else {
         toast.error(error.message || "Failed to generate report. Try again.");
       }
     } finally {
-      // Clear abort controller reference
       if (abortControllerRef.current) {
         abortControllerRef.current = null;
       }
