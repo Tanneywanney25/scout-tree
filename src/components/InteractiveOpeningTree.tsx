@@ -65,12 +65,12 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         ...acc,
         [square]: isCapture 
           ? {
-              // Rounded green corners for captures
+              // Smaller rounded green corners for captures
               background: `
-                radial-gradient(circle at 15% 15%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 30%, transparent 30%),
-                radial-gradient(circle at 85% 15%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 30%, transparent 30%),
-                radial-gradient(circle at 15% 85%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 30%, transparent 30%),
-                radial-gradient(circle at 85% 85%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 30%, transparent 30%)
+                radial-gradient(circle at 10% 10%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 15%, transparent 15%),
+                radial-gradient(circle at 90% 10%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 15%, transparent 15%),
+                radial-gradient(circle at 10% 90%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 15%, transparent 15%),
+                radial-gradient(circle at 90% 90%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 15%, transparent 15%)
               `,
               backgroundSize: '50% 50%',
               backgroundRepeat: 'no-repeat',
@@ -337,69 +337,49 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     }
   }, [node, selectedPath, currentPosition, isOffTree]);
 
+  // Get current opening name
+  const currentOpening = useMemo(() => {
+    if (selectedPath.length === 0) return "Starting Position";
+    
+    let currentNode = node;
+    for (const san of selectedPath) {
+      const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
+      if (!child) break;
+      currentNode = child;
+    }
+    
+    return currentNode.key || "Position";
+  }, [node, selectedPath]);
+
   return (
-    <div className="flex flex-col items-center gap-4 h-[calc(100vh-12rem)] max-w-7xl mx-auto">
-      {/* Control buttons */}
-      <div className="flex gap-2">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={handleFlipBoard}
-          title="Flip board"
-        >
-          <FlipVertical className="w-4 h-4 mr-2" />
-          Flip Board
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={handleReset}
-          disabled={selectedPath.length === 0}
-          title="Reset to start"
-        >
-          <RotateCcw className="w-4 h-4 mr-2" />
-          Reset
-        </Button>
-      </div>
-
-      {/* COMMENTED OUT FOR LATER - Left: Opening Tree Viewer */}
-      {/* <div className="w-80 flex-shrink-0 space-y-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Opening Tree</h3>
-          <div className="flex gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleFlipBoard}
-              title="Flip board"
-            >
-              <FlipVertical className="w-4 h-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleReset}
-              disabled={selectedPath.length === 0}
-              title="Reset to start"
-            >
-              <RotateCcw className="w-4 h-4" />
-            </Button>
-          </div>
+    <div className="flex gap-8 items-start justify-center h-[calc(100vh-12rem)] max-w-7xl mx-auto px-4">
+      {/* Main board area */}
+      <div className="flex flex-col items-center gap-4">
+        {/* Controls above board */}
+        <div className="flex gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleFlipBoard}
+            title="Flip board"
+          >
+            <FlipVertical className="w-4 h-4 mr-2" />
+            Flip Board
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleReset}
+            disabled={selectedPath.length === 0}
+            title="Reset to start"
+          >
+            <RotateCcw className="w-4 h-4 mr-2" />
+            Reset
+          </Button>
         </div>
-        
-        <div className="border border-border rounded-lg p-3 bg-card h-[calc(100%-3rem)] overflow-y-auto">
-          <OpeningTreeViewer 
-            node={node} 
-            maxDepth={maxDepth} 
-            onMoveClick={handleMoveClick}
-            selectedPath={selectedPath}
-          />
-        </div>
-      </div> */}
 
-      {/* Chess Board */}
-      <div className="flex items-center justify-center flex-1">
-        <div className="relative aspect-square w-full max-w-[700px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
+        {/* Chess Board */}
+        <div className="relative aspect-square w-full max-w-[600px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
           <style>{`
             /* Fix dragged piece size */
             .piece-417db {
@@ -497,6 +477,43 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               );
             })}
           </svg>
+        </div>
+        
+        {/* Opening name below board */}
+        <div className="text-sm text-muted-foreground text-center max-w-[600px]">
+          {currentOpening}
+        </div>
+      </div>
+
+      {/* Move list on the side */}
+      <div className="w-48 bg-card border border-border rounded-lg p-4 max-h-[600px] overflow-y-auto">
+        <h3 className="text-sm font-semibold mb-3">Moves</h3>
+        <div className="space-y-1 text-sm">
+          {selectedPath.length === 0 ? (
+            <div className="text-muted-foreground">No moves yet</div>
+          ) : (
+            selectedPath.map((move, index) => {
+              const moveNumber = Math.floor(index / 2) + 1;
+              const isWhiteMove = index % 2 === 0;
+              const showMoveNumber = isWhiteMove;
+              
+              return (
+                <div key={index} className="flex flex-col">
+                  {showMoveNumber && (
+                    <div className="text-muted-foreground font-medium mt-2 first:mt-0">
+                      {moveNumber}.
+                    </div>
+                  )}
+                  <button
+                    onClick={() => handleJumpToMove(index + 1)}
+                    className="text-left hover:bg-accent px-2 py-0.5 rounded transition-colors"
+                  >
+                    {move}
+                  </button>
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
     </div>
