@@ -18,6 +18,7 @@ export interface FetchOptions {
   ratingMin?: number;
   ratingMax?: number;
   opponentName?: string;
+  playerColor?: "white" | "black"; // Color the user will play (opponent plays opposite)
 }
 
 export async function fetchLichessGames(
@@ -35,7 +36,8 @@ export async function fetchLichessGames(
     dateTo,
     ratingMin,
     ratingMax,
-    opponentName
+    opponentName,
+    playerColor
   } = options;
 
   // If multiple time controls selected, fetch them SEQUENTIALLY to avoid 429 rate limit
@@ -180,6 +182,18 @@ export async function fetchLichessGames(
             // Apply client-side filters
             let shouldInclude = true;
             
+            // Color filter - user selects their color, so we want opponent's games with opposite color
+            if (playerColor) {
+              const playerIsWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
+              const opponentColor = playerIsWhite ? "black" : "white";
+              
+              // If user plays white, we want games where opponent played black (and vice versa)
+              if ((playerColor === "white" && opponentColor !== "black") || 
+                  (playerColor === "black" && opponentColor !== "white")) {
+                shouldInclude = false;
+              }
+            }
+            
             // Opponent name filter
             if (opponentName && opponentName.trim()) {
               const opponent = game.players.white.user?.name?.toLowerCase() === username.toLowerCase() 
@@ -276,7 +290,8 @@ export async function fetchChessComGames(
     dateTo,
     ratingMin,
     ratingMax,
-    opponentName
+    opponentName,
+    playerColor
   } = options;
   
   // Chess.com usernames must be lowercase
@@ -378,6 +393,18 @@ export async function fetchChessComGames(
           if (dateFrom && game.end_time < dateFrom.getTime() / 1000) continue;
           if (dateTo && game.end_time > dateTo.getTime() / 1000) continue;
           
+          // Color filter - user selects their color, so we want opponent's games with opposite color
+          if (playerColor) {
+            const playerIsWhite = game.white.username.toLowerCase() === normalizedUsername;
+            const opponentColor = playerIsWhite ? "black" : "white";
+            
+            // If user plays white, we want games where opponent played black (and vice versa)
+            if ((playerColor === "white" && opponentColor !== "black") || 
+                (playerColor === "black" && opponentColor !== "white")) {
+              continue;
+            }
+          }
+          
           // Rating filter
           const opponentRating = game.white.username.toLowerCase() === normalizedUsername
             ? game.black.rating
@@ -386,13 +413,13 @@ export async function fetchChessComGames(
           if (ratingMin && opponentRating < ratingMin) continue;
           if (ratingMax && opponentRating > ratingMax) continue;
           
-          // Opponent name filter
+          // Opponent name filter (use partial match like Lichess)
           if (opponentName) {
             const opponent = game.white.username.toLowerCase() === normalizedUsername
               ? game.black.username
               : game.white.username;
             
-            if (opponent.toLowerCase() !== opponentName.toLowerCase()) continue;
+            if (!opponent.toLowerCase().includes(opponentName.toLowerCase())) continue;
           }
           
           batchGames.push({
