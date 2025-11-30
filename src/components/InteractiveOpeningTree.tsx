@@ -37,6 +37,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [possibleMoves, setPossibleMoves] = useState<string[]>([]);
   const [isOffTree, setIsOffTree] = useState(false);
+  const [showArrows, setShowArrows] = useState(true);
 
   // Calculate the current position based on selected moves
   const currentPosition = useMemo(() => {
@@ -65,20 +66,20 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         ...acc,
         [square]: isCapture 
           ? {
-              // Smaller rounded green corners for captures
+              // Smaller rounded dark green corners for captures
               background: `
-                radial-gradient(circle at 10% 10%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 15%, transparent 15%),
-                radial-gradient(circle at 90% 10%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 15%, transparent 15%),
-                radial-gradient(circle at 10% 90%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 15%, transparent 15%),
-                radial-gradient(circle at 90% 90%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 15%, transparent 15%)
+                radial-gradient(circle at 10% 10%, rgba(0, 100, 0, 0.9) 0%, rgba(0, 100, 0, 0.9) 15%, transparent 15%),
+                radial-gradient(circle at 90% 10%, rgba(0, 100, 0, 0.9) 0%, rgba(0, 100, 0, 0.9) 15%, transparent 15%),
+                radial-gradient(circle at 10% 90%, rgba(0, 100, 0, 0.9) 0%, rgba(0, 100, 0, 0.9) 15%, transparent 15%),
+                radial-gradient(circle at 90% 90%, rgba(0, 100, 0, 0.9) 0%, rgba(0, 100, 0, 0.9) 15%, transparent 15%)
               `,
               backgroundSize: '50% 50%',
               backgroundRepeat: 'no-repeat',
               backgroundPosition: 'top left, top right, bottom left, bottom right'
             }
           : {
-              // Smaller dot for normal moves
-              background: 'radial-gradient(circle, rgba(0, 120, 0, 0.9) 18%, transparent 18%)',
+              // Smaller dark green dot for normal moves
+              background: 'radial-gradient(circle, rgba(0, 80, 0, 0.95) 18%, transparent 18%)',
             }
       };
     }, {});
@@ -86,8 +87,8 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
 
   // Find current node in tree and calculate arrows
   const arrows = useMemo(() => {
-    // Don't show arrows if we're off the tree
-    if (isOffTree) {
+    // Don't show arrows if we're off the tree or if they're temporarily hidden
+    if (isOffTree || !showArrows) {
       return [];
     }
     
@@ -133,8 +134,8 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
           const baseOpacity = isScoutedPlayerTurn ? frequency : Math.min(frequency * 0.5, 0.4);
           const opacity = Math.max(0.15, baseOpacity);
           
-          // Green for scouted player, red for opponent
-          const baseColor = isScoutedPlayerTurn ? '34, 139, 34' : '220, 38, 38'; // green : red
+          // Darker green for scouted player, red for opponent
+          const baseColor = isScoutedPlayerTurn ? '0, 100, 0' : '220, 38, 38'; // darker green : red
           const color = `rgba(${baseColor}, ${opacity})`;
           
           moveArrows.push({
@@ -169,6 +170,9 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   }, []);
 
   const handleMoveBack = useCallback(() => {
+    // Hide arrows first for smoother transition
+    setShowArrows(false);
+    
     setSelectedPath(prev => {
       if (prev.length === 0) return prev;
       const newPath = prev.slice(0, -1);
@@ -192,7 +196,12 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       
       return newPath;
     });
-  }, [node]);
+    
+    // Show arrows after the board updates
+    requestAnimationFrame(() => {
+      setShowArrows(true);
+    });
+  }, [node, currentPosition, isOffTree, selectedPath]);
 
   const handleMoveForward = useCallback(() => {
     setSelectedPath(prev => {
@@ -429,7 +438,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
                 >
                   <polygon 
                     points="0 0, 4 2, 0 4" 
-                    fill={arrow.isScoutedPlayer ? "rgb(34, 139, 34)" : "rgb(220, 38, 38)"} 
+                    fill={arrow.isScoutedPlayer ? "rgb(0, 100, 0)" : "rgb(220, 38, 38)"} 
                     fillOpacity={arrow.opacity}
                   />
                 </marker>

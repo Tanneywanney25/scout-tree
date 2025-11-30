@@ -203,15 +203,15 @@ export async function fetchLichessGames(
               }
             }
             
-            // Rating range filter
+            // Opponent rating range filter (matches UI label "Opponent Rating Range")
             if (ratingMin !== undefined || ratingMax !== undefined) {
               const playerIsWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
-              const playerRating = playerIsWhite ? game.players.white.rating : game.players.black.rating;
+              const opponentRating = playerIsWhite ? game.players.black.rating : game.players.white.rating;
               
-              if (ratingMin !== undefined && playerRating < ratingMin) {
+              if (ratingMin !== undefined && opponentRating < ratingMin) {
                 shouldInclude = false;
               }
-              if (ratingMax !== undefined && playerRating > ratingMax) {
+              if (ratingMax !== undefined && opponentRating > ratingMax) {
                 shouldInclude = false;
               }
             }
