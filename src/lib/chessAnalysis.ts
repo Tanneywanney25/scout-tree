@@ -77,6 +77,11 @@ export async function analyzeGamesIncremental(
 
   console.log(`[ANALYSIS] Starting incremental analysis for ${targetUsername}, playerColor: ${playerColor}, newGames: ${newGames.length}`);
 
+  // CRITICAL FIX: Move fenToNode OUTSIDE game loop for proper transposition detection across ALL games
+  const globalFenToNode = new Map<string, OpeningNode>();
+  const startFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w';
+  globalFenToNode.set(startFen, rootNode);
+
   for (let i = 0; i < newGames.length; i++) {
     const game = newGames[i];
     const chess = new Chess();
@@ -125,10 +130,6 @@ export async function analyzeGamesIncremental(
 
     console.log(`[ANALYSIS] Game ${totalGames} has ${history.length} total moves, analyzing first ${maxPlies} plies`);
 
-    // Transposition table to merge positions reached via different move orders
-    const fenToNode = new Map<string, OpeningNode>();
-    fenToNode.set(chess.fen(), rootNode);
-
     // Create tracking chess instance that moves forward incrementally (O(n) instead of O(n²))
     const trackingChess = new Chess();
 
@@ -153,8 +154,8 @@ export async function analyzeGamesIncremental(
         console.log(`  Move ${i}: ${move.san} (${moveKey})`);
       }
 
-      // Check if we've seen this position before (transposition)
-      let targetNode = fenToNode.get(positionFen);
+      // Check if we've seen this position before (transposition) - use GLOBAL map
+      let targetNode = globalFenToNode.get(positionFen);
       
       if (!targetNode) {
         // New position - add move to tree
@@ -171,7 +172,7 @@ export async function analyzeGamesIncremental(
           });
         }
         targetNode = currentNode.children.get(moveKey)!;
-        fenToNode.set(positionFen, targetNode);
+        globalFenToNode.set(positionFen, targetNode);
       }
 
       currentNode = targetNode;
@@ -233,6 +234,11 @@ export function analyzeGames(
 
   let totalGames = 0;
 
+  // CRITICAL FIX: Move fenToNode OUTSIDE game loop for proper transposition detection across ALL games
+  const globalFenToNode = new Map<string, OpeningNode>();
+  const startFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w';
+  globalFenToNode.set(startFen, rootNode);
+
   for (const game of games) {
     const chess = new Chess();
     
@@ -270,10 +276,6 @@ export function analyzeGames(
     let currentNode = rootNode;
     const maxPlies = Math.min(history.length, 30); // 30 plies = 15 full moves
 
-    // Transposition table to merge positions reached via different move orders
-    const fenToNode = new Map<string, OpeningNode>();
-    fenToNode.set(chess.fen(), rootNode);
-
     // Create tracking chess instance that moves forward incrementally (O(n) instead of O(n²))
     const trackingChess = new Chess();
 
@@ -293,8 +295,8 @@ export function analyzeGames(
       
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
 
-      // Check if we've seen this position before (transposition)
-      let targetNode = fenToNode.get(positionFen);
+      // Check if we've seen this position before (transposition) - use GLOBAL map
+      let targetNode = globalFenToNode.get(positionFen);
       
       if (!targetNode) {
         // New position - add move to tree
@@ -311,7 +313,7 @@ export function analyzeGames(
           });
         }
         targetNode = currentNode.children.get(moveKey)!;
-        fenToNode.set(positionFen, targetNode);
+        globalFenToNode.set(positionFen, targetNode);
       }
 
       currentNode = targetNode;
