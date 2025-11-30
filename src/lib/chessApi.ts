@@ -182,7 +182,7 @@ export async function fetchLichessGames(
             
             // Opponent name filter
             if (opponentName && opponentName.trim()) {
-              const opponent = game.players.white.user?.name === username.toLowerCase() 
+              const opponent = game.players.white.user?.name?.toLowerCase() === username.toLowerCase() 
                 ? game.players.black.user?.name 
                 : game.players.white.user?.name;
               if (!opponent?.toLowerCase().includes(opponentName.toLowerCase())) {
