@@ -184,12 +184,15 @@ export async function fetchLichessGames(
             
             // Color filter - user selects their color, so we want opponent's games with opposite color
             if (playerColor) {
-              const playerIsWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
-              const opponentColor = playerIsWhite ? "black" : "white";
+              // Check what color the target opponent played in this game
+              const opponentPlayedWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
+              const opponentColor = opponentPlayedWhite ? "white" : "black";
               
-              // If user plays white, we want games where opponent played black (and vice versa)
-              if ((playerColor === "white" && opponentColor !== "black") || 
-                  (playerColor === "black" && opponentColor !== "white")) {
+              // User plays playerColor, so we need opponent's games where they played the OPPOSITE color
+              // e.g., if user plays white, analyze opponent's BLACK games
+              const neededOpponentColor = playerColor === "white" ? "black" : "white";
+              
+              if (opponentColor !== neededOpponentColor) {
                 shouldInclude = false;
               }
             }
@@ -237,8 +240,13 @@ export async function fetchLichessGames(
               onProgress(count);
             }
             
-            // Send batch every 25 games for immediate analysis
-            if (batchBuffer.length >= 25 && onBatch) {
+            // Send first game immediately for instant visualization
+            if (count === 1 && onBatch) {
+              onBatch([...batchBuffer]);
+              batchBuffer = [];
+            }
+            // Then send batches every 5 games for progressive updates
+            else if (batchBuffer.length >= 5 && onBatch) {
               onBatch([...batchBuffer]);
               batchBuffer = [];
             }
@@ -395,12 +403,15 @@ export async function fetchChessComGames(
           
           // Color filter - user selects their color, so we want opponent's games with opposite color
           if (playerColor) {
-            const playerIsWhite = game.white.username.toLowerCase() === normalizedUsername;
-            const opponentColor = playerIsWhite ? "black" : "white";
+            // Check what color the target opponent played in this game
+            const opponentPlayedWhite = game.white.username.toLowerCase() === normalizedUsername;
+            const opponentColor = opponentPlayedWhite ? "white" : "black";
             
-            // If user plays white, we want games where opponent played black (and vice versa)
-            if ((playerColor === "white" && opponentColor !== "black") || 
-                (playerColor === "black" && opponentColor !== "white")) {
+            // User plays playerColor, so we need opponent's games where they played the OPPOSITE color
+            // e.g., if user plays white, analyze opponent's BLACK games
+            const neededOpponentColor = playerColor === "white" ? "black" : "white";
+            
+            if (opponentColor !== neededOpponentColor) {
               continue;
             }
           }
@@ -434,10 +445,15 @@ export async function fetchChessComGames(
           count++;
         }
         
+        // Send first game immediately for instant visualization
+        if (count === 1 && batchGames.length > 0 && onBatch) {
+          onBatch(batchGames.slice(0, 1));
+        }
+        
         allGames.push(...batchGames);
         
-        // Send batch update
-        if (batchGames.length > 0 && onBatch) {
+        // Send batch update every 5 games
+        if (batchGames.length > 0 && onBatch && count % 5 === 0) {
           onBatch(batchGames);
         }
         
