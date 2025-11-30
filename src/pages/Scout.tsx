@@ -90,30 +90,35 @@ const Scout = () => {
       
       // Navigate to report IMMEDIATELY with live flag
       const analysisId = `${username}_${Date.now()}`;
-      navigate(`/report/${username}`, { 
-        state: { 
-          isLive: true,
-          analysisId,
-          username,
-          color,
-          ...createEmptyAnalysis(color)
-        }
-      });
+      const initialAnalysis = createEmptyAnalysis(color);
+      const initialState = {
+        isLive: true,
+        analysisId,
+        username,
+        playerColor: initialAnalysis.playerColor,
+        totalGames: 0,
+        openingTree: serializeOpeningTree(initialAnalysis.openingTree),
+        weakestLines: [],
+        strongestLines: []
+      };
+      
+      navigate(`/report/${username}`, { state: initialState });
 
       const progressToast = toast.loading("Fetching games...", { duration: Infinity });
       
-      // Create update callback for live updates (throttled to prevent blocking)
-      let lastUpdateTime = 0;
+      // Create update callback for live updates (serialize tree before sending)
       const sendUpdate = (updatedAnalysis: AnalysisResult) => {
-        const now = Date.now();
-        if (now - lastUpdateTime > 100) { // Throttle to max 10 updates/sec
-          lastUpdateTime = now;
-          requestAnimationFrame(() => {
-            window.dispatchEvent(new CustomEvent('analysisUpdate', {
-              detail: { analysisId, analysis: updatedAnalysis }
-            }));
-          });
-        }
+        console.log('[SCOUT] Sending update:', updatedAnalysis.totalGames, 'games');
+        const serialized = {
+          playerColor: updatedAnalysis.playerColor,
+          totalGames: updatedAnalysis.totalGames,
+          openingTree: serializeOpeningTree(updatedAnalysis.openingTree),
+          weakestLines: updatedAnalysis.weakestLines,
+          strongestLines: updatedAnalysis.strongestLines
+        };
+        window.dispatchEvent(new CustomEvent('analysisUpdate', {
+          detail: { analysisId, analysis: serialized }
+        }));
       };
       
       if (actualPlatform === "lichess") {
@@ -166,8 +171,16 @@ const Scout = () => {
       toast.success(`Analysis complete! Analyzed ${analysis.totalGames} games.`);
       
       // Send final update
+      console.log('[SCOUT] Analysis complete, sending final update');
+      const finalSerialized = {
+        playerColor: analysis.playerColor,
+        totalGames: analysis.totalGames,
+        openingTree: serializeOpeningTree(analysis.openingTree),
+        weakestLines: analysis.weakestLines,
+        strongestLines: analysis.strongestLines
+      };
       window.dispatchEvent(new CustomEvent('analysisComplete', {
-        detail: { analysisId, analysis }
+        detail: { analysisId, analysis: finalSerialized }
       }));
     } catch (error: any) {
       console.error("Scout error:", error);
