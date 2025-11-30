@@ -54,6 +54,36 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     return chess.fen();
   }, [selectedPath]);
 
+  // Memoize square styles to prevent lag
+  const squareStyles = useMemo(() => {
+    return possibleMoves.reduce((acc, square) => {
+      const chess = new Chess(currentPosition);
+      const piece = chess.get(square as any);
+      const isCapture = piece && piece.color !== chess.turn();
+      
+      return {
+        ...acc,
+        [square]: isCapture 
+          ? {
+              // Rounded green corners for captures
+              background: `
+                radial-gradient(circle at 15% 15%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 30%, transparent 30%),
+                radial-gradient(circle at 85% 15%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 30%, transparent 30%),
+                radial-gradient(circle at 15% 85%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 30%, transparent 30%),
+                radial-gradient(circle at 85% 85%, rgba(0, 150, 0, 0.85) 0%, rgba(0, 150, 0, 0.85) 30%, transparent 30%)
+              `,
+              backgroundSize: '50% 50%',
+              backgroundRepeat: 'no-repeat',
+              backgroundPosition: 'top left, top right, bottom left, bottom right'
+            }
+          : {
+              // Smaller dot for normal moves
+              background: 'radial-gradient(circle, rgba(0, 120, 0, 0.9) 18%, transparent 18%)',
+            }
+      };
+    }, {});
+  }, [possibleMoves, currentPosition]);
+
   // Find current node in tree and calculate arrows
   const arrows = useMemo(() => {
     // Don't show arrows if we're off the tree
@@ -224,17 +254,25 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       try {
         const move = chess.move({ from: selectedSquare, to: square, promotion: 'q' });
         if (move) {
-          // Allow ANY legal move
-          setSelectedPath(prev => [...prev, move.san]);
-          
-          // Check if this move exists in the opening tree
-          if (!isOffTree) {
-            const matchingChild = currentNode.children?.find((c: SerializedOpeningNode) => c.san === move.san);
-            if (!matchingChild) {
-              // Move not in tree - mark as off tree
-              setIsOffTree(true);
+          // Use requestAnimationFrame to batch state updates and reduce lag
+          requestAnimationFrame(() => {
+            // Allow ANY legal move
+            setSelectedPath(prev => [...prev, move.san]);
+            
+            // Check if this move exists in the opening tree
+            if (!isOffTree) {
+              const matchingChild = currentNode.children?.find((c: SerializedOpeningNode) => c.san === move.san);
+              if (!matchingChild) {
+                // Move not in tree - mark as off tree
+                setIsOffTree(true);
+              }
             }
-          }
+            
+            // Clear selection
+            setSelectedSquare(null);
+            setPossibleMoves([]);
+          });
+          return;
         }
       } catch (error) {
         // Invalid move, try selecting the clicked square instead
@@ -259,10 +297,6 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
 
   // Handle piece drops (for drag-and-drop)
   const onDrop = useCallback(({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string }) => {
-    // Clear any selection
-    setSelectedSquare(null);
-    setPossibleMoves([]);
-    
     const chess = new Chess(currentPosition);
     
     // Find current node in tree (only if not off tree)
@@ -280,17 +314,24 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       const move = chess.move({ from: sourceSquare, to: targetSquare, promotion: 'q' });
       if (!move) return;
 
-      // Allow ANY legal move
-      setSelectedPath(prev => [...prev, move.san]);
-      
-      // Check if this move exists in the opening tree
-      if (!isOffTree) {
-        const matchingChild = currentNode.children?.find((c: SerializedOpeningNode) => c.san === move.san);
-        if (!matchingChild) {
-          // Move not in tree - mark as off tree
-          setIsOffTree(true);
+      // Use requestAnimationFrame to batch state updates and reduce lag
+      requestAnimationFrame(() => {
+        // Allow ANY legal move
+        setSelectedPath(prev => [...prev, move.san]);
+        
+        // Check if this move exists in the opening tree
+        if (!isOffTree) {
+          const matchingChild = currentNode.children?.find((c: SerializedOpeningNode) => c.san === move.san);
+          if (!matchingChild) {
+            // Move not in tree - mark as off tree
+            setIsOffTree(true);
+          }
         }
-      }
+        
+        // Clear any selection
+        setSelectedSquare(null);
+        setPossibleMoves([]);
+      });
     } catch (error) {
       console.error("Invalid move:", error);
     }
@@ -380,27 +421,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
             draggable={true}
             onDrop={onDrop}
             onSquareClick={onSquareClick}
-            squareStyles={{
-              ...possibleMoves.reduce((acc, square) => {
-                const chess = new Chess(currentPosition);
-                const piece = chess.get(square as any);
-                const isCapture = piece && piece.color !== chess.turn();
-                
-                return {
-                  ...acc,
-                  [square]: isCapture 
-                    ? {
-                        // Ring for captures
-                        boxShadow: 'inset 0 0 0 4px rgba(0, 120, 0, 0.9)',
-                        borderRadius: '50%'
-                      }
-                    : {
-                        // Smaller dot for normal moves
-                        background: 'radial-gradient(circle, rgba(0, 120, 0, 0.9) 18%, transparent 18%)',
-                      }
-                };
-              }, {})
-            }}
+            squareStyles={squareStyles}
             boardStyle={{
               borderRadius: '0.5rem',
             }}
