@@ -11,48 +11,13 @@ const Report = () => {
   const { id } = useParams();
   const location = useLocation();
   const [analysis, setAnalysis] = useState<SerializedAnalysisResult | null>(null);
-  const [isLive, setIsLive] = useState(false);
 
   useEffect(() => {
     const stateData = location.state as any;
     
     if (stateData) {
-      console.log('[REPORT] Initial state:', stateData);
-      setIsLive(stateData.isLive || false);
+      console.log('[REPORT] Received state:', stateData);
       setAnalysis(stateData);
-      
-      // Listen for live updates if this is a live analysis
-      if (stateData.isLive && stateData.analysisId) {
-        console.log('[REPORT] Setting up listeners for:', stateData.analysisId);
-        
-        const handleUpdate = (event: Event) => {
-          const customEvent = event as CustomEvent;
-          console.log('[REPORT] Received update:', customEvent.detail);
-          if (customEvent.detail.analysisId === stateData.analysisId) {
-            const updatedAnalysis = customEvent.detail.analysis;
-            console.log('[REPORT] Setting analysis:', updatedAnalysis.totalGames, 'games');
-            setAnalysis(updatedAnalysis);
-          }
-        };
-        
-        const handleComplete = (event: Event) => {
-          const customEvent = event as CustomEvent;
-          console.log('[REPORT] Analysis complete:', customEvent.detail);
-          if (customEvent.detail.analysisId === stateData.analysisId) {
-            setIsLive(false);
-            setAnalysis(customEvent.detail.analysis);
-          }
-        };
-        
-        window.addEventListener('analysisUpdate', handleUpdate);
-        window.addEventListener('analysisComplete', handleComplete);
-        
-        return () => {
-          console.log('[REPORT] Cleaning up listeners');
-          window.removeEventListener('analysisUpdate', handleUpdate);
-          window.removeEventListener('analysisComplete', handleComplete);
-        };
-      }
     }
   }, [location.state]);
 
@@ -141,17 +106,11 @@ const Report = () => {
         <div className="container mx-auto px-4 max-w-6xl">
           <div className="flex items-center justify-between mb-6">
             <div>
-              <h1 className="text-3xl font-bold text-foreground mb-2 flex items-center gap-3">
+              <h1 className="text-3xl font-bold text-foreground mb-2">
                 Scout Report: {id}
-                {isLive && (
-                  <span className="px-3 py-1 text-sm bg-primary/20 text-primary rounded-full animate-pulse">
-                    Live
-                  </span>
-                )}
               </h1>
               <p className="text-muted-foreground">
                 {analysis.totalGames} total games analyzed • Playing as {analysis.playerColor}
-                {isLive && " • Analyzing..."}
               </p>
             </div>
             <Button onClick={handleDownload} variant="outline">
@@ -170,12 +129,7 @@ const Report = () => {
               />
             ) : (
               <div className="text-center py-8 text-muted-foreground">
-                <p>
-                  {isLive 
-                    ? `Analyzing games... ${analysis.totalGames} processed so far.` 
-                    : 'No opening tree data available. The analysis may still be processing or no games were found.'
-                  }
-                </p>
+                <p>No opening tree data available. No games were found or analysis incomplete.</p>
               </div>
             )}
           </div>
