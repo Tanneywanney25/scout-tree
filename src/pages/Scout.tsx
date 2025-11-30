@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { Search, Upload, Loader2, ChevronDown } from "lucide-react";
+import { Search, Upload, Loader2, ChevronDown, StopCircle, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
 import { fetchLichessGames, fetchChessComGames } from "@/lib/chessApi";
 import { analyzeGames, serializeOpeningTree, createEmptyAnalysis, analyzeGamesIncremental, type AnalysisResult } from "@/lib/chessAnalysis";
@@ -23,6 +23,8 @@ import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { getBrowserFingerprint } from "@/lib/fingerprint";
 import { AlertDialog, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { InteractiveOpeningTree } from "@/components/InteractiveOpeningTree";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 const Scout = () => {
   const navigate = useNavigate();
@@ -43,6 +45,7 @@ const Scout = () => {
   const [progress, setProgress] = useState<number | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [currentAnalysis, setCurrentAnalysis] = useState<AnalysisResult | null>(null);
+  const [isAnalysisComplete, setIsAnalysisComplete] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -130,6 +133,8 @@ const Scout = () => {
     setLoading(true);
     setProgress(null);
     setWarning(null);
+    setCurrentAnalysis(null);
+    setIsAnalysisComplete(false);
 
     try {
       const actualPlatform = platform === "auto" ? "lichess" : platform;
@@ -200,25 +205,20 @@ const Scout = () => {
       // Record usage
       await recordUsage();
 
+      // Mark analysis as complete
+      setIsAnalysisComplete(true);
       toast.success(`Analysis complete! Analyzed ${analysis.totalGames} games.`);
-      
-      // Navigate to report with completed analysis stored in sessionStorage
-      const serializedAnalysis = {
-        playerColor: analysis.playerColor,
-        totalGames: analysis.totalGames,
-        openingTree: serializeOpeningTree(analysis.openingTree),
-        weakestLines: analysis.weakestLines,
-        strongestLines: analysis.strongestLines
-      };
-      
-      sessionStorage.setItem('scoutAnalysis', JSON.stringify(serializedAnalysis));
-      navigate(`/report/${username}`);
     } catch (error: any) {
       console.error("Scout error:", error);
       toast.dismiss();
       
       if (error.name === 'AbortError') {
-        toast.info("Analysis cancelled");
+        if (currentAnalysis && currentAnalysis.totalGames > 0) {
+          setIsAnalysisComplete(true);
+          toast.success(`Analysis stopped. ${currentAnalysis.totalGames} games analyzed.`);
+        } else {
+          toast.info("Analysis cancelled");
+        }
         return;
       }
       
@@ -234,8 +234,29 @@ const Scout = () => {
       setLoading(false);
       setProgress(null);
       setWarning(null);
-      setCurrentAnalysis(null);
+      // Keep currentAnalysis so user can view the tree
     }
+  };
+
+  const handleStopAnalysis = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+  };
+
+  const handleViewFullReport = () => {
+    if (!currentAnalysis) return;
+    
+    const serializedAnalysis = {
+      playerColor: currentAnalysis.playerColor,
+      totalGames: currentAnalysis.totalGames,
+      openingTree: serializeOpeningTree(currentAnalysis.openingTree),
+      weakestLines: currentAnalysis.weakestLines,
+      strongestLines: currentAnalysis.strongestLines
+    };
+    
+    sessionStorage.setItem('scoutAnalysis', JSON.stringify(serializedAnalysis));
+    navigate(`/report/${username}`);
   };
 
   return (
@@ -424,8 +445,8 @@ const Scout = () => {
                   </CollapsibleContent>
                 </Collapsible>
 
-                {progress !== null && (
-                  <div className="space-y-2">
+                {progress !== null && loading && (
+                  <div className="space-y-3">
                     <div className="flex items-center justify-between text-sm">
                       <span className="text-muted-foreground">
                         {currentAnalysis ? 'Analyzing games...' : 'Fetching games...'}
@@ -442,6 +463,16 @@ const Scout = () => {
                         )}
                       </div>
                     )}
+
+                    <Button 
+                      type="button"
+                      variant="destructive" 
+                      onClick={handleStopAnalysis}
+                      className="w-full"
+                    >
+                      <StopCircle className="mr-2 w-4 h-4" />
+                      Stop Analysis
+                    </Button>
                   </div>
                 )}
 
@@ -451,23 +482,36 @@ const Scout = () => {
                   </div>
                 )}
 
-                <Button 
-                  type="submit" 
-                  disabled={loading}
-                  className="w-full bg-primary hover:bg-primary-dark text-primary-foreground"
-                >
-                  {loading ? (
-                    <>
-                      <Loader2 className="mr-2 w-4 h-4 animate-spin" />
-                      {progress ? `Analyzing ${progress} games...` : "Analyzing..."}
-                    </>
-                  ) : (
-                    <>
-                      <Search className="mr-2 w-4 h-4" />
-                      Generate Scout Report
-                    </>
-                  )}
-                </Button>
+                {!isAnalysisComplete && (
+                  <Button 
+                    type="submit" 
+                    disabled={loading}
+                    className="w-full bg-primary hover:bg-primary-dark text-primary-foreground"
+                  >
+                    {loading ? (
+                      <>
+                        <Loader2 className="mr-2 w-4 h-4 animate-spin" />
+                        {progress ? `Analyzing ${progress} games...` : "Analyzing..."}
+                      </>
+                    ) : (
+                      <>
+                        <Search className="mr-2 w-4 h-4" />
+                        Generate Scout Report
+                      </>
+                    )}
+                  </Button>
+                )}
+
+                {isAnalysisComplete && currentAnalysis && currentAnalysis.totalGames > 0 && (
+                  <Button 
+                    type="button"
+                    onClick={handleViewFullReport}
+                    className="w-full bg-primary hover:bg-primary-dark text-primary-foreground"
+                  >
+                    <ArrowRight className="mr-2 w-4 h-4" />
+                    View Full Report ({currentAnalysis.totalGames} games)
+                  </Button>
+                )}
               </form>
 
               <div className="mt-6 pt-6 border-t border-border">
@@ -478,6 +522,28 @@ const Scout = () => {
               </div>
             </CardContent>
           </Card>
+
+          {currentAnalysis && currentAnalysis.totalGames >= 10 && (
+            <Card className="mt-8">
+              <CardHeader>
+                <CardTitle>Opening Tree Preview</CardTitle>
+                <CardDescription>
+                  {isAnalysisComplete 
+                    ? `Analysis complete - ${currentAnalysis.totalGames} games` 
+                    : `Live preview - updating as more games are analyzed (${currentAnalysis.totalGames} games so far)`
+                  }
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ErrorBoundary>
+                  <InteractiveOpeningTree 
+                    node={serializeOpeningTree(currentAnalysis.openingTree)}
+                    playerColor={currentAnalysis.playerColor === "both" ? "white" : currentAnalysis.playerColor}
+                  />
+                </ErrorBoundary>
+              </CardContent>
+            </Card>
+          )}
         </div>
       </main>
 
