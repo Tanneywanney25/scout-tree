@@ -39,6 +39,10 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   const [isOffTree, setIsOffTree] = useState(false);
   const [showArrows, setShowArrows] = useState(true);
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
+  const [navigationArrow, setNavigationArrow] = useState<{ from: string; to: string } | null>(null);
+  const [userArrows, setUserArrows] = useState<Array<{ from: string; to: string }>>([]);
+  const [userCircles, setUserCircles] = useState<string[]>([]);
+  const [rightClickStart, setRightClickStart] = useState<string | null>(null);
 
   // Calculate the current position based on selected moves
   const currentPosition = useMemo(() => {
@@ -111,11 +115,11 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       
       styles[square] = isCapture 
         ? {
-            // Ring around edge for captures (Lichess style)
+            // Ring around edge for captures (Lichess style) - THINNER (80% instead of 65%)
             background: `radial-gradient(
               transparent 0%,
-              transparent 65%,
-              rgba(20, 85, 30, 0.5) 65%,
+              transparent 80%,
+              rgba(20, 85, 30, 0.5) 80%,
               rgba(20, 85, 30, 0.5) 100%
             )`
           }
@@ -220,6 +224,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   const handleMoveBack = useCallback(() => {
     // Hide arrows first for smoother transition
     setShowArrows(false);
+    setNavigationArrow(null);
     
     setSelectedPath(prev => {
       if (prev.length === 0) return prev;
@@ -242,16 +247,29 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         setIsOffTree(false);
       }
       
+      // Set navigation arrow after 100ms delay for smooth transition
+      setTimeout(() => {
+        if (newPath.length > 0) {
+          const chess = new Chess();
+          for (let i = 0; i < newPath.length - 1; i++) {
+            chess.move(newPath[i]);
+          }
+          const lastMoveObj = chess.move(newPath[newPath.length - 1]);
+          if (lastMoveObj) {
+            setNavigationArrow({ from: lastMoveObj.from, to: lastMoveObj.to });
+          }
+        }
+        setShowArrows(true);
+      }, 100);
+      
       return newPath;
     });
-    
-    // Show arrows after the board updates
-    requestAnimationFrame(() => {
-      setShowArrows(true);
-    });
-  }, [node, currentPosition, isOffTree, selectedPath]);
+  }, [node]);
 
   const handleMoveForward = useCallback(() => {
+    setShowArrows(false);
+    setNavigationArrow(null);
+    
     setSelectedPath(prev => {
       // Find current node
       let currentNode = node;
@@ -266,14 +284,51 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         const mostPopular = currentNode.children.reduce((prevChild, curr) => 
           curr.count > prevChild.count ? curr : prevChild
         );
-        return [...prev, mostPopular.san];
+        const newPath = [...prev, mostPopular.san];
+        
+        // Set navigation arrow after 100ms delay
+        setTimeout(() => {
+          const chess = new Chess();
+          for (let i = 0; i < newPath.length - 1; i++) {
+            chess.move(newPath[i]);
+          }
+          const lastMoveObj = chess.move(newPath[newPath.length - 1]);
+          if (lastMoveObj) {
+            setNavigationArrow({ from: lastMoveObj.from, to: lastMoveObj.to });
+          }
+          setShowArrows(true);
+        }, 100);
+        
+        return newPath;
       }
       return prev;
     });
   }, [node]);
 
   const handleJumpToMove = useCallback((moveIndex: number) => {
-    setSelectedPath(prev => prev.slice(0, moveIndex));
+    setShowArrows(false);
+    setNavigationArrow(null);
+    
+    setSelectedPath(prev => {
+      const newPath = prev.slice(0, moveIndex);
+      
+      // Set navigation arrow after 100ms delay
+      setTimeout(() => {
+        if (newPath.length > 0) {
+          const chess = new Chess();
+          for (let i = 0; i < newPath.length - 1; i++) {
+            chess.move(newPath[i]);
+          }
+          const lastMoveObj = chess.move(newPath[newPath.length - 1]);
+          if (lastMoveObj) {
+            setNavigationArrow({ from: lastMoveObj.from, to: lastMoveObj.to });
+          }
+        }
+        setShowArrows(true);
+      }, 100);
+      
+      return newPath;
+    });
   }, []);
 
   // Keyboard navigation
@@ -294,6 +349,16 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
 
   // Handle square clicks for click-to-move
   const onSquareClick = useCallback((square: string) => {
+    // Handle right-click release if in progress
+    if (rightClickStart) {
+      handleSquareRightRelease(square);
+      return;
+    }
+    
+    // Clear user arrows and circles on left click
+    setUserArrows([]);
+    setUserCircles([]);
+    
     const chess = new Chess(currentPosition);
     
     // Find current node in tree (only if not off tree)
@@ -352,6 +417,31 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       }
     }
   }, [node, selectedPath, currentPosition, selectedSquare, isOffTree]);
+
+  // Handle right-click on squares for arrows and circles
+  const handleSquareRightClick = useCallback((square: string) => {
+    setRightClickStart(square);
+  }, []);
+
+  const handleSquareRightRelease = useCallback((square: string) => {
+    if (!rightClickStart) return;
+    
+    if (rightClickStart === square) {
+      // Same square = toggle circle
+      setUserCircles(prev => prev.includes(square) 
+        ? prev.filter(s => s !== square) 
+        : [...prev, square]);
+    } else {
+      // Different square = toggle arrow
+      setUserArrows(prev => {
+        const exists = prev.some(a => a.from === rightClickStart && a.to === square);
+        return exists 
+          ? prev.filter(a => !(a.from === rightClickStart && a.to === square))
+          : [...prev, { from: rightClickStart, to: square }];
+      });
+    }
+    setRightClickStart(null);
+  }, [rightClickStart]);
 
   // Handle piece drops (for drag-and-drop)
   const onDrop = useCallback(({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string }) => {
@@ -440,10 +530,15 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         {/* Chess Board */}
         <div className="relative aspect-square w-full max-w-[600px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
           <style>{`
-            /* Fix dragged piece size */
+            /* Fix dragged piece size and make dragging smoother */
             .piece-417db {
               width: 100% !important;
               height: 100% !important;
+              will-change: transform;
+              cursor: grab;
+            }
+            .piece-417db:active {
+              cursor: grabbing;
             }
             img[data-piece] {
               max-width: 100% !important;
@@ -454,19 +549,46 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               filter: none !important;
             }
           `}</style>
-          <Chessboard 
-            position={currentPosition}
-            orientation={boardOrientation}
-            draggable={true}
-            onDrop={onDrop}
-            onSquareClick={onSquareClick}
-            squareStyles={squareStyles}
-            boardStyle={{
-              borderRadius: '0.5rem',
+          <div 
+            onContextMenu={(e) => e.preventDefault()}
+            onMouseUp={(e) => {
+              if (e.button === 2 && rightClickStart) {
+                // Get square from mouse position
+                const rect = e.currentTarget.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                const squareSize = rect.width / 8;
+                let file = Math.floor(x / squareSize);
+                let rank = Math.floor(y / squareSize);
+                
+                if (boardOrientation === "black") {
+                  file = 7 - file;
+                  rank = 7 - rank;
+                }
+                
+                const fileChar = String.fromCharCode(97 + file);
+                const rankChar = String(8 - rank);
+                const square = fileChar + rankChar;
+                
+                handleSquareRightRelease(square);
+              }
             }}
-            lightSquareStyle={{ backgroundColor: '#f0d9b5' }}
-            darkSquareStyle={{ backgroundColor: '#b58863' }}
-          />
+          >
+            <Chessboard 
+              position={currentPosition}
+              orientation={boardOrientation}
+              draggable={true}
+              onDrop={onDrop}
+              onSquareClick={onSquareClick}
+              onSquareRightClick={handleSquareRightClick}
+              squareStyles={squareStyles}
+              boardStyle={{
+                borderRadius: '0.5rem',
+              }}
+              lightSquareStyle={{ backgroundColor: '#f0d9b5' }}
+              darkSquareStyle={{ backgroundColor: '#b58863' }}
+            />
+          </div>
           
           {/* Arrow overlay */}
           <svg 
@@ -532,6 +654,142 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
                   strokeWidth="0.18"
                   strokeLinecap="round"
                   markerEnd={`url(#arrowhead-${idx})`}
+                />
+              );
+            })}
+            
+            {/* Navigation arrow showing last move (green #749C63) */}
+            {navigationArrow && (() => {
+              let fromFile = navigationArrow.from.charCodeAt(0) - 97;
+              let fromRank = 8 - parseInt(navigationArrow.from[1]);
+              let toFile = navigationArrow.to.charCodeAt(0) - 97;
+              let toRank = 8 - parseInt(navigationArrow.to[1]);
+              
+              if (boardOrientation === "black") {
+                fromFile = 7 - fromFile;
+                fromRank = 7 - fromRank;
+                toFile = 7 - toFile;
+                toRank = 7 - toRank;
+              }
+              
+              const x1 = fromFile + 0.5;
+              const y1 = fromRank + 0.5;
+              const x2 = toFile + 0.5;
+              const y2 = toRank + 0.5;
+              
+              const dx = x2 - x1;
+              const dy = y2 - y1;
+              const length = Math.sqrt(dx * dx + dy * dy);
+              const shortenBy = 0.25;
+              const x2Shortened = x2 - (dx / length) * shortenBy;
+              const y2Shortened = y2 - (dy / length) * shortenBy;
+              
+              return (
+                <>
+                  <defs>
+                    <marker
+                      id="nav-arrowhead"
+                      markerWidth="4"
+                      markerHeight="4"
+                      refX="2.5"
+                      refY="2"
+                      orient="auto"
+                      markerUnits="strokeWidth"
+                    >
+                      <polygon points="0 0, 4 2, 0 4" fill="#749C63" fillOpacity="0.9" />
+                    </marker>
+                  </defs>
+                  <line
+                    x1={x1}
+                    y1={y1}
+                    x2={x2Shortened}
+                    y2={y2Shortened}
+                    stroke="#749C63"
+                    strokeWidth="0.18"
+                    strokeOpacity="0.9"
+                    strokeLinecap="round"
+                    markerEnd="url(#nav-arrowhead)"
+                  />
+                </>
+              );
+            })()}
+            
+            {/* User-drawn arrows (green #749C63) */}
+            {userArrows.map((arrow, idx) => {
+              let fromFile = arrow.from.charCodeAt(0) - 97;
+              let fromRank = 8 - parseInt(arrow.from[1]);
+              let toFile = arrow.to.charCodeAt(0) - 97;
+              let toRank = 8 - parseInt(arrow.to[1]);
+              
+              if (boardOrientation === "black") {
+                fromFile = 7 - fromFile;
+                fromRank = 7 - fromRank;
+                toFile = 7 - toFile;
+                toRank = 7 - toRank;
+              }
+              
+              const x1 = fromFile + 0.5;
+              const y1 = fromRank + 0.5;
+              const x2 = toFile + 0.5;
+              const y2 = toRank + 0.5;
+              
+              const dx = x2 - x1;
+              const dy = y2 - y1;
+              const length = Math.sqrt(dx * dx + dy * dy);
+              const shortenBy = 0.25;
+              const x2Shortened = x2 - (dx / length) * shortenBy;
+              const y2Shortened = y2 - (dy / length) * shortenBy;
+              
+              return (
+                <g key={`user-arrow-${idx}`}>
+                  <defs>
+                    <marker
+                      id={`user-arrowhead-${idx}`}
+                      markerWidth="4"
+                      markerHeight="4"
+                      refX="2.5"
+                      refY="2"
+                      orient="auto"
+                      markerUnits="strokeWidth"
+                    >
+                      <polygon points="0 0, 4 2, 0 4" fill="#749C63" fillOpacity="0.8" />
+                    </marker>
+                  </defs>
+                  <line
+                    x1={x1}
+                    y1={y1}
+                    x2={x2Shortened}
+                    y2={y2Shortened}
+                    stroke="#749C63"
+                    strokeWidth="0.18"
+                    strokeOpacity="0.8"
+                    strokeLinecap="round"
+                    markerEnd={`url(#user-arrowhead-${idx})`}
+                  />
+                </g>
+              );
+            })}
+            
+            {/* User-drawn circles (green #749C63) */}
+            {userCircles.map(square => {
+              let file = square.charCodeAt(0) - 97;
+              let rank = 8 - parseInt(square[1]);
+              
+              if (boardOrientation === "black") {
+                file = 7 - file;
+                rank = 7 - rank;
+              }
+              
+              return (
+                <circle
+                  key={`user-circle-${square}`}
+                  cx={file + 0.5}
+                  cy={rank + 0.5}
+                  r={0.4}
+                  fill="none"
+                  stroke="#749C63"
+                  strokeWidth="0.08"
+                  strokeOpacity="0.8"
                 />
               );
             })}
