@@ -57,6 +57,16 @@ const Scout = () => {
     );
   };
 
+  // Cleanup: abort any running analysis when component unmounts
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+    };
+  }, []);
+
   const checkUsageLimit = async (): Promise<boolean> => {
     // If user is logged in, allow unlimited scouts
     if (user) {
@@ -303,7 +313,7 @@ const Scout = () => {
             <CardHeader>
               <CardTitle>Player Information</CardTitle>
               <CardDescription>
-                Provide the opponent's username or upload a PGN file
+                Provide the opponent's username to analyze their games
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -349,24 +359,6 @@ const Scout = () => {
                   </RadioGroup>
                 </div>
 
-                <div className="space-y-2">
-                  <Label>Time Controls</Label>
-                  <div className="grid grid-cols-2 gap-3">
-                    {["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"].map(tc => (
-                      <div key={tc} className="flex items-center space-x-2">
-                        <Checkbox 
-                          id={tc}
-                          checked={timeControls.includes(tc)}
-                          onCheckedChange={() => toggleTimeControl(tc)}
-                        />
-                        <Label htmlFor={tc} className="font-normal cursor-pointer capitalize">
-                          {tc}
-                        </Label>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
                 <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
                   <CollapsibleTrigger asChild>
                     <Button variant="outline" className="w-full flex items-center justify-between">
@@ -375,6 +367,24 @@ const Scout = () => {
                     </Button>
                   </CollapsibleTrigger>
                   <CollapsibleContent className="space-y-4 mt-4">
+                    <div className="space-y-2">
+                      <Label>Time Controls</Label>
+                      <div className="grid grid-cols-2 gap-3">
+                        {["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"].map(tc => (
+                          <div key={tc} className="flex items-center space-x-2">
+                            <Checkbox 
+                              id={tc}
+                              checked={timeControls.includes(tc)}
+                              onCheckedChange={() => toggleTimeControl(tc)}
+                            />
+                            <Label htmlFor={tc} className="font-normal cursor-pointer capitalize">
+                              {tc}
+                            </Label>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
                     <div className="space-y-2">
                       <Label htmlFor="variant-advanced">Chess Variant</Label>
                       <Select value={variant} onValueChange={setVariant}>
@@ -549,13 +559,6 @@ const Scout = () => {
                   </div>
                 )}
               </form>
-
-              <div className="mt-6 pt-6 border-t border-border">
-                <Button variant="outline" className="w-full">
-                  <Upload className="mr-2 w-4 h-4" />
-                  Upload PGN File Instead
-                </Button>
-              </div>
             </CardContent>
           </Card>
 

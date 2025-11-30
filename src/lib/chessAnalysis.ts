@@ -95,9 +95,9 @@ export async function analyzeGamesIncremental(
     const isWhite = game.white.toLowerCase() === targetUsername.toLowerCase();
     const isBlack = game.black.toLowerCase() === targetUsername.toLowerCase();
 
-    // Fix: if user is white, analyze opponent's BLACK games (where opponent plays black)
-    if (playerColor === "white" && !isBlack) continue;
-    if (playerColor === "black" && !isWhite) continue;
+    // Only include games where scouted player played the selected color
+    if (playerColor === "white" && !isWhite) continue;
+    if (playerColor === "black" && !isBlack) continue;
     if (!isWhite && !isBlack) {
       console.log(`[ANALYSIS] Skipping game - player not found. White: ${game.white}, Black: ${game.black}`);
       continue;
@@ -245,10 +245,9 @@ export function analyzeGames(
     const isWhite = game.white.toLowerCase() === targetUsername.toLowerCase();
     const isBlack = game.black.toLowerCase() === targetUsername.toLowerCase();
 
-    // Filter by color if specified
-    // Fix: if user is white, analyze opponent's BLACK games (where opponent plays black)
-    if (playerColor === "white" && !isBlack) continue;
-    if (playerColor === "black" && !isWhite) continue;
+    // Only include games where scouted player played the selected color
+    if (playerColor === "white" && !isWhite) continue;
+    if (playerColor === "black" && !isBlack) continue;
     if (!isWhite && !isBlack) continue;
 
     totalGames++;
