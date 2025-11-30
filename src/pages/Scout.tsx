@@ -96,20 +96,6 @@ const Scout = () => {
         }
       });
       
-      const cached = localStorage.getItem(cacheKey);
-      
-      if (cached) {
-        const cachedData = JSON.parse(cached);
-        const cacheAge = Date.now() - cachedData.timestamp;
-        
-        if (cacheAge < 24 * 60 * 60 * 1000) {
-          toast.success("Loading cached report...");
-          navigate(`/report/${username}`, { state: cachedData.analysis });
-          setLoading(false);
-          return;
-        }
-      }
-
       const loadingToast = toast.loading("Fetching and analyzing games...");
 
       const actualPlatform = platform === "auto" ? "lichess" : platform;
@@ -127,56 +113,16 @@ const Scout = () => {
         opponentName: opponentName || undefined
       };
       
-      // Navigate to report immediately for live updates
-      const initialReportData = {
-        ...analysis,
-        openingTree: serializeOpeningTree(analysis.openingTree),
-      };
-      
-      // Initialize both caches
-      localStorage.setItem(cacheKey, JSON.stringify({ 
-        analysis: initialReportData,
-        timestamp: Date.now() 
-      }));
-      localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-        totalGames: 0,
-        complete: false
-      }));
-      
-      // Navigate immediately to show live updates
       toast.dismiss(loadingToast);
-      toast.success("Loading report - analyzing games in real-time...");
-      navigate(`/report/${username}`, { 
-        state: { 
-          ...initialReportData,
-          isLive: true,
-          cacheKey,
-          username,
-          platform: actualPlatform,
-          timeControls,
-          color,
-          mode,
-          variant
-        }
-      });
+      const progressToast = toast.loading("Fetching games...", { duration: Infinity });
       
       if (actualPlatform === "lichess") {
         await fetchLichessGames(
           username,
           fetchOptions,
           (count) => {
-            // Update local state
             setProgress(count);
-            
-            // CRITICAL: Write fetch progress directly to localStorage for Report page
-            try {
-              localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-                totalGames: count,
-                complete: false
-              }));
-            } catch (e) {
-              console.warn('Failed to write progress:', e);
-            }
+            toast.loading(`Fetched ${count} games...`, { id: progressToast, duration: Infinity });
             
             if (count > 2000 && !warning) {
               setWarning("Large dataset - processing all games...");
@@ -184,50 +130,9 @@ const Scout = () => {
           },
           (gameBatch) => {
             try {
-              // Check if user clicked stop button
-              if (localStorage.getItem(`abort_${cacheKey}`)) {
-                console.log('Abort flag detected, stopping analysis');
-                localStorage.removeItem(`abort_${cacheKey}`);
-                if (abortControllerRef.current) {
-                  abortControllerRef.current.abort();
-                }
-                return;
-              }
-              
-              // Analyze batch WITHOUT progress callback - fetch progress is already smooth!
               analysis = analyzeGamesIncremental(analysis, gameBatch, username);
-              
-              // Update localStorage with current count for Report page
-              try {
-                localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-                  totalGames: analysis.totalGames,
-                  complete: false
-                }));
-              } catch (e) {
-                console.warn('Failed to update progress:', e);
-              }
-              
-              // Save full analysis frequently at start (every 10 games until 50), then every 50 games
-              const shouldSave = analysis.totalGames <= 50 
-                ? analysis.totalGames % 10 === 0 
-                : analysis.totalGames % 50 === 0;
-              
-              if (shouldSave) {
-                try {
-                  const progressData = {
-                    ...analysis,
-                    openingTree: serializeOpeningTree(analysis.openingTree),
-                  };
-                  localStorage.setItem(cacheKey, JSON.stringify({ 
-                    analysis: progressData,
-                    timestamp: Date.now(),
-                    complete: false
-                  }));
-                  console.log(`💾 Saved tree update at ${analysis.totalGames} games`);
-                } catch (e) {
-                  console.warn('Failed to update progress:', e);
-                }
-              }
+              setCurrentAnalysis(analysis);
+              toast.loading(`Analyzing ${analysis.totalGames} games...`, { id: progressToast, duration: Infinity });
             } catch (error) {
               console.error('Error processing game batch:', error);
             }
@@ -235,114 +140,27 @@ const Scout = () => {
           abortControllerRef.current?.signal
         );
         
-        // Mark analysis as complete
-        const finalData = {
-          ...analysis,
-          openingTree: serializeOpeningTree(analysis.openingTree),
-        };
-        try {
-          localStorage.setItem(cacheKey, JSON.stringify({ 
-            analysis: finalData,
-            timestamp: Date.now(),
-            complete: true
-          }));
-          // Mark progress as complete too
-          localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-            totalGames: analysis.totalGames,
-            complete: true
-          }));
-        } catch (e) {
-          console.warn('Failed to cache final analysis:', e);
-        }
+        toast.dismiss(progressToast);
       } else {
         await fetchChessComGames(
           username,
           fetchOptions,
           (count) => {
-            // Update local state
             setProgress(count);
-            
-            // CRITICAL: Write fetch progress directly to localStorage for Report page
-            try {
-              localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-                totalGames: count,
-                complete: false
-              }));
-            } catch (e) {
-              console.warn('Failed to write progress:', e);
-            }
+            toast.loading(`Fetched ${count} games...`, { id: progressToast, duration: Infinity });
           },
           (gameBatch) => {
             try {
-              // Check if user clicked stop button
-              if (localStorage.getItem(`abort_${cacheKey}`)) {
-                console.log('Abort flag detected, stopping analysis');
-                localStorage.removeItem(`abort_${cacheKey}`);
-                if (abortControllerRef.current) {
-                  abortControllerRef.current.abort();
-                }
-                return;
-              }
-              
-              // Analyze batch WITHOUT progress callback - fetch progress is already smooth!
               analysis = analyzeGamesIncremental(analysis, gameBatch, username);
-              
-              // Update localStorage with current count for Report page
-              try {
-                localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-                  totalGames: analysis.totalGames,
-                  complete: false
-                }));
-              } catch (e) {
-                console.warn('Failed to update progress:', e);
-              }
-              
-              // Save full analysis frequently at start (every 10 games until 50), then every 50 games
-              const shouldSave = analysis.totalGames <= 50 
-                ? analysis.totalGames % 10 === 0 
-                : analysis.totalGames % 50 === 0;
-              
-              if (shouldSave) {
-                try {
-                  const progressData = {
-                    ...analysis,
-                    openingTree: serializeOpeningTree(analysis.openingTree),
-                  };
-                  localStorage.setItem(cacheKey, JSON.stringify({ 
-                    analysis: progressData,
-                    timestamp: Date.now(),
-                    complete: false
-                  }));
-                  console.log(`💾 Saved tree update at ${analysis.totalGames} games`);
-                } catch (e) {
-                  console.warn('Failed to update progress:', e);
-                }
-              }
+              setCurrentAnalysis(analysis);
+              toast.loading(`Analyzing ${analysis.totalGames} games...`, { id: progressToast, duration: Infinity });
             } catch (error) {
               console.error('Error processing game batch:', error);
             }
           }
         );
         
-        // Mark analysis as complete
-        const finalData = {
-          ...analysis,
-          openingTree: serializeOpeningTree(analysis.openingTree),
-        };
-        try {
-          localStorage.setItem(cacheKey, JSON.stringify({ 
-            analysis: finalData,
-            timestamp: Date.now(),
-            complete: true
-          }));
-          // Mark progress as complete too
-          localStorage.setItem(`${cacheKey}_progress`, JSON.stringify({ 
-            totalGames: analysis.totalGames,
-            complete: true
-          }));
-        } catch (e) {
-          console.warn('Failed to cache final analysis:', e);
-        }
+        toast.dismiss(progressToast);
       }
 
       if (analysis.totalGames === 0) {
@@ -351,45 +169,17 @@ const Scout = () => {
         return;
       }
 
-      // Only cache smaller datasets (< 500 games) to avoid quota errors
-      if (analysis.totalGames < 500) {
-        try {
-          const reportData = {
-            username,
-            platform: actualPlatform,
-            timeControls,
-            color,
-            mode,
-            dateFrom,
-            dateTo,
-            ratingMin,
-            ratingMax,
-            opponentName,
-            analysis: {
-              ...analysis,
-              openingTree: serializeOpeningTree(analysis.openingTree),
-            },
-            timestamp: Date.now(),
-          };
-          localStorage.setItem(cacheKey, JSON.stringify(reportData));
-        } catch (e) {
-          console.warn("Cache failed - dataset too large:", e);
-        }
-      }
-
-      // Final update with complete analysis
+      toast.success(`Analysis complete! Analyzed ${analysis.totalGames} games.`);
+      
+      // Navigate to report with final data
       const finalReportData = {
         ...analysis,
         openingTree: serializeOpeningTree(analysis.openingTree),
       };
       
-      localStorage.setItem(cacheKey, JSON.stringify({ 
-        analysis: finalReportData,
-        timestamp: Date.now(),
-        complete: true  // Signal that analysis is finished
-      }));
-      
-      toast.success(`Analysis complete! Analyzed ${analysis.totalGames} games.`);
+      navigate(`/report/${username}`, { 
+        state: finalReportData
+      });
     } catch (error: any) {
       console.error("Scout error:", error);
       toast.dismiss(); // Dismiss all toasts including the loading one
