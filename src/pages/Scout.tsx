@@ -245,6 +245,30 @@ const Scout = () => {
     }
   };
 
+  const handleNewScout = () => {
+    // Reset all state
+    setCurrentAnalysis(null);
+    setIsAnalysisComplete(false);
+    setLoading(false);
+    setProgress(null);
+    setWarning(null);
+    setUsername("");
+    setColor("white");
+    setTimeControls(["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"]);
+    setVariant("standard");
+    setMode("all");
+    setDateFrom(undefined);
+    setDateTo(new Date());
+    setRatingMin("");
+    setRatingMax("");
+    setOpponentName("");
+    
+    // Clear session storage
+    sessionStorage.removeItem('scoutAnalysis');
+    
+    toast.success("Ready for new scout");
+  };
+
   const handleViewFullReport = () => {
     if (!currentAnalysis) return;
     
@@ -504,14 +528,25 @@ const Scout = () => {
                 )}
 
                 {isAnalysisComplete && currentAnalysis && currentAnalysis.totalGames > 0 && (
-                  <Button 
-                    type="button"
-                    onClick={handleViewFullReport}
-                    className="w-full bg-primary hover:bg-primary-dark text-primary-foreground"
-                  >
-                    <ArrowRight className="mr-2 w-4 h-4" />
-                    View Full Report ({currentAnalysis.totalGames} games)
-                  </Button>
+                  <div className="space-y-3">
+                    <Button 
+                      type="button"
+                      onClick={handleViewFullReport}
+                      className="w-full bg-primary hover:bg-primary-dark text-primary-foreground"
+                    >
+                      <ArrowRight className="mr-2 w-4 h-4" />
+                      View Full Report ({currentAnalysis.totalGames} games)
+                    </Button>
+                    
+                    <Button 
+                      type="button"
+                      onClick={handleNewScout}
+                      variant="outline"
+                      className="w-full"
+                    >
+                      New Scout
+                    </Button>
+                  </div>
                 )}
               </form>
 
