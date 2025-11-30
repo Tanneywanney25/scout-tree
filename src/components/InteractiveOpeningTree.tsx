@@ -38,6 +38,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   const [possibleMoves, setPossibleMoves] = useState<string[]>([]);
   const [isOffTree, setIsOffTree] = useState(false);
   const [showArrows, setShowArrows] = useState(true);
+  const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
 
   // Calculate the current position based on selected moves
   const currentPosition = useMemo(() => {
@@ -55,35 +56,82 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     return chess.fen();
   }, [selectedPath]);
 
+  // Helper function to find king square
+  const findKingSquare = (chess: Chess, color: 'w' | 'b'): string | null => {
+    const board = chess.board();
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 8; col++) {
+        const piece = board[row][col];
+        if (piece && piece.type === 'k' && piece.color === color) {
+          return String.fromCharCode(97 + col) + (8 - row);
+        }
+      }
+    }
+    return null;
+  };
+
   // Memoize square styles to prevent lag
   const squareStyles = useMemo(() => {
-    return possibleMoves.reduce((acc, square) => {
-      const chess = new Chess(currentPosition);
+    const styles: { [square: string]: any } = {};
+    const chess = new Chess(currentPosition);
+    
+    // Add last move highlighting (yellow)
+    if (lastMove) {
+      styles[lastMove.from] = { backgroundColor: 'rgba(155, 199, 0, 0.41)' };
+      styles[lastMove.to] = { backgroundColor: 'rgba(155, 199, 0, 0.41)' };
+    }
+    
+    // Add check highlighting (red radial gradient)
+    if (chess.isCheck()) {
+      const kingSquare = findKingSquare(chess, chess.turn());
+      if (kingSquare) {
+        styles[kingSquare] = {
+          background: `radial-gradient(
+            ellipse at center,
+            rgba(255, 0, 0, 0.4) 0%,
+            rgba(231, 0, 0, 0.3) 25%,
+            rgba(169, 0, 0, 0) 89%,
+            rgba(158, 0, 0, 0) 100%
+          )`
+        };
+      }
+    }
+    
+    // Add selected square highlighting (green)
+    if (selectedSquare) {
+      styles[selectedSquare] = {
+        backgroundColor: 'rgba(20, 85, 30, 0.5)'
+      };
+    }
+    
+    // Add legal move indicators
+    possibleMoves.forEach(square => {
       const piece = chess.get(square as any);
       const isCapture = piece && piece.color !== chess.turn();
       
-      return {
-        ...acc,
-        [square]: isCapture 
-          ? {
-              // Smaller rounded dark green corners for captures
-              background: `
-                radial-gradient(circle at 10% 10%, rgba(0, 100, 0, 0.9) 0%, rgba(0, 100, 0, 0.9) 15%, transparent 15%),
-                radial-gradient(circle at 90% 10%, rgba(0, 100, 0, 0.9) 0%, rgba(0, 100, 0, 0.9) 15%, transparent 15%),
-                radial-gradient(circle at 10% 90%, rgba(0, 100, 0, 0.9) 0%, rgba(0, 100, 0, 0.9) 15%, transparent 15%),
-                radial-gradient(circle at 90% 90%, rgba(0, 100, 0, 0.9) 0%, rgba(0, 100, 0, 0.9) 15%, transparent 15%)
-              `,
-              backgroundSize: '50% 50%',
-              backgroundRepeat: 'no-repeat',
-              backgroundPosition: 'top left, top right, bottom left, bottom right'
-            }
-          : {
-              // Smaller dark green dot for normal moves
-              background: 'radial-gradient(circle, rgba(0, 80, 0, 0.95) 18%, transparent 18%)',
-            }
-      };
-    }, {});
-  }, [possibleMoves, currentPosition]);
+      styles[square] = isCapture 
+        ? {
+            // Ring around edge for captures (Lichess style)
+            background: `radial-gradient(
+              transparent 0%,
+              transparent 65%,
+              rgba(20, 85, 30, 0.5) 65%,
+              rgba(20, 85, 30, 0.5) 100%
+            )`
+          }
+        : {
+            // Dot in center for normal moves (Lichess style)
+            background: `radial-gradient(
+              rgba(20, 85, 30, 0.5) 22%,
+              #208530 22%,
+              rgba(0, 0, 0, 0.3) 22%,
+              transparent 22%
+            )`
+          };
+    });
+    
+    return styles;
+  }, [possibleMoves, currentPosition, lastMove, selectedSquare]);
 
   // Find current node in tree and calculate arrows
   const arrows = useMemo(() => {
@@ -267,6 +315,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
           requestAnimationFrame(() => {
             // Allow ANY legal move
             setSelectedPath(prev => [...prev, move.san]);
+            setLastMove({ from: selectedSquare, to: square });
             
             // Check if this move exists in the opening tree
             if (!isOffTree) {
@@ -327,6 +376,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       requestAnimationFrame(() => {
         // Allow ANY legal move
         setSelectedPath(prev => [...prev, move.san]);
+        setLastMove({ from: sourceSquare, to: targetSquare });
         
         // Check if this move exists in the opening tree
         if (!isOffTree) {
@@ -496,32 +546,54 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
 
       {/* Move list on the side */}
       <div className="w-48 bg-card border border-border rounded-lg p-4 max-h-[600px] overflow-y-auto">
-        <h3 className="text-sm font-semibold mb-3">Moves</h3>
+        <h3 className="text-sm font-semibold mb-3 border-b border-border pb-2">Moves</h3>
         <div className="space-y-1 text-sm">
           {selectedPath.length === 0 ? (
             <div className="text-muted-foreground">No moves yet</div>
           ) : (
-            selectedPath.map((move, index) => {
-              const moveNumber = Math.floor(index / 2) + 1;
-              const isWhiteMove = index % 2 === 0;
-              const showMoveNumber = isWhiteMove;
-              
-              return (
-                <div key={index} className="flex flex-col">
-                  {showMoveNumber && (
-                    <div className="text-muted-foreground font-medium mt-2 first:mt-0">
+            (() => {
+              const moveRows: JSX.Element[] = [];
+              for (let i = 0; i < selectedPath.length; i += 2) {
+                const whiteMove = selectedPath[i];
+                const blackMove = selectedPath[i + 1];
+                const moveNumber = Math.floor(i / 2) + 1;
+                const isCurrentWhite = i === selectedPath.length - 1;
+                const isCurrentBlack = i + 1 === selectedPath.length - 1;
+                
+                moveRows.push(
+                  <div key={i} className="grid grid-cols-[40px_1fr_1fr] gap-1 items-center">
+                    <span className="text-muted-foreground text-right font-mono text-xs">
                       {moveNumber}.
-                    </div>
-                  )}
-                  <button
-                    onClick={() => handleJumpToMove(index + 1)}
-                    className="text-left hover:bg-accent px-2 py-0.5 rounded transition-colors"
-                  >
-                    {move}
-                  </button>
-                </div>
-              );
-            })
+                    </span>
+                    <button
+                      onClick={() => handleJumpToMove(i + 1)}
+                      className={`text-left px-2 py-1 rounded transition-all font-mono text-xs ${
+                        isCurrentWhite 
+                          ? 'bg-primary text-primary-foreground font-semibold' 
+                          : 'hover:bg-accent'
+                      }`}
+                    >
+                      {whiteMove}
+                    </button>
+                    {blackMove ? (
+                      <button
+                        onClick={() => handleJumpToMove(i + 2)}
+                        className={`text-left px-2 py-1 rounded transition-all font-mono text-xs ${
+                          isCurrentBlack 
+                            ? 'bg-primary text-primary-foreground font-semibold' 
+                            : 'hover:bg-accent'
+                        }`}
+                      >
+                        {blackMove}
+                      </button>
+                    ) : (
+                      <div />
+                    )}
+                  </div>
+                );
+              }
+              return moveRows;
+            })()
           )}
         </div>
       </div>
