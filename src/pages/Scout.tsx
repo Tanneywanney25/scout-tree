@@ -70,7 +70,8 @@ const Scout = () => {
 
     if (error) {
       console.error('Error checking usage:', error);
-      return true; // Allow on error
+      toast.error("Error checking usage limit. Please try again.");
+      return false; // Fail closed
     }
 
     // If fingerprint exists, they've used their free scout
@@ -201,7 +202,7 @@ const Scout = () => {
 
       toast.success(`Analysis complete! Analyzed ${analysis.totalGames} games.`);
       
-      // Navigate to report with completed analysis
+      // Navigate to report with completed analysis stored in sessionStorage
       const serializedAnalysis = {
         playerColor: analysis.playerColor,
         totalGames: analysis.totalGames,
@@ -210,7 +211,8 @@ const Scout = () => {
         strongestLines: analysis.strongestLines
       };
       
-      navigate(`/report/${username}`, { state: serializedAnalysis });
+      sessionStorage.setItem('scoutAnalysis', JSON.stringify(serializedAnalysis));
+      navigate(`/report/${username}`);
     } catch (error: any) {
       console.error("Scout error:", error);
       toast.dismiss();
@@ -435,8 +437,8 @@ const Scout = () => {
                     {currentAnalysis && currentAnalysis.totalGames > 0 && (
                       <div className="text-xs text-muted-foreground space-y-1">
                         <div>✓ {currentAnalysis.totalGames} games analyzed</div>
-                        {currentAnalysis.openingTree.children.size > 0 && (
-                          <div>✓ {currentAnalysis.openingTree.children.size} opening moves found</div>
+                        {currentAnalysis.openingTree.children && (
+                          <div>✓ Opening tree being built...</div>
                         )}
                       </div>
                     )}
