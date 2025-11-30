@@ -17,20 +17,27 @@ const Report = () => {
     const stateData = location.state as any;
     
     if (stateData) {
+      console.log('[REPORT] Initial state:', stateData);
       setIsLive(stateData.isLive || false);
       setAnalysis(stateData);
       
       // Listen for live updates if this is a live analysis
       if (stateData.isLive && stateData.analysisId) {
+        console.log('[REPORT] Setting up listeners for:', stateData.analysisId);
+        
         const handleUpdate = (event: Event) => {
           const customEvent = event as CustomEvent;
+          console.log('[REPORT] Received update:', customEvent.detail);
           if (customEvent.detail.analysisId === stateData.analysisId) {
-            setAnalysis(customEvent.detail.analysis);
+            const updatedAnalysis = customEvent.detail.analysis;
+            console.log('[REPORT] Setting analysis:', updatedAnalysis.totalGames, 'games');
+            setAnalysis(updatedAnalysis);
           }
         };
         
         const handleComplete = (event: Event) => {
           const customEvent = event as CustomEvent;
+          console.log('[REPORT] Analysis complete:', customEvent.detail);
           if (customEvent.detail.analysisId === stateData.analysisId) {
             setIsLive(false);
             setAnalysis(customEvent.detail.analysis);
@@ -41,6 +48,7 @@ const Report = () => {
         window.addEventListener('analysisComplete', handleComplete);
         
         return () => {
+          console.log('[REPORT] Cleaning up listeners');
           window.removeEventListener('analysisUpdate', handleUpdate);
           window.removeEventListener('analysisComplete', handleComplete);
         };
