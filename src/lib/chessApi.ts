@@ -414,7 +414,7 @@ export async function fetchChessComGames(
           continue;
         }
 
-        const batchGames: GameData[] = [];
+        let batchGames: GameData[] = [];
         let gamesBeforeFilter = data.games.length;
         
         for (const game of data.games) {
@@ -466,34 +466,41 @@ export async function fetchChessComGames(
             if (!opponent.toLowerCase().includes(opponentName.toLowerCase())) continue;
           }
           
-          batchGames.push({
+          const gameData: GameData = {
             pgn: game.pgn,
             white: game.white.username,
             black: game.black.username,
             winner: game.white.result === "win" ? "white" : 
                     game.black.result === "win" ? "black" : undefined,
             timeControl: game.time_class,
-          });
+          };
           
+          batchGames.push(gameData);
+          allGames.push(gameData);
           count++;
+          
+          // Update progress every game
+          if (onProgress) {
+            onProgress(count);
+          }
+          
+          // Send first game immediately for instant visualization
+          if (count === 1 && onBatch) {
+            onBatch([gameData]);
+          }
+          // Then send batches every 5 games
+          else if (count % 5 === 0 && onBatch && batchGames.length > 0) {
+            onBatch(batchGames);
+            batchGames = []; // Clear batch after sending
+          }
         }
 
-        console.log(`Archive ${archiveUrl}: ${gamesBeforeFilter} total games, ${batchGames.length} after filters`);
+        console.log(`Archive ${archiveUrl}: ${gamesBeforeFilter} total games, ${allGames.length} processed so far`);
         
-        // Send first game immediately for instant visualization
-        if (count === 1 && batchGames.length > 0 && onBatch) {
-          onBatch(batchGames.slice(0, 1));
-        }
-        
-        allGames.push(...batchGames);
-        
-        // Send batch update every 5 games
-        if (batchGames.length > 0 && onBatch && count % 5 === 0) {
+        // Send any remaining games in the batch after processing this archive
+        if (batchGames.length > 0 && onBatch) {
           onBatch(batchGames);
-        }
-        
-        if (onProgress) {
-          onProgress(count);
+          batchGames = [];
         }
       } catch (error) {
         console.warn(`Error processing archive ${archiveUrl}:`, error);
