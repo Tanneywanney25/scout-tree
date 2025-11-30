@@ -20,90 +20,9 @@ const Report = () => {
   const updateIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    // Get analysis from navigation state or fallback to cache
     if (location.state) {
-      const state = location.state as any;
-      setAnalysis(state as SerializedAnalysisResult);
-      setIsLive(state.isLive || false);
-      setCacheKey(state.cacheKey || null);
-      
-      // If it's a live report, poll for updates
-      if (state.isLive && state.cacheKey) {
-        console.log('Starting live polling with cache key:', state.cacheKey);
-        
-        updateIntervalRef.current = setInterval(() => {
-          try {
-            const progressData = localStorage.getItem(`${state.cacheKey}_progress`);
-            const fullData = localStorage.getItem(state.cacheKey);
-            
-            let latestGameCount = 0;
-            
-            // Get latest game count from progress
-            if (progressData) {
-              const progress = JSON.parse(progressData);
-              latestGameCount = progress.totalGames || 0;
-              
-              // Check if complete
-              if (progress.complete) {
-                console.log('✅ Analysis complete');
-                if (fullData) {
-                  const parsedCache = JSON.parse(fullData);
-                  if (parsedCache.analysis) {
-                    setAnalysis(parsedCache.analysis);
-                  }
-                }
-                setIsLive(false);
-                if (updateIntervalRef.current) {
-                  clearInterval(updateIntervalRef.current);
-                }
-                localStorage.removeItem(`${state.cacheKey}_progress`);
-                return;
-              }
-            }
-            
-            // Load full analysis with opening tree
-            if (fullData) {
-              const parsedCache = JSON.parse(fullData);
-              if (parsedCache.analysis) {
-                // CRITICAL: Always use the LATEST game count from progress, never go backwards
-                setAnalysis(prev => {
-                  const treeData = parsedCache.analysis;
-                  // Keep the higher count to prevent backwards jumps
-                  const finalCount = Math.max(latestGameCount, prev?.totalGames || 0, treeData.totalGames || 0);
-                  
-                  return {
-                    ...treeData,
-                    totalGames: finalCount  // Force latest count
-                  };
-                });
-                
-                console.log(`🌳 Tree updated: ${parsedCache.analysis.totalGames} games (showing ${latestGameCount})`);
-              }
-            } else if (latestGameCount > 0) {
-              // Only progress exists, update count without tree
-              setAnalysis(prev => prev ? { ...prev, totalGames: latestGameCount } : null);
-            }
-          } catch (error) {
-            console.error('Error polling for updates:', error);
-          }
-        }, 150); // Poll every 150ms for smooth updates
-      }
-    } else {
-      // Try to load from cache
-      const cacheKeys = Object.keys(localStorage).filter(key => key.startsWith('scout_'));
-      if (cacheKeys.length > 0) {
-        const latestCache = JSON.parse(localStorage.getItem(cacheKeys[0]) || '{}');
-        if (latestCache.analysis) {
-          setAnalysis(latestCache.analysis);
-        }
-      }
+      setAnalysis(location.state as SerializedAnalysisResult);
     }
-    
-    return () => {
-      if (updateIntervalRef.current) {
-        clearInterval(updateIntervalRef.current);
-      }
-    };
   }, [location.state]);
 
   const handleDownload = () => {
@@ -133,19 +52,6 @@ const Report = () => {
     toast.success("Report downloaded");
   };
 
-  const handleStop = () => {
-    if (cacheKey) {
-      // Set abort flag in localStorage
-      localStorage.setItem(`abort_${cacheKey}`, 'true');
-      toast.info("Stopping analysis...");
-    }
-    
-    // Stop polling
-    setIsLive(false);
-    if (updateIntervalRef.current) {
-      clearInterval(updateIntervalRef.current);
-    }
-  };
 
 
   if (!analysis) {
@@ -209,20 +115,12 @@ const Report = () => {
               </h1>
               <p className="text-muted-foreground">
                 {analysis.totalGames} total games analyzed • Playing as {analysis.playerColor}
-                {isLive && <span className="ml-2 text-primary animate-pulse">• Live updating...</span>}
               </p>
             </div>
-            <div className="flex gap-2">
-              {isLive && (
-                <Button onClick={handleStop} variant="destructive">
-                  Stop Analysis
-                </Button>
-              )}
-              <Button onClick={handleDownload} variant="outline">
-                <Download className="mr-2 w-4 h-4" />
-                Download JSON
-              </Button>
-            </div>
+            <Button onClick={handleDownload} variant="outline">
+              <Download className="mr-2 w-4 h-4" />
+              Download JSON
+            </Button>
           </div>
 
           {/* Main Layout: Board and Lines */}

@@ -382,11 +382,22 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
             onSquareClick={onSquareClick}
             squareStyles={{
               ...possibleMoves.reduce((acc, square) => {
+                const chess = new Chess(currentPosition);
+                const piece = chess.get(square as any);
+                const isCapture = piece && piece.color !== chess.turn();
+                
                 return {
                   ...acc,
-                  [square]: {
-                    background: 'radial-gradient(circle, rgba(0, 120, 0, 0.9) 25%, transparent 25%)',
-                  }
+                  [square]: isCapture 
+                    ? {
+                        // Ring for captures
+                        boxShadow: 'inset 0 0 0 4px rgba(0, 120, 0, 0.9)',
+                        borderRadius: '50%'
+                      }
+                    : {
+                        // Smaller dot for normal moves
+                        background: 'radial-gradient(circle, rgba(0, 120, 0, 0.9) 18%, transparent 18%)',
+                      }
                 };
               }, {})
             }}
