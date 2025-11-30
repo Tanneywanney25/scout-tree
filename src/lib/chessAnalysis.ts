@@ -81,8 +81,8 @@ export async function analyzeGamesIncremental(
     const game = newGames[i];
     const chess = new Chess();
     
-    // Yield to browser every 5 games to prevent freezing
-    if (i > 0 && i % 5 === 0) {
+    // Yield to browser every 2 games to prevent freezing
+    if (i > 0 && i % 2 === 0) {
       await new Promise(resolve => setTimeout(resolve, 0));
     }
     
@@ -120,26 +120,31 @@ export async function analyzeGamesIncremental(
 
     const history = chess.history({ verbose: true });
     let currentNode = rootNode;
-    // NO DEPTH LIMIT - analyze all moves
-    const maxPlies = history.length;
+    // Limit to opening phase (30 plies = 15 full moves) for performance and relevance
+    const maxPlies = Math.min(history.length, 30);
 
-    console.log(`[ANALYSIS] Game ${totalGames} has ${history.length} total moves, analyzing all ${maxPlies} plies`);
+    console.log(`[ANALYSIS] Game ${totalGames} has ${history.length} total moves, analyzing first ${maxPlies} plies`);
 
     // Transposition table to merge positions reached via different move orders
     const fenToNode = new Map<string, OpeningNode>();
     fenToNode.set(chess.fen(), rootNode);
+
+    // Create tracking chess instance that moves forward incrementally (O(n) instead of O(n²))
+    const trackingChess = new Chess();
 
     // Add ALL moves to create a continuous tree structure
     // Statistics are tracked from target player's perspective for the entire game
     for (let i = 0; i < maxPlies; i++) {
       const move = history[i];
       
-      // Use FEN as position key for transposition detection
-      chess.reset();
-      for (let j = 0; j <= i; j++) {
-        chess.move(history[j]);
+      // Make the move on tracking instance (O(1) per move instead of O(n²))
+      try {
+        trackingChess.move(move);
+      } catch (e) {
+        console.warn(`[ANALYSIS] Failed to process move ${i}:`, move.san, e);
+        break; // Skip rest of this game if move fails
       }
-      const positionFen = chess.fen().split(' ').slice(0, 2).join(' '); // Board + turn only
+      const positionFen = trackingChess.fen().split(' ').slice(0, 2).join(' '); // Board + turn only
       
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
       
@@ -261,26 +266,31 @@ export function analyzeGames(
       result = "loss";
     }
 
-    // Build opening tree - NO DEPTH LIMIT, analyze all moves
+    // Build opening tree - limit to opening phase for performance and relevance
     const history = chess.history({ verbose: true });
     let currentNode = rootNode;
-    const maxPlies = history.length;
+    const maxPlies = Math.min(history.length, 30); // 30 plies = 15 full moves
 
     // Transposition table to merge positions reached via different move orders
     const fenToNode = new Map<string, OpeningNode>();
     fenToNode.set(chess.fen(), rootNode);
+
+    // Create tracking chess instance that moves forward incrementally (O(n) instead of O(n²))
+    const trackingChess = new Chess();
 
     // Add ALL moves to create a continuous tree structure
     // Statistics are tracked from target player's perspective for the entire game
     for (let i = 0; i < maxPlies; i++) {
       const move = history[i];
       
-      // Use FEN as position key for transposition detection
-      chess.reset();
-      for (let j = 0; j <= i; j++) {
-        chess.move(history[j]);
+      // Make the move on tracking instance (O(1) per move instead of O(n²))
+      try {
+        trackingChess.move(move);
+      } catch (e) {
+        console.warn(`Failed to process move ${i}:`, move.san, e);
+        break; // Skip rest of this game if move fails
       }
-      const positionFen = chess.fen().split(' ').slice(0, 2).join(' '); // Board + turn only
+      const positionFen = trackingChess.fen().split(' ').slice(0, 2).join(' '); // Board + turn only
       
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
 
