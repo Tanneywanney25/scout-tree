@@ -1,8 +1,20 @@
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Crown } from "lucide-react";
+import { Crown, LogOut } from "lucide-react";
+import { useAuth } from "@/hooks/useAuth";
 
 const Header = () => {
+  const { user, signOut } = useAuth();
+  const navigate = useNavigate();
+
+  const handleAuthClick = () => {
+    if (user) {
+      signOut();
+    } else {
+      navigate("/auth");
+    }
+  };
+
   return (
     <header className="border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-50">
       <div className="container mx-auto px-4 h-16 flex items-center justify-between">
@@ -26,11 +38,25 @@ const Header = () => {
         </nav>
         
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" className="hidden sm:inline-flex">
-            Sign In
-          </Button>
-          <Button size="sm" className="bg-primary hover:bg-primary-dark text-primary-foreground">
-            Get Started
+          {user && (
+            <span className="hidden sm:inline text-sm text-muted-foreground">
+              {user.email}
+            </span>
+          )}
+          <Button
+            variant={user ? "ghost" : "default"}
+            size="sm"
+            onClick={handleAuthClick}
+            className={user ? "" : "bg-primary hover:bg-primary-dark text-primary-foreground"}
+          >
+            {user ? (
+              <>
+                <LogOut className="w-4 h-4 mr-2" />
+                Sign Out
+              </>
+            ) : (
+              "Get Started"
+            )}
           </Button>
         </div>
       </div>
