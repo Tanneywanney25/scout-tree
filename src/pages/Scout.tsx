@@ -87,39 +87,8 @@ const Scout = () => {
         ratingMax: ratingMax ? parseInt(ratingMax) : undefined,
         opponentName: opponentName || undefined
       };
-      
-      // Navigate to report IMMEDIATELY with live flag
-      const analysisId = `${username}_${Date.now()}`;
-      const initialAnalysis = createEmptyAnalysis(color);
-      const initialState = {
-        isLive: true,
-        analysisId,
-        username,
-        playerColor: initialAnalysis.playerColor,
-        totalGames: 0,
-        openingTree: serializeOpeningTree(initialAnalysis.openingTree),
-        weakestLines: [],
-        strongestLines: []
-      };
-      
-      navigate(`/report/${username}`, { state: initialState });
 
       const progressToast = toast.loading("Fetching games...", { duration: Infinity });
-      
-      // Create update callback for live updates (serialize tree before sending)
-      const sendUpdate = (updatedAnalysis: AnalysisResult) => {
-        console.log('[SCOUT] Sending update:', updatedAnalysis.totalGames, 'games');
-        const serialized = {
-          playerColor: updatedAnalysis.playerColor,
-          totalGames: updatedAnalysis.totalGames,
-          openingTree: serializeOpeningTree(updatedAnalysis.openingTree),
-          weakestLines: updatedAnalysis.weakestLines,
-          strongestLines: updatedAnalysis.strongestLines
-        };
-        window.dispatchEvent(new CustomEvent('analysisUpdate', {
-          detail: { analysisId, analysis: serialized }
-        }));
-      };
       
       if (actualPlatform === "lichess") {
         await fetchLichessGames(
@@ -135,7 +104,6 @@ const Scout = () => {
           async (gameBatch) => {
             try {
               analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
-              sendUpdate(analysis);
             } catch (error) {
               console.error('Error processing game batch:', error);
             }
@@ -154,7 +122,6 @@ const Scout = () => {
           async (gameBatch) => {
             try {
               analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
-              sendUpdate(analysis);
             } catch (error) {
               console.error('Error processing game batch:', error);
             }
@@ -170,18 +137,16 @@ const Scout = () => {
 
       toast.success(`Analysis complete! Analyzed ${analysis.totalGames} games.`);
       
-      // Send final update
-      console.log('[SCOUT] Analysis complete, sending final update');
-      const finalSerialized = {
+      // Navigate to report with completed analysis
+      const serializedAnalysis = {
         playerColor: analysis.playerColor,
         totalGames: analysis.totalGames,
         openingTree: serializeOpeningTree(analysis.openingTree),
         weakestLines: analysis.weakestLines,
         strongestLines: analysis.strongestLines
       };
-      window.dispatchEvent(new CustomEvent('analysisComplete', {
-        detail: { analysisId, analysis: finalSerialized }
-      }));
+      
+      navigate(`/report/${username}`, { state: serializedAnalysis });
     } catch (error: any) {
       console.error("Scout error:", error);
       toast.dismiss();

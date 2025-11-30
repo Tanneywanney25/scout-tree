@@ -376,3 +376,24 @@ export function serializeOpeningTree(node: OpeningNode): any {
     })),
   };
 }
+
+export function deserializeOpeningTree(serialized: any): OpeningNode {
+  const children = new Map<string, OpeningNode>();
+  
+  if (serialized.children && Array.isArray(serialized.children)) {
+    for (const child of serialized.children) {
+      children.set(child.key, deserializeOpeningTree(child));
+    }
+  }
+  
+  return {
+    move: serialized.move,
+    san: serialized.san,
+    count: serialized.count,
+    wins: serialized.wins,
+    draws: serialized.draws,
+    losses: serialized.losses,
+    winRate: serialized.winRate,
+    children,
+  };
+}
