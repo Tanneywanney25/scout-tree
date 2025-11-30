@@ -113,14 +113,27 @@ export function analyzeGamesIncremental(
 
     const history = chess.history({ verbose: true });
     let currentNode = rootNode;
-    const maxPlies = Math.min(20, history.length);
+    // NO DEPTH LIMIT - analyze all moves
+    const maxPlies = history.length;
 
-    console.log(`[ANALYSIS] Game ${totalGames} has ${history.length} total moves, analyzing first ${maxPlies} plies`);
+    console.log(`[ANALYSIS] Game ${totalGames} has ${history.length} total moves, analyzing all ${maxPlies} plies`);
+
+    // Transposition table to merge positions reached via different move orders
+    const fenToNode = new Map<string, OpeningNode>();
+    fenToNode.set(chess.fen(), rootNode);
 
     // Add ALL moves to create a continuous tree structure
     // Statistics are tracked from target player's perspective for the entire game
     for (let i = 0; i < maxPlies; i++) {
       const move = history[i];
+      
+      // Use FEN as position key for transposition detection
+      chess.reset();
+      for (let j = 0; j <= i; j++) {
+        chess.move(history[j]);
+      }
+      const positionFen = chess.fen().split(' ').slice(0, 2).join(' '); // Board + turn only
+      
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
       
       // Debug logging (first 3 games)
@@ -128,21 +141,28 @@ export function analyzeGamesIncremental(
         console.log(`  Move ${i}: ${move.san} (${moveKey})`);
       }
 
-      // ALWAYS add the move to the tree (both players' moves)
-      if (!currentNode.children.has(moveKey)) {
-        currentNode.children.set(moveKey, {
-          move: moveKey,
-          san: move.san,
-          count: 0,
-          wins: 0,
-          draws: 0,
-          losses: 0,
-          winRate: 0,
-          children: new Map(),
-        });
+      // Check if we've seen this position before (transposition)
+      let targetNode = fenToNode.get(positionFen);
+      
+      if (!targetNode) {
+        // New position - add move to tree
+        if (!currentNode.children.has(moveKey)) {
+          currentNode.children.set(moveKey, {
+            move: moveKey,
+            san: move.san,
+            count: 0,
+            wins: 0,
+            draws: 0,
+            losses: 0,
+            winRate: 0,
+            children: new Map(),
+          });
+        }
+        targetNode = currentNode.children.get(moveKey)!;
+        fenToNode.set(positionFen, targetNode);
       }
 
-      currentNode = currentNode.children.get(moveKey)!;
+      currentNode = targetNode;
       currentNode.count++;
 
       // Statistics are tracked from target player's perspective
@@ -233,32 +253,51 @@ export function analyzeGames(
       result = "loss";
     }
 
-    // Build opening tree (first 10 moves = 20 plies)
+    // Build opening tree - NO DEPTH LIMIT, analyze all moves
     const history = chess.history({ verbose: true });
     let currentNode = rootNode;
-    const maxPlies = Math.min(20, history.length);
+    const maxPlies = history.length;
+
+    // Transposition table to merge positions reached via different move orders
+    const fenToNode = new Map<string, OpeningNode>();
+    fenToNode.set(chess.fen(), rootNode);
 
     // Add ALL moves to create a continuous tree structure
     // Statistics are tracked from target player's perspective for the entire game
     for (let i = 0; i < maxPlies; i++) {
       const move = history[i];
+      
+      // Use FEN as position key for transposition detection
+      chess.reset();
+      for (let j = 0; j <= i; j++) {
+        chess.move(history[j]);
+      }
+      const positionFen = chess.fen().split(' ').slice(0, 2).join(' '); // Board + turn only
+      
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
 
-      // ALWAYS add the move to the tree (both players' moves)
-      if (!currentNode.children.has(moveKey)) {
-        currentNode.children.set(moveKey, {
-          move: moveKey,
-          san: move.san,
-          count: 0,
-          wins: 0,
-          draws: 0,
-          losses: 0,
-          winRate: 0,
-          children: new Map(),
-        });
+      // Check if we've seen this position before (transposition)
+      let targetNode = fenToNode.get(positionFen);
+      
+      if (!targetNode) {
+        // New position - add move to tree
+        if (!currentNode.children.has(moveKey)) {
+          currentNode.children.set(moveKey, {
+            move: moveKey,
+            san: move.san,
+            count: 0,
+            wins: 0,
+            draws: 0,
+            losses: 0,
+            winRate: 0,
+            children: new Map(),
+          });
+        }
+        targetNode = currentNode.children.get(moveKey)!;
+        fenToNode.set(positionFen, targetNode);
       }
 
-      currentNode = currentNode.children.get(moveKey)!;
+      currentNode = targetNode;
       currentNode.count++;
 
       // Statistics are tracked from target player's perspective

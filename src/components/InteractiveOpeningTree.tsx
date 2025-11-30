@@ -369,6 +369,10 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               max-width: 100% !important;
               max-height: 100% !important;
             }
+            /* Fix black queen appearing white */
+            [data-piece="bQ"] img {
+              filter: none !important;
+            }
           `}</style>
           <Chessboard 
             position={currentPosition}
@@ -378,17 +382,10 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
             onSquareClick={onSquareClick}
             squareStyles={{
               ...possibleMoves.reduce((acc, square) => {
-                // Check if square is occupied (capture move)
-                const chess = new Chess(currentPosition);
-                const piece = chess.get(square as any);
-                const isCapture = piece !== null;
-                
                 return {
                   ...acc,
                   [square]: {
-                    background: isCapture 
-                      ? 'radial-gradient(circle, transparent 65%, rgba(0, 120, 0, 0.8) 65%, rgba(0, 120, 0, 0.8) 85%, transparent 85%)'
-                      : 'radial-gradient(circle, rgba(0, 120, 0, 0.9) 25%, transparent 25%)',
+                    background: 'radial-gradient(circle, rgba(0, 120, 0, 0.9) 25%, transparent 25%)',
                   }
                 };
               }, {})
