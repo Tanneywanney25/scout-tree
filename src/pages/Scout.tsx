@@ -161,8 +161,10 @@ const Scout = () => {
           async (gameBatch) => {
             try {
               analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
+              setCurrentAnalysis(analysis);
             } catch (error) {
               console.error('Error processing game batch:', error);
+              toast.error("Error processing game batch");
             }
           },
           abortControllerRef.current?.signal
@@ -179,8 +181,10 @@ const Scout = () => {
           async (gameBatch) => {
             try {
               analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
+              setCurrentAnalysis(analysis);
             } catch (error) {
               console.error('Error processing game batch:', error);
+              toast.error("Error processing game batch");
             }
           }
         );
@@ -281,7 +285,8 @@ const Scout = () => {
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Your Color</Label>
+                  <Label>Your Color (playing against opponent)</Label>
+                  <p className="text-xs text-muted-foreground">Select the color you'll play. We'll analyze games where your opponent played the opposite color.</p>
                   <RadioGroup value={color} onValueChange={(v) => setColor(v as "white" | "black")}>
                     <div className="flex items-center space-x-4">
                       <div className="flex items-center space-x-2">

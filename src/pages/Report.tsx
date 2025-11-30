@@ -55,8 +55,12 @@ const Report = () => {
       <div className="min-h-screen flex flex-col bg-background">
         <Header />
         <main className="flex-1 py-8">
-          <div className="container mx-auto px-4 text-center">
-            <p className="text-muted-foreground">Loading analysis...</p>
+          <div className="container mx-auto px-4 text-center space-y-4">
+            <p className="text-muted-foreground">No analysis data available.</p>
+            <p className="text-sm text-muted-foreground">The report may have expired or the link is invalid.</p>
+            <Button onClick={() => window.location.href = '/scout'}>
+              Return to Scout
+            </Button>
           </div>
         </main>
       </div>
