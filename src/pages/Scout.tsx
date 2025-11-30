@@ -148,7 +148,8 @@ const Scout = () => {
         dateTo,
         ratingMin: ratingMin ? parseInt(ratingMin) : undefined,
         ratingMax: ratingMax ? parseInt(ratingMax) : undefined,
-        opponentName: opponentName || undefined
+        opponentName: opponentName || undefined,
+        playerColor: color
       };
 
       const progressToast = toast.loading("Fetching games...", { duration: Infinity });
