@@ -182,17 +182,13 @@ export async function fetchLichessGames(
             // Apply client-side filters
             let shouldInclude = true;
             
-            // Color filter - user selects their color, so we want opponent's games with opposite color
+            // Color filter - only include games where scouted player played the selected color
             if (playerColor) {
-              // Check what color the target opponent played in this game
-              const opponentPlayedWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
-              const opponentColor = opponentPlayedWhite ? "white" : "black";
+              const scoutedPlayerPlayedWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
+              const scoutedPlayerColor = scoutedPlayerPlayedWhite ? "white" : "black";
               
-              // User plays playerColor, so we need opponent's games where they played the OPPOSITE color
-              // e.g., if user plays white, analyze opponent's BLACK games
-              const neededOpponentColor = playerColor === "white" ? "black" : "white";
-              
-              if (opponentColor !== neededOpponentColor) {
+              // Only show games where scouted player played the selected color
+              if (scoutedPlayerColor !== playerColor) {
                 shouldInclude = false;
               }
             }
@@ -401,17 +397,13 @@ export async function fetchChessComGames(
           if (dateFrom && game.end_time < dateFrom.getTime() / 1000) continue;
           if (dateTo && game.end_time > dateTo.getTime() / 1000) continue;
           
-          // Color filter - user selects their color, so we want opponent's games with opposite color
+          // Color filter - only include games where scouted player played the selected color
           if (playerColor) {
-            // Check what color the target opponent played in this game
-            const opponentPlayedWhite = game.white.username.toLowerCase() === normalizedUsername;
-            const opponentColor = opponentPlayedWhite ? "white" : "black";
+            const scoutedPlayerPlayedWhite = game.white.username.toLowerCase() === normalizedUsername;
+            const scoutedPlayerColor = scoutedPlayerPlayedWhite ? "white" : "black";
             
-            // User plays playerColor, so we need opponent's games where they played the OPPOSITE color
-            // e.g., if user plays white, analyze opponent's BLACK games
-            const neededOpponentColor = playerColor === "white" ? "black" : "white";
-            
-            if (opponentColor !== neededOpponentColor) {
+            // Only show games where scouted player played the selected color
+            if (scoutedPlayerColor !== playerColor) {
               continue;
             }
           }
