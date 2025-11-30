@@ -524,7 +524,7 @@ const Scout = () => {
             </CardContent>
           </Card>
 
-          {currentAnalysis && currentAnalysis.totalGames >= 10 && (
+          {currentAnalysis && currentAnalysis.totalGames >= 1 && (
             <Card className="mt-8">
               <CardHeader>
                 <CardTitle>Opening Tree Preview</CardTitle>

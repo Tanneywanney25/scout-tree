@@ -65,9 +65,9 @@ export async function fetchLichessGames(
         );
         allGames.push(...tcGames);
         
-        // Add delay between time controls to respect rate limits
-        if (timeControls.indexOf(tc) < timeControls.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 1000)); // Increased to 1 second
+        // Add delay between time controls only if games were found (to respect rate limits)
+        if (timeControls.indexOf(tc) < timeControls.length - 1 && tcGames.length > 0) {
+          await new Promise(resolve => setTimeout(resolve, 300)); // Reduced to 300ms for speed
         }
       } catch (error: any) {
         // If aborted, propagate the error
@@ -353,9 +353,9 @@ export async function fetchChessComGames(
         console.log(`Reached maximum of ${MAX_GAMES} games, stopping fetch`);
         break;
       }
-      // Rate limiting: wait 500ms between archive requests
-      if (count > 0) {
-        await new Promise(resolve => setTimeout(resolve, 500));
+      // Rate limiting: wait between archive requests only if we have fetched games
+      if (count > 0 && allGames.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, 300)); // Reduced to 300ms
       }
 
       try {
