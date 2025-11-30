@@ -33,7 +33,12 @@ const Scout = () => {
   const [platform, setPlatform] = useState("lichess");
   const [color, setColor] = useState<"white" | "black">("white");
   const [variant, setVariant] = useState("standard");
-  const [timeControls, setTimeControls] = useState<string[]>(["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"]);
+  
+  // Platform-specific time controls
+  const lichessTimeControls = ["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"];
+  const chesscomTimeControls = ["bullet", "blitz", "rapid", "daily"];
+  
+  const [timeControls, setTimeControls] = useState<string[]>(lichessTimeControls);
   const [mode, setMode] = useState<"all" | "rated" | "casual">("all");
   const [dateFrom, setDateFrom] = useState<Date | undefined>(undefined);
   const [dateTo, setDateTo] = useState<Date | undefined>(new Date());
@@ -48,6 +53,9 @@ const Scout = () => {
   const [isAnalysisComplete, setIsAnalysisComplete] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  
+  // Get available time controls based on platform
+  const availableTimeControls = platform === "chesscom" ? chesscomTimeControls : lichessTimeControls;
 
   const toggleTimeControl = (tc: string) => {
     setTimeControls(prev => 
@@ -56,6 +64,12 @@ const Scout = () => {
         : [...prev, tc]
     );
   };
+
+  // Reset time controls when platform changes
+  useEffect(() => {
+    const controls = platform === "chesscom" ? chesscomTimeControls : lichessTimeControls;
+    setTimeControls(controls);
+  }, [platform]);
 
   // Cleanup: abort any running analysis when component unmounts
   useEffect(() => {
@@ -264,7 +278,7 @@ const Scout = () => {
     setWarning(null);
     setUsername("");
     setColor("white");
-    setTimeControls(["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"]);
+    setTimeControls(platform === "chesscom" ? chesscomTimeControls : lichessTimeControls);
     setVariant("standard");
     setMode("all");
     setDateFrom(undefined);
@@ -370,7 +384,7 @@ const Scout = () => {
                     <div className="space-y-2">
                       <Label>Time Controls</Label>
                       <div className="grid grid-cols-2 gap-3">
-                        {["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"].map(tc => (
+                        {availableTimeControls.map(tc => (
                           <div key={tc} className="flex items-center space-x-2">
                             <Checkbox 
                               id={tc}
@@ -378,7 +392,7 @@ const Scout = () => {
                               onCheckedChange={() => toggleTimeControl(tc)}
                             />
                             <Label htmlFor={tc} className="font-normal cursor-pointer capitalize">
-                              {tc}
+                              {tc === "daily" ? "Daily" : tc}
                             </Label>
                           </div>
                         ))}

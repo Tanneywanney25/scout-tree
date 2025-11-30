@@ -21,6 +21,20 @@ export interface FetchOptions {
   playerColor?: "white" | "black"; // Color the user will play (opponent plays opposite)
 }
 
+// Map time control names to Chess.com time_class values
+function mapToChessComTimeClass(timeControl: string): string {
+  const mapping: Record<string, string> = {
+    'ultrabullet': 'bullet',
+    'bullet': 'bullet',
+    'blitz': 'blitz',
+    'rapid': 'rapid',
+    'classical': 'daily',
+    'correspondence': 'daily',
+    'daily': 'daily'
+  };
+  return mapping[timeControl] || timeControl;
+}
+
 export async function fetchLichessGames(
   username: string,
   options: FetchOptions = {},
@@ -332,7 +346,7 @@ export async function fetchChessComGames(
       throw new Error(`No game archives found for Chess.com user "${username}"`);
     }
     
-    // Filter archives by date range
+    // Filter archives by date range - be inclusive of boundary months
     let filteredArchives = archives;
     if (dateFrom || dateTo) {
       filteredArchives = archives.filter((archiveUrl: string) => {
@@ -340,18 +354,30 @@ export async function fetchChessComGames(
         if (!match) return true;
         
         const [, year, month] = match;
-        const archiveDate = new Date(parseInt(year), parseInt(month) - 1);
+        // Create date at start and end of archive month for proper comparison
+        const archiveMonthStart = new Date(parseInt(year), parseInt(month) - 1, 1);
+        const archiveMonthEnd = new Date(parseInt(year), parseInt(month), 0); // Last day of month
         
-        if (dateFrom && archiveDate < new Date(dateFrom.getFullYear(), dateFrom.getMonth())) {
+        // Include archive if it overlaps with the date range
+        if (dateFrom && archiveMonthEnd < dateFrom) {
           return false;
         }
-        if (dateTo && archiveDate > new Date(dateTo.getFullYear(), dateTo.getMonth() + 1)) {
+        if (dateTo && archiveMonthStart > dateTo) {
           return false;
         }
         
         return true;
       });
     }
+
+    console.log(`Fetching Chess.com archives for ${username}:`, filteredArchives.length, 'archives to process');
+    console.log('Applied filters:', { 
+      timeControls, 
+      mode, 
+      dateFrom: dateFrom?.toISOString(), 
+      dateTo: dateTo?.toISOString(), 
+      playerColor 
+    });
     
     // Process ALL archives (reversed to get newest first)
     const recentArchives = filteredArchives.reverse();
@@ -383,9 +409,15 @@ export async function fetchChessComGames(
         }
 
         const data = await response.json();
-        const batchGames: GameData[] = [];
         
-        for (const game of data.games || []) {
+        if (!data.games || !Array.isArray(data.games)) {
+          continue;
+        }
+
+        const batchGames: GameData[] = [];
+        let gamesBeforeFilter = data.games.length;
+        
+        for (const game of data.games) {
           // Apply filters
           if (mode === "rated" && !game.rated) continue;
           if (mode === "casual" && game.rated) continue;
@@ -396,9 +428,10 @@ export async function fetchChessComGames(
             if (gameRules !== variant) continue;
           }
           
-          // Time control filter
+          // Time control filter with mapping to Chess.com time_class
           if (timeControls.length > 0 && !timeControls.includes("all")) {
-            if (!timeControls.includes(game.time_class)) continue;
+            const mappedControls = timeControls.map(mapToChessComTimeClass);
+            if (!game.time_class || !mappedControls.includes(game.time_class)) continue;
           }
           
           // Date range filter (end_time is in seconds)
@@ -444,6 +477,8 @@ export async function fetchChessComGames(
           
           count++;
         }
+
+        console.log(`Archive ${archiveUrl}: ${gamesBeforeFilter} total games, ${batchGames.length} after filters`);
         
         // Send first game immediately for instant visualization
         if (count === 1 && batchGames.length > 0 && onBatch) {
