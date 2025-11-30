@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Check } from "lucide-react";
+import { Link } from "react-router-dom";
 
 const PricingSection = () => {
   const plans = [
@@ -8,15 +9,15 @@ const PricingSection = () => {
       name: "Free",
       price: "$0",
       period: "forever",
-      description: "Perfect for casual players",
+      description: "Perfect for trying it out",
       features: [
-        "3 scout reports per month",
+        "1 free scout report",
         "Basic opening analysis",
         "60-second summaries",
         "Pregame checklists",
         "Community support"
       ],
-      cta: "Start Free",
+      cta: "Try Free",
       highlighted: false
     },
     {
@@ -100,8 +101,11 @@ const PricingSection = () => {
                 <Button 
                   className="w-full" 
                   variant={plan.highlighted ? "default" : "outline"}
+                  asChild
                 >
-                  {plan.cta}
+                  <Link to={plan.name === "Team" ? "/auth" : "/auth"}>
+                    {plan.cta}
+                  </Link>
                 </Button>
               </CardFooter>
             </Card>

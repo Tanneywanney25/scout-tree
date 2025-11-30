@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import Header from "@/components/Header";
 import { Button } from "@/components/ui/button";
@@ -19,9 +19,14 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { format } from "date-fns";
 import { CalendarIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
+import { getBrowserFingerprint } from "@/lib/fingerprint";
+import { AlertDialog, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 
 const Scout = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [username, setUsername] = useState("");
   const [platform, setPlatform] = useState("lichess");
   const [color, setColor] = useState<"white" | "black">("white");
@@ -38,6 +43,7 @@ const Scout = () => {
   const [progress, setProgress] = useState<number | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [currentAnalysis, setCurrentAnalysis] = useState<AnalysisResult | null>(null);
+  const [showAuthDialog, setShowAuthDialog] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const toggleTimeControl = (tc: string) => {
@@ -46,6 +52,50 @@ const Scout = () => {
         ? prev.filter(t => t !== tc)
         : [...prev, tc]
     );
+  };
+
+  const checkUsageLimit = async (): Promise<boolean> => {
+    // If user is logged in, allow unlimited scouts
+    if (user) {
+      return true;
+    }
+
+    // Check anonymous usage
+    const fingerprint = getBrowserFingerprint();
+    const { data, error } = await supabase
+      .from('anonymous_scout_usage')
+      .select('*')
+      .eq('fingerprint', fingerprint)
+      .maybeSingle();
+
+    if (error) {
+      console.error('Error checking usage:', error);
+      return true; // Allow on error
+    }
+
+    // If fingerprint exists, they've used their free scout
+    if (data) {
+      return false;
+    }
+
+    return true;
+  };
+
+  const recordUsage = async () => {
+    if (user) {
+      // Record for logged-in user
+      await supabase.from('scout_usage').insert({
+        user_id: user.id,
+        username,
+        platform
+      });
+    } else {
+      // Record anonymous usage
+      const fingerprint = getBrowserFingerprint();
+      await supabase.from('anonymous_scout_usage').insert({
+        fingerprint
+      });
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -58,6 +108,13 @@ const Scout = () => {
 
     if (loading) {
       toast.error("Analysis already in progress. Please wait.");
+      return;
+    }
+
+    // Check usage limit
+    const canProceed = await checkUsageLimit();
+    if (!canProceed) {
+      setShowAuthDialog(true);
       return;
     }
 
@@ -134,6 +191,9 @@ const Scout = () => {
         toast.error("No games found for this user");
         return;
       }
+
+      // Record usage
+      await recordUsage();
 
       toast.success(`Analysis complete! Analyzed ${analysis.totalGames} games.`);
       
@@ -413,6 +473,25 @@ const Scout = () => {
           </Card>
         </div>
       </main>
+
+      <AlertDialog open={showAuthDialog} onOpenChange={setShowAuthDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Free Scout Used</AlertDialogTitle>
+            <AlertDialogDescription>
+              You've already used your 1 free scout report. Sign up to get unlimited opponent scouting and unlock all features!
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <Button variant="outline" onClick={() => setShowAuthDialog(false)}>
+              Cancel
+            </Button>
+            <Button onClick={() => navigate('/auth')}>
+              Sign Up Now
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 };

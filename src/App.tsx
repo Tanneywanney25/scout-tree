@@ -7,6 +7,7 @@ import Landing from "./pages/Landing";
 import Scout from "./pages/Scout";
 import Report from "./pages/Report";
 import OpeningTree from "./pages/OpeningTree";
+import Auth from "./pages/Auth";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -24,6 +25,7 @@ const App = () => (
           <Route path="/demo" element={<Report />} />
           <Route path="/pricing" element={<Landing />} />
           <Route path="/opening-tree" element={<OpeningTree />} />
+          <Route path="/auth" element={<Auth />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
