@@ -501,9 +501,9 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   }, [node, selectedPath]);
 
   return (
-    <div className="flex gap-8 items-start justify-center h-[calc(100vh-12rem)] max-w-7xl mx-auto px-4">
+    <div className="flex flex-col lg:flex-row gap-4 lg:gap-8 items-center lg:items-start justify-center min-h-[calc(100vh-12rem)] max-w-7xl mx-auto px-2 sm:px-4 pb-4">
       {/* Main board area */}
-      <div className="flex flex-col items-center gap-4">
+      <div className="flex flex-col items-center gap-3 sm:gap-4 w-full lg:w-auto">
         {/* Controls above board */}
         <div className="flex gap-2">
           <Button
@@ -528,7 +528,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         </div>
 
         {/* Chess Board */}
-        <div className="relative aspect-square w-full max-w-[600px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
+        <div className="relative aspect-square w-full max-w-[280px] sm:max-w-[400px] md:max-w-[500px] lg:max-w-[600px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
           <style>{`
             /* Fix dragged piece size and make dragging smoother */
             .piece-417db {
@@ -797,15 +797,15 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         </div>
         
         {/* Opening name below board */}
-        <div className="text-sm text-muted-foreground text-center max-w-[600px]">
+        <div className="text-xs sm:text-sm text-muted-foreground text-center max-w-[280px] sm:max-w-[400px] md:max-w-[500px] lg:max-w-[600px]">
           {currentOpening}
         </div>
       </div>
 
       {/* Move list on the side */}
-      <div className="w-48 bg-card border border-border rounded-lg p-4 max-h-[600px] overflow-y-auto">
-        <h3 className="text-sm font-semibold mb-3 border-b border-border pb-2">Moves</h3>
-        <div className="space-y-1 text-sm">
+      <div className="w-full lg:w-48 bg-card border border-border rounded-lg p-3 sm:p-4 max-h-[200px] lg:max-h-[600px] overflow-y-auto">
+        <h3 className="text-xs sm:text-sm font-semibold mb-2 sm:mb-3 border-b border-border pb-2">Moves</h3>
+        <div className="space-y-1 text-xs sm:text-sm">
           {selectedPath.length === 0 ? (
             <div className="text-muted-foreground">No moves yet</div>
           ) : (
