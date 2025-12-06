@@ -574,7 +574,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               }
             }}
           >
-            <Chessboard 
+          <Chessboard 
               position={currentPosition}
               orientation={boardOrientation}
               draggable={true}
@@ -582,6 +582,13 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               onSquareClick={onSquareClick}
               onSquareRightClick={handleSquareRightClick}
               squareStyles={squareStyles}
+              calcWidth={({ screenWidth }) => {
+                // Calculate board width based on screen size for responsive sizing
+                if (screenWidth < 640) return Math.min(280, screenWidth - 32);
+                if (screenWidth < 768) return Math.min(400, screenWidth - 32);
+                if (screenWidth < 1024) return Math.min(500, screenWidth - 32);
+                return Math.min(600, screenWidth - 400);
+              }}
               boardStyle={{
                 borderRadius: '0.5rem',
               }}
