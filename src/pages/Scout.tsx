@@ -51,6 +51,7 @@ const Scout = () => {
   const [warning, setWarning] = useState<string | null>(null);
   const [currentAnalysis, setCurrentAnalysis] = useState<AnalysisResult | null>(null);
   const [isAnalysisComplete, setIsAnalysisComplete] = useState(false);
+  const [finalGameCount, setFinalGameCount] = useState<number>(0);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   
@@ -230,17 +231,19 @@ const Scout = () => {
       // Record usage
       await recordUsage();
 
-      // Mark analysis as complete
+      // Mark analysis as complete and store accurate game count
+      setFinalGameCount(progress || analysis.totalGames);
       setIsAnalysisComplete(true);
-      toast.success(`Analysis complete! Analyzed ${analysis.totalGames} games.`);
+      toast.success(`Analysis complete! Analyzed ${progress || analysis.totalGames} games.`);
     } catch (error: any) {
       console.error("Scout error:", error);
       toast.dismiss();
       
       if (error.name === 'AbortError') {
         if (currentAnalysis && currentAnalysis.totalGames > 0) {
+          setFinalGameCount(progress || currentAnalysis.totalGames);
           setIsAnalysisComplete(true);
-          toast.success(`Analysis stopped. ${currentAnalysis.totalGames} games analyzed.`);
+          toast.success(`Analysis stopped. ${progress || currentAnalysis.totalGames} games analyzed.`);
         } else {
           toast.info("Analysis cancelled");
         }
@@ -273,6 +276,7 @@ const Scout = () => {
     // Reset all state
     setCurrentAnalysis(null);
     setIsAnalysisComplete(false);
+    setFinalGameCount(0);
     setLoading(false);
     setProgress(null);
     setWarning(null);
@@ -505,8 +509,8 @@ const Scout = () => {
                     <Progress value={100} className="h-2" />
                     
                     {currentAnalysis && currentAnalysis.totalGames > 0 && (
-                      <div className="text-xs text-muted-foreground space-y-1">
-                        <div>✓ {currentAnalysis.totalGames} games analyzed</div>
+                <div className="text-xs text-muted-foreground space-y-1">
+                        <div>✓ {progress} games analyzed</div>
                         {currentAnalysis.openingTree.children && (
                           <div>✓ Opening tree being built...</div>
                         )}
@@ -551,7 +555,7 @@ const Scout = () => {
                   </Button>
                 )}
 
-                {isAnalysisComplete && currentAnalysis && currentAnalysis.totalGames > 0 && (
+                {isAnalysisComplete && currentAnalysis && finalGameCount > 0 && (
                   <div className="space-y-3">
                     <Button 
                       type="button"
@@ -559,7 +563,7 @@ const Scout = () => {
                       className="w-full bg-primary hover:bg-primary-dark text-primary-foreground"
                     >
                       <ArrowRight className="mr-2 w-4 h-4" />
-                      View Full Report ({currentAnalysis.totalGames} games)
+                      View Full Report ({finalGameCount} games)
                     </Button>
                     
                     <Button 
@@ -576,14 +580,14 @@ const Scout = () => {
             </CardContent>
           </Card>
 
-          {currentAnalysis && currentAnalysis.totalGames >= 1 && (
+          {currentAnalysis && (progress || 0) >= 1 && (
             <Card className="mt-8">
               <CardHeader>
                 <CardTitle>Opening Tree Preview</CardTitle>
                 <CardDescription>
                   {isAnalysisComplete 
-                    ? `Analysis complete - ${currentAnalysis.totalGames} games` 
-                    : `Live preview - updating as more games are analyzed (${currentAnalysis.totalGames} games so far)`
+                    ? `Analysis complete - ${finalGameCount} games` 
+                    : `Live preview - updating as more games are analyzed (${progress} games so far)`
                   }
                 </CardDescription>
               </CardHeader>
