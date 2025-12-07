@@ -7,6 +7,7 @@ export interface GameData {
   winner?: string;
   opening?: string;
   timeControl?: string;
+  gameId?: string; // Native game ID from platform API
 }
 
 export interface FetchOptions {
@@ -60,18 +61,26 @@ export async function fetchLichessGames(
     const seenGameIds = new Set<string>(); // Track unique games to prevent duplicates
     let cumulativeCount = 0; // Track total games across all time controls
     
-    // Helper function to extract Lichess game ID from PGN
+    // Helper function to extract Lichess game ID - prioritize native API ID
     const extractGameId = (game: GameData): string => {
-      // Try to extract game ID from [Site "https://lichess.org/GAMEID"]
+      // Use native game ID from API if available (most reliable)
+      if (game.gameId) {
+        return `lichess_${game.gameId}`;
+      }
+      // Fallback: extract from [Site "https://lichess.org/GAMEID"]
       const siteMatch = game.pgn?.match(/\[Site "https:\/\/lichess\.org\/([^"]+)"\]/);
       if (siteMatch?.[1]) {
         return `lichess_${siteMatch[1]}`;
       }
-      // Fallback: use more unique key
-      return `${game.white}-${game.black}-${game.timeControl}-${game.pgn?.substring(0, 200)}`;
+      // Last resort: use full PGN length + last 100 chars for uniqueness (avoids false positives)
+      const pgnLen = game.pgn?.length || 0;
+      const pgnEnd = game.pgn?.slice(-100) || '';
+      return `${game.white}-${game.black}-${game.timeControl}-${pgnLen}-${pgnEnd}`;
     };
     
     console.log(`[FETCH-MULTI] Starting multi-TC fetch for ${username}, TCs: ${timeControls.join(', ')}`);
+    console.log(`[FETCH-MULTI] Filters: mode=${mode}, dateFrom=${dateFrom?.toISOString()}, dateTo=${dateTo?.toISOString()}`);
+    console.log(`[FETCH-MULTI] Rating filter: ${ratingMin ?? 'any'}-${ratingMax ?? 'any'}, color=${playerColor ?? 'any'}`);
     
     // SEQUENTIAL fetching - await each request before starting the next
     for (const tc of timeControls) {
@@ -298,6 +307,7 @@ export async function fetchLichessGames(
               winner: game.winner,
               opening: game.opening?.name,
               timeControl: game.speed,
+              gameId: game.id, // Native Lichess game ID from API
             };
             
             games.push(gameData);
@@ -446,14 +456,10 @@ export async function fetchChessComGames(
       if (dateTo) console.log(`  dateTo: ${dateTo.toISOString()}`);
     }
 
-    console.log(`Fetching Chess.com archives for ${username}:`, filteredArchives.length, 'archives to process');
-    console.log('Applied filters:', { 
-      timeControls, 
-      mode, 
-      dateFrom: dateFrom?.toISOString(), 
-      dateTo: dateTo?.toISOString(), 
-      playerColor 
-    });
+    console.log(`[CHESS.COM] Fetching archives for ${username}: ${filteredArchives.length} archives to process`);
+    console.log(`[CHESS.COM] Filters: TCs=${timeControls.join(',')}, mode=${mode}, color=${playerColor ?? 'any'}`);
+    console.log(`[CHESS.COM] Date range: ${dateFrom?.toISOString() ?? 'any'} to ${dateTo?.toISOString() ?? 'any'}`);
+    console.log(`[CHESS.COM] Rating filter: ${ratingMin ?? 'any'}-${ratingMax ?? 'any'}`);
     
     // Process ALL archives (reversed to get newest first)
     const recentArchives = filteredArchives.reverse();
@@ -561,6 +567,9 @@ export async function fetchChessComGames(
             if (!opponent.toLowerCase().includes(opponentName.toLowerCase())) continue;
           }
           
+          // Extract Chess.com game ID from URL (format: https://www.chess.com/game/live/123456789)
+          const chessComGameId = game.url?.split('/').pop() || game.uuid;
+          
           const gameData: GameData = {
             pgn: game.pgn,
             white: game.white.username,
@@ -568,6 +577,7 @@ export async function fetchChessComGames(
             winner: game.white.result === "win" ? "white" : 
                     game.black.result === "win" ? "black" : undefined,
             timeControl: game.time_class,
+            gameId: chessComGameId, // Native Chess.com game ID
           };
           
           batchGames.push(gameData);
@@ -591,7 +601,7 @@ export async function fetchChessComGames(
           }
         }
 
-        console.log(`Archive ${archiveUrl}: ${gamesBeforeFilter} total games, ${allGames.length} processed so far`);
+        console.log(`[CHESS.COM] Archive ${archiveUrl.split('/').slice(-2).join('/')}: ${gamesBeforeFilter} raw games, ${allGames.length} passed filters`);
         
         // Send any remaining games in the batch after processing this archive
         if (batchGames.length > 0 && onBatch) {
@@ -604,6 +614,8 @@ export async function fetchChessComGames(
       }
     }
 
+    console.log(`[CHESS.COM] FINAL: Total games fetched and passed all filters: ${allGames.length}`);
+    
     if (allGames.length === 0) {
       throw new Error(`No games found for Chess.com user "${username}" with the selected filters`);
     }
