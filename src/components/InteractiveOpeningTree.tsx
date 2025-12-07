@@ -648,30 +648,33 @@ export const InteractiveOpeningTree = ({
         {/* Chess Board */}
         <div className="relative aspect-square w-full max-w-[340px] sm:max-w-[480px] md:max-w-[560px] lg:max-w-[640px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
           <style>{`
-            /* Fix dragged piece size and prevent hover scaling */
-            .piece-417db {
+            /* Fix dragged piece size and prevent ALL hover/drag scaling */
+            .piece-417db,
+            .piece-417db:hover,
+            .piece-417db:active,
+            .piece-417db:focus {
               width: 100% !important;
               height: 100% !important;
-              will-change: transform;
-              cursor: grab;
-              transform: none !important;
-              transition: none !important;
-            }
-            .piece-417db:hover {
-              transform: none !important;
-            }
-            .piece-417db:active {
-              cursor: grabbing;
-              transform: none !important;
-            }
-            img[data-piece] {
               max-width: 100% !important;
               max-height: 100% !important;
               transform: none !important;
               transition: none !important;
+              scale: 1 !important;
+              cursor: grab;
             }
-            img[data-piece]:hover {
+            .piece-417db:active {
+              cursor: grabbing;
+            }
+            img[data-piece],
+            img[data-piece]:hover,
+            img[data-piece]:active {
+              max-width: 100% !important;
+              max-height: 100% !important;
+              width: 100% !important;
+              height: 100% !important;
               transform: none !important;
+              transition: none !important;
+              scale: 1 !important;
             }
             /* Fix black queen appearing white */
             [data-piece="bQ"] img {
@@ -680,23 +683,22 @@ export const InteractiveOpeningTree = ({
             
             /* ============================================= */
             /* Remove hover highlighting on squares */
-            /* Use specific selectors to not affect base board colors */
             /* ============================================= */
-            .square-55d63:hover {
-              box-shadow: none !important;
-            }
+            .square-55d63:hover,
             div[data-squareid]:hover {
               box-shadow: none !important;
+              background: inherit !important;
             }
             
             /* ============================================= */
-            /* Remove yellow drag highlighting */
-            /* Only target drag-specific classes, not base squares */
+            /* Remove ALL drag/drop highlighting - no color change */
             /* ============================================= */
             .square-55d63.dragging,
             .square-55d63.drag-over,
             div[data-squareid].dragging,
-            div[data-squareid].drag-over {
+            div[data-squareid].drag-over,
+            [class*="drop"],
+            [class*="drag"] {
               box-shadow: none !important;
               border: none !important;
               outline: none !important;
@@ -708,7 +710,7 @@ export const InteractiveOpeningTree = ({
               display: none !important;
             }
             
-            /* Disable transitions on squares to prevent flash effects */
+            /* Disable transitions on squares */
             div[data-squareid],
             .square-55d63 {
               transition: none !important;
@@ -743,7 +745,7 @@ export const InteractiveOpeningTree = ({
               position={currentPosition}
               orientation={boardOrientation}
               draggable={true}
-              dropSquareStyle={{ backgroundColor: 'transparent' }}
+              dropSquareStyle={{}} // Empty object = no override, keeps original square color
               onDrop={onDrop}
               onSquareClick={onSquareClick}
               onSquareRightClick={handleSquareRightClick}
@@ -816,7 +818,7 @@ export const InteractiveOpeningTree = ({
               const dx = x2 - x1;
               const dy = y2 - y1;
               const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 40; // pixels to shorten for larger arrowhead
+              const shortenBy = 8; // Arrow tip extends 8px past line end (60-52=8), so shorten by 8 to end exactly at target
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
@@ -859,7 +861,7 @@ export const InteractiveOpeningTree = ({
               const dx = x2 - x1;
               const dy = y2 - y1;
               const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 40;
+              const shortenBy = 8;
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
