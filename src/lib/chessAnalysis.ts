@@ -1,6 +1,11 @@
 import { Chess } from "chess.js";
 import { GameData } from "./chessApi";
 
+export interface TranspositionPath {
+  path: string[];  // Move sequence that led to this position
+  count: number;   // How many games reached via this path
+}
+
 export interface OpeningNode {
   move: string;
   san: string;
@@ -10,6 +15,8 @@ export interface OpeningNode {
   losses: number;
   winRate: number;
   children: Map<string, OpeningNode>;
+  fen?: string;  // Position FEN for this node (board + turn only)
+  transpositions?: TranspositionPath[];  // Alternative paths that reach this position
 }
 
 export interface AnalysisResult {
@@ -54,6 +61,8 @@ export function createEmptyAnalysis(playerColor: "white" | "black" | "both" = "b
     losses: 0,
     winRate: 0,
     children: new Map(),
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w',
+    transpositions: [],
   };
 
   return {
@@ -132,6 +141,9 @@ export async function analyzeGamesIncremental(
 
     // Create tracking chess instance that moves forward incrementally (O(n) instead of O(n²))
     const trackingChess = new Chess();
+    
+    // Track move sequence for transposition detection
+    const selectedPath: string[] = [];
 
     // Add ALL moves to create a continuous tree structure
     // Statistics are tracked from target player's perspective for the entire game
@@ -141,6 +153,7 @@ export async function analyzeGamesIncremental(
       // Make the move on tracking instance (O(1) per move instead of O(n²))
       try {
         trackingChess.move(move);
+        selectedPath.push(move.san);
       } catch (e) {
         console.warn(`[ANALYSIS] Failed to process move ${i}:`, move.san, e);
         break; // Skip rest of this game if move fails
@@ -154,8 +167,13 @@ export async function analyzeGamesIncremental(
         console.log(`  Move ${i}: ${move.san} (${moveKey})`);
       }
 
+      // Build the current move path for transposition tracking
+      const currentMoveSequence = selectedPath.slice(0, i + 1).map((_, idx) => history[idx].san);
+      currentMoveSequence[i] = move.san;
+      
       // Check if we've seen this position before (transposition) - use GLOBAL map
       let targetNode = globalFenToNode.get(positionFen);
+      const isTransposition = !!targetNode;
       
       if (!targetNode) {
         // New position - add move to tree
@@ -169,10 +187,33 @@ export async function analyzeGamesIncremental(
             losses: 0,
             winRate: 0,
             children: new Map(),
+            fen: positionFen,
+            transpositions: [],
           });
         }
         targetNode = currentNode.children.get(moveKey)!;
+        targetNode.fen = positionFen;
         globalFenToNode.set(positionFen, targetNode);
+      }
+
+      // Track transposition paths
+      if (!targetNode.transpositions) {
+        targetNode.transpositions = [];
+      }
+      
+      // Get the full path to this position
+      const fullPath = selectedPath.slice(0, i + 1);
+      fullPath[i] = move.san;
+      const pathStr = fullPath.join(' ');
+      
+      const existingPath = targetNode.transpositions.find(t => t.path.join(' ') === pathStr);
+      if (existingPath) {
+        existingPath.count++;
+      } else {
+        targetNode.transpositions.push({
+          path: [...fullPath],
+          count: 1
+        });
       }
 
       currentNode = targetNode;
@@ -230,6 +271,8 @@ export function analyzeGames(
     losses: 0,
     winRate: 0,
     children: new Map(),
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w',
+    transpositions: [],
   };
 
   let totalGames = 0;
@@ -278,6 +321,9 @@ export function analyzeGames(
 
     // Create tracking chess instance that moves forward incrementally (O(n) instead of O(n²))
     const trackingChess = new Chess();
+    
+    // Track move sequence for transposition detection
+    const selectedPath: string[] = [];
 
     // Add ALL moves to create a continuous tree structure
     // Statistics are tracked from target player's perspective for the entire game
@@ -287,6 +333,7 @@ export function analyzeGames(
       // Make the move on tracking instance (O(1) per move instead of O(n²))
       try {
         trackingChess.move(move);
+        selectedPath.push(move.san);
       } catch (e) {
         console.warn(`Failed to process move ${i}:`, move.san, e);
         break; // Skip rest of this game if move fails
@@ -310,10 +357,31 @@ export function analyzeGames(
             losses: 0,
             winRate: 0,
             children: new Map(),
+            fen: positionFen,
+            transpositions: [],
           });
         }
         targetNode = currentNode.children.get(moveKey)!;
+        targetNode.fen = positionFen;
         globalFenToNode.set(positionFen, targetNode);
+      }
+
+      // Track transposition paths
+      if (!targetNode.transpositions) {
+        targetNode.transpositions = [];
+      }
+      
+      // Get the full path to this position
+      const pathStr = selectedPath.join(' ');
+      
+      const existingPath = targetNode.transpositions.find(t => t.path.join(' ') === pathStr);
+      if (existingPath) {
+        existingPath.count++;
+      } else {
+        targetNode.transpositions.push({
+          path: [...selectedPath],
+          count: 1
+        });
       }
 
       currentNode = targetNode;
@@ -383,6 +451,8 @@ export function serializeOpeningTree(node: OpeningNode): any {
     draws: node.draws,
     losses: node.losses,
     winRate: node.winRate,
+    fen: node.fen,
+    transpositions: node.transpositions,
     children: Array.from(node.children.entries()).map(([key, child]) => ({
       key,
       ...serializeOpeningTree(child),
@@ -407,6 +477,8 @@ export function deserializeOpeningTree(serialized: any): OpeningNode {
     draws: serialized.draws,
     losses: serialized.losses,
     winRate: serialized.winRate,
+    fen: serialized.fen,
+    transpositions: serialized.transpositions || [],
     children,
   };
 }

@@ -13,6 +13,11 @@ interface MoveArrow {
   isScoutedPlayer: boolean;
 }
 
+interface TranspositionPath {
+  path: string[];
+  count: number;
+}
+
 interface SerializedOpeningNode {
   move: string;
   san: string;
@@ -23,6 +28,8 @@ interface SerializedOpeningNode {
   winRate: number;
   children?: any[];
   key?: string;
+  fen?: string;
+  transpositions?: TranspositionPath[];
 }
 
 interface InteractiveOpeningTreeProps {
@@ -486,9 +493,9 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     }
   }, [node, selectedPath, currentPosition, isOffTree]);
 
-  // Get current opening name
-  const currentOpening = useMemo(() => {
-    if (selectedPath.length === 0) return "Starting Position";
+  // Get current opening name and transpositions
+  const { currentOpening, transpositions } = useMemo(() => {
+    if (selectedPath.length === 0) return { currentOpening: "Starting Position", transpositions: [] };
     
     let currentNode = node;
     for (const san of selectedPath) {
@@ -497,8 +504,32 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       currentNode = child;
     }
     
-    return currentNode.key || "Position";
+    // Get transpositions for this position (exclude current path)
+    const currentPathStr = selectedPath.join(' ');
+    const altPaths = (currentNode.transpositions || [])
+      .filter(t => t.path.join(' ') !== currentPathStr && t.count > 0)
+      .sort((a, b) => b.count - a.count);
+    
+    return {
+      currentOpening: currentNode.key || "Position",
+      transpositions: altPaths
+    };
   }, [node, selectedPath]);
+
+  // Format move path for display (e.g., "1.d4 Nf6 2.c4 e6")
+  const formatMovePath = (path: string[]): string => {
+    let result = '';
+    for (let i = 0; i < path.length; i++) {
+      if (i % 2 === 0) {
+        result += `${Math.floor(i / 2) + 1}.`;
+      }
+      result += path[i];
+      if (i < path.length - 1) {
+        result += i % 2 === 0 ? '' : ' ';
+      }
+    }
+    return result;
+  };
 
   return (
     <div className="flex flex-col lg:flex-row gap-4 lg:gap-8 items-center lg:items-start justify-center min-h-[calc(100vh-12rem)] max-w-7xl mx-auto px-2 sm:px-4 pb-4">
@@ -803,9 +834,32 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
           </svg>
         </div>
         
-        {/* Opening name below board */}
-        <div className="text-xs sm:text-sm text-muted-foreground text-center max-w-[280px] sm:max-w-[400px] md:max-w-[500px] lg:max-w-[600px]">
-          {currentOpening}
+        {/* Opening name and transpositions below board */}
+        <div className="text-center max-w-[280px] sm:max-w-[400px] md:max-w-[500px] lg:max-w-[600px]">
+          <div className="text-xs sm:text-sm text-muted-foreground">
+            {currentOpening}
+          </div>
+          
+          {/* Transposition info */}
+          {transpositions.length > 0 && (
+            <div className="mt-2 p-2 bg-accent/30 rounded-md border border-border/50">
+              <div className="text-xs font-medium text-muted-foreground mb-1">
+                Also reached via ({transpositions.length} other path{transpositions.length > 1 ? 's' : ''}):
+              </div>
+              <div className="space-y-1 max-h-20 overflow-y-auto">
+                {transpositions.slice(0, 3).map((t, i) => (
+                  <div key={i} className="text-xs text-foreground/80 font-mono">
+                    {formatMovePath(t.path)} <span className="text-muted-foreground">({t.count} game{t.count > 1 ? 's' : ''})</span>
+                  </div>
+                ))}
+                {transpositions.length > 3 && (
+                  <div className="text-xs text-muted-foreground">
+                    +{transpositions.length - 3} more...
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
