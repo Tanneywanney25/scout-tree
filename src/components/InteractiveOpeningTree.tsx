@@ -460,16 +460,27 @@ export const InteractiveOpeningTree = ({
           return;
         }
       } catch (error) {
-        // Invalid move, try selecting the clicked square instead
+        // Invalid move, check if clicking a different piece of same color
       }
       
-      // Clear selection
+      // Check if clicking a different piece of the same color - show its moves immediately
+      const clickedPiece = chess.get(square as any);
+      if (clickedPiece && clickedPiece.color === chess.turn()) {
+        // Clicking another piece of the same color - show its moves immediately
+        setSelectedSquare(square);
+        const moves = chess.moves({ square: square as any, verbose: true }) as any[];
+        const destinations = moves.map((m: any) => m.to);
+        setPossibleMoves(destinations);
+        return;
+      }
+      
+      // Clear selection (clicking empty square or opponent piece without valid move)
       setSelectedSquare(null);
       setPossibleMoves([]);
     } else {
       // Select the square and show possible moves
       const piece = chess.get(square as any);
-      if (piece) {
+      if (piece && piece.color === chess.turn()) {
         setSelectedSquare(square);
         
         // Get all legal moves from this square
@@ -607,23 +618,45 @@ export const InteractiveOpeningTree = ({
         {/* Chess Board */}
         <div className="relative aspect-square w-full max-w-[340px] sm:max-w-[480px] md:max-w-[560px] lg:max-w-[640px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
           <style>{`
-            /* Fix dragged piece size and make dragging smoother */
+            /* Fix dragged piece size and prevent hover scaling */
             .piece-417db {
               width: 100% !important;
               height: 100% !important;
               will-change: transform;
               cursor: grab;
+              transform: none !important;
+              transition: none !important;
+            }
+            .piece-417db:hover {
+              transform: none !important;
             }
             .piece-417db:active {
               cursor: grabbing;
+              transform: none !important;
             }
             img[data-piece] {
               max-width: 100% !important;
               max-height: 100% !important;
+              transform: none !important;
+              transition: none !important;
+            }
+            img[data-piece]:hover {
+              transform: none !important;
             }
             /* Fix black queen appearing white */
             [data-piece="bQ"] img {
               filter: none !important;
+            }
+            /* Disable ALL hover highlighting on squares */
+            .square-55d63:hover {
+              background-color: inherit !important;
+            }
+            div[data-squareid]:hover {
+              background-color: inherit !important;
+            }
+            /* Remove any yellow hover effects from chessboardjsx */
+            .hover-highlight {
+              display: none !important;
             }
           `}</style>
           <div 
