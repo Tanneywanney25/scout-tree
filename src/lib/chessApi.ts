@@ -57,6 +57,7 @@ export async function fetchLichessGames(
   // If multiple time controls selected, fetch them SEQUENTIALLY to avoid 429 rate limit
   if (timeControls.length > 1) {
     const allGames: GameData[] = [];
+    const seenGameIds = new Set<string>(); // Track unique games to prevent duplicates
     let totalCount = 0;
     
     // SEQUENTIAL fetching - await each request before starting the next
@@ -74,10 +75,34 @@ export async function fetchLichessGames(
             totalCount = allGames.length + count;
             if (onProgress) onProgress(totalCount);
           },
-          onBatch,
+          (batch) => {
+            // Deduplicate games before passing to batch callback
+            const uniqueBatch = batch.filter(game => {
+              // Create a unique ID from game data (using PGN hash or first line of PGN)
+              const gameId = `${game.white}-${game.black}-${game.pgn?.substring(0, 100)}`;
+              if (seenGameIds.has(gameId)) {
+                return false;
+              }
+              seenGameIds.add(gameId);
+              return true;
+            });
+            if (uniqueBatch.length > 0 && onBatch) {
+              onBatch(uniqueBatch);
+            }
+          },
           signal
         );
-        allGames.push(...tcGames);
+        
+        // Deduplicate games before adding to allGames
+        const uniqueGames = tcGames.filter(game => {
+          const gameId = `${game.white}-${game.black}-${game.pgn?.substring(0, 100)}`;
+          if (seenGameIds.has(gameId)) {
+            return false;
+          }
+          seenGameIds.add(gameId);
+          return true;
+        });
+        allGames.push(...uniqueGames);
         
         // Add delay between time controls only if games were found (to respect rate limits)
         if (timeControls.indexOf(tc) < timeControls.length - 1 && tcGames.length > 0) {
@@ -347,6 +372,7 @@ export async function fetchChessComGames(
     }
     
     // Filter archives by date range - be inclusive of boundary months
+    // Important: We need to include months that COULD contain games in the date range
     let filteredArchives = archives;
     if (dateFrom || dateTo) {
       filteredArchives = archives.filter((archiveUrl: string) => {
@@ -354,20 +380,43 @@ export async function fetchChessComGames(
         if (!match) return true;
         
         const [, year, month] = match;
+        const archiveYear = parseInt(year);
+        const archiveMonth = parseInt(month) - 1; // 0-indexed month
+        
         // Create date at start and end of archive month for proper comparison
-        const archiveMonthStart = new Date(parseInt(year), parseInt(month) - 1, 1);
-        const archiveMonthEnd = new Date(parseInt(year), parseInt(month), 0); // Last day of month
+        const archiveMonthStart = new Date(archiveYear, archiveMonth, 1);
+        archiveMonthStart.setHours(0, 0, 0, 0);
+        
+        // Last day of month at 23:59:59
+        const archiveMonthEnd = new Date(archiveYear, archiveMonth + 1, 0);
+        archiveMonthEnd.setHours(23, 59, 59, 999);
+        
+        // Normalize dateFrom to start of day and dateTo to end of day for fair comparison
+        const normalizedDateFrom = dateFrom ? new Date(dateFrom.getTime()) : null;
+        if (normalizedDateFrom) {
+          normalizedDateFrom.setHours(0, 0, 0, 0);
+        }
+        
+        const normalizedDateTo = dateTo ? new Date(dateTo.getTime()) : null;
+        if (normalizedDateTo) {
+          normalizedDateTo.setHours(23, 59, 59, 999);
+        }
         
         // Include archive if it overlaps with the date range
-        if (dateFrom && archiveMonthEnd < dateFrom) {
+        // Archive is excluded only if it's entirely BEFORE dateFrom or entirely AFTER dateTo
+        if (normalizedDateFrom && archiveMonthEnd.getTime() < normalizedDateFrom.getTime()) {
           return false;
         }
-        if (dateTo && archiveMonthStart > dateTo) {
+        if (normalizedDateTo && archiveMonthStart.getTime() > normalizedDateTo.getTime()) {
           return false;
         }
         
         return true;
       });
+      
+      console.log(`Date range filtering: ${archives.length} total archives, ${filteredArchives.length} match date range`);
+      if (dateFrom) console.log(`  dateFrom: ${dateFrom.toISOString()}`);
+      if (dateTo) console.log(`  dateTo: ${dateTo.toISOString()}`);
     }
 
     console.log(`Fetching Chess.com archives for ${username}:`, filteredArchives.length, 'archives to process');
@@ -434,9 +483,22 @@ export async function fetchChessComGames(
             if (!game.time_class || !mappedControls.includes(game.time_class)) continue;
           }
           
-          // Date range filter (end_time is in seconds)
-          if (dateFrom && game.end_time < dateFrom.getTime() / 1000) continue;
-          if (dateTo && game.end_time > dateTo.getTime() / 1000) continue;
+          // Date range filter (end_time is in seconds since epoch)
+          // Be inclusive: dateFrom at 00:00:00 and dateTo at 23:59:59
+          if (dateFrom) {
+            const dateFromTimestamp = new Date(dateFrom.getTime());
+            dateFromTimestamp.setHours(0, 0, 0, 0);
+            if (game.end_time < dateFromTimestamp.getTime() / 1000) {
+              continue;
+            }
+          }
+          if (dateTo) {
+            const dateToTimestamp = new Date(dateTo.getTime());
+            dateToTimestamp.setHours(23, 59, 59, 999);
+            if (game.end_time > dateToTimestamp.getTime() / 1000) {
+              continue;
+            }
+          }
           
           // Color filter - only include games where scouted player played the selected color
           if (playerColor) {
@@ -487,10 +549,11 @@ export async function fetchChessComGames(
           // Send first game immediately for instant visualization
           if (count === 1 && onBatch) {
             onBatch([gameData]);
+            batchGames = []; // Clear after sending first game
           }
-          // Then send batches every 5 games
-          else if (count % 5 === 0 && onBatch && batchGames.length > 0) {
-            onBatch(batchGames);
+          // Then send batches every 5 games from the current batch buffer
+          else if (batchGames.length >= 5 && onBatch) {
+            onBatch([...batchGames]);
             batchGames = []; // Clear batch after sending
           }
         }
