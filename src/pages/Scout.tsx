@@ -52,6 +52,7 @@ const Scout = () => {
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [currentBoardPath, setCurrentBoardPath] = useState<string[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const progressRef = useRef<number>(0); // Track accurate game count imperatively
   
   // Get available time controls based on platform
   const availableTimeControls = platform === "chesscom" ? chesscomTimeControls : lichessTimeControls;
@@ -158,6 +159,7 @@ const Scout = () => {
     setWarning(null);
     setCurrentAnalysis(null);
     setIsAnalysisComplete(false);
+    progressRef.current = 0; // Reset progress ref
 
     try {
       const actualPlatform = platform === "auto" ? "lichess" : platform;
@@ -182,6 +184,7 @@ const Scout = () => {
           username,
           fetchOptions,
           (count) => {
+            progressRef.current = count; // Update ref imperatively
             setProgress(count);
             toast.loading(`Analyzing ${count} games...`, { id: progressToast, duration: Infinity });
             if (count > 2000 && !warning) {
@@ -205,6 +208,7 @@ const Scout = () => {
           username,
           fetchOptions,
           (count) => {
+            progressRef.current = count; // Update ref imperatively
             setProgress(count);
             toast.loading(`Analyzing ${count} games...`, { id: progressToast, duration: Infinity });
           },
@@ -230,19 +234,22 @@ const Scout = () => {
       // Record usage
       await recordUsage();
 
-      // Mark analysis as complete and store accurate game count
-      setFinalGameCount(progress || analysis.totalGames);
+      // Mark analysis as complete and store accurate game count from ref (not async state)
+      const finalCount = progressRef.current || analysis.totalGames;
+      console.log(`[SCOUT] Final count: progressRef=${progressRef.current}, analysis.totalGames=${analysis.totalGames}, using=${finalCount}`);
+      setFinalGameCount(finalCount);
       setIsAnalysisComplete(true);
-      toast.success(`Analysis complete! Analyzed ${progress || analysis.totalGames} games.`);
+      toast.success(`Analysis complete! Analyzed ${finalCount} games.`);
     } catch (error: any) {
       console.error("Scout error:", error);
       toast.dismiss();
       
       if (error.name === 'AbortError') {
         if (currentAnalysis && currentAnalysis.totalGames > 0) {
-          setFinalGameCount(progress || currentAnalysis.totalGames);
+          const stoppedCount = progressRef.current || currentAnalysis.totalGames;
+          setFinalGameCount(stoppedCount);
           setIsAnalysisComplete(true);
-          toast.success(`Analysis stopped. ${progress || currentAnalysis.totalGames} games analyzed.`);
+          toast.success(`Analysis stopped. ${stoppedCount} games analyzed.`);
         } else {
           toast.info("Analysis cancelled");
         }

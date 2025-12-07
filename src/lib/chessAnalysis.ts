@@ -113,9 +113,8 @@ export async function analyzeGamesIncremental(
     const isWhite = game.white.toLowerCase() === targetUsername.toLowerCase();
     const isBlack = game.black.toLowerCase() === targetUsername.toLowerCase();
 
-    // Only include games where scouted player played the selected color
-    if (playerColor === "white" && !isWhite) continue;
-    if (playerColor === "black" && !isBlack) continue;
+    // Games are already filtered by color in chessApi.ts during fetching
+    // Just verify the player is in the game
     if (!isWhite && !isBlack) {
       console.log(`[ANALYSIS] Skipping game - player not found. White: ${game.white}, Black: ${game.black}`);
       continue;
