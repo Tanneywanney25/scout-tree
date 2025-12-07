@@ -227,10 +227,10 @@ export const InteractiveOpeningTree = ({
       }
     }
     
-    // Add selected square highlighting (green)
+    // Add selected square highlighting (green #646F40)
     if (selectedSquare) {
       styles[selectedSquare] = {
-        backgroundColor: 'rgba(20, 85, 30, 0.5)'
+        backgroundColor: '#646F40'
       };
     }
     
@@ -305,10 +305,10 @@ export const InteractiveOpeningTree = ({
             opacity = index === 0 ? 1.0 : 0.4 + frequency * 0.4;
             color = `rgba(100, 111, 65, ${opacity})`;
           } else {
-            // Opponent: red rgb(220, 38, 38)
+            // Opponent: Scarlet #900009
             // Top move = 1.0 opacity, others scale from 0.4 to 0.8
             opacity = index === 0 ? 1.0 : 0.4 + frequency * 0.4;
-            color = `rgba(220, 38, 38, ${opacity})`;
+            color = `rgba(144, 0, 9, ${opacity})`;
           }
           
           moveArrows.push({
@@ -629,6 +629,7 @@ export const InteractiveOpeningTree = ({
             }
             .piece-417db:hover {
               transform: none !important;
+              background: none !important;
             }
             .piece-417db:active {
               cursor: grabbing;
@@ -647,16 +648,35 @@ export const InteractiveOpeningTree = ({
             [data-piece="bQ"] img {
               filter: none !important;
             }
-            /* Disable ALL hover highlighting on squares */
+            /* Disable ALL hover highlighting on squares - remove black/yellow backgrounds */
             .square-55d63:hover {
               background-color: inherit !important;
+              background: inherit !important;
             }
             div[data-squareid]:hover {
               background-color: inherit !important;
+              background: inherit !important;
             }
-            /* Remove any yellow hover effects from chessboardjsx */
-            .hover-highlight {
+            /* Remove any yellow/drag hover effects from chessboardjsx */
+            .hover-highlight,
+            .highlight-square,
+            [class*="highlight"] {
               display: none !important;
+              background: none !important;
+            }
+            /* Remove ALL drag-related styling - yellow squares */
+            .square.dragging,
+            .square.drag-over,
+            [class*="drag"],
+            div[data-squareid].dragging,
+            div[data-squareid].drag-over {
+              background: none !important;
+              box-shadow: none !important;
+              border: none !important;
+            }
+            /* Prevent any background changes on any interaction */
+            div[data-squareid] {
+              transition: none !important;
             }
           `}</style>
           <div 

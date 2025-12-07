@@ -135,7 +135,7 @@ export function DateInput({ date, onDateChange, placeholder = "MM/DD/YYYY", clas
         </PopoverTrigger>
         <PopoverContent 
           className="w-auto p-0 bg-popover" 
-          align="start"
+          align="center"
           side="bottom"
           sideOffset={4}
           avoidCollisions={false}
