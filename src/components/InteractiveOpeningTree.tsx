@@ -343,9 +343,34 @@ export const InteractiveOpeningTree = ({
   }, []);
 
   const handleMoveBack = useCallback(() => {
+    // Hide arrows immediately before position changes
+    setShowArrows(false);
+    
     setSelectedPath(prev => {
       if (prev.length === 0) return prev;
       const newPath = prev.slice(0, -1);
+      
+      // Update last move to show the move we're going back to
+      if (newPath.length > 0) {
+        // Find the from/to of the last move in new path
+        const chess = new Chess();
+        try {
+          for (const san of newPath) {
+            chess.move(san);
+          }
+          const history = chess.history({ verbose: true });
+          if (history.length > 0) {
+            const lastMoveInHistory = history[history.length - 1];
+            setLastMove({ from: lastMoveInHistory.from, to: lastMoveInHistory.to });
+          } else {
+            setLastMove(null);
+          }
+        } catch (error) {
+          setLastMove(null);
+        }
+      } else {
+        setLastMove(null);
+      }
       
       // Check if we're back on the tree - if so, clear off-tree state
       let currentNode = node;
@@ -366,6 +391,11 @@ export const InteractiveOpeningTree = ({
       
       return newPath;
     });
+    
+    // Show arrows after a small delay to allow position to update first
+    setTimeout(() => {
+      setShowArrows(true);
+    }, 50);
   }, [node]);
 
   const handleMoveForward = useCallback(() => {
@@ -730,7 +760,8 @@ export const InteractiveOpeningTree = ({
           {/* Arrow overlay */}
           <svg 
             className="absolute inset-0 pointer-events-none" 
-            viewBox="0 0 8 8"
+            viewBox="0 0 800 800"
+            preserveAspectRatio="xMidYMid meet"
             style={{ width: '100%', height: '100%' }}
           >
             <defs>
@@ -738,15 +769,15 @@ export const InteractiveOpeningTree = ({
                 <marker
                   key={`marker-${idx}`}
                   id={`arrowhead-${idx}`}
-                  markerWidth="4"
-                  markerHeight="4"
-                  refX="2.5"
-                  refY="2"
+                  markerWidth="12"
+                  markerHeight="12"
+                  refX="6"
+                  refY="6"
                   orient="auto"
-                  markerUnits="strokeWidth"
+                  markerUnits="userSpaceOnUse"
                 >
                   <polygon 
-                    points="0 0, 4 2, 0 4" 
+                    points="0 0, 12 6, 0 12" 
                     fill={arrow.isScoutedPlayer ? "#646F41" : "#dc2626"}
                     fillOpacity={arrow.opacity}
                   />
@@ -754,6 +785,7 @@ export const InteractiveOpeningTree = ({
               ))}
             </defs>
             {arrows.map((arrow, idx) => {
+              // Calculate file and rank (0-7 grid)
               let fromFile = arrow.from.charCodeAt(0) - 97;
               let fromRank = 8 - parseInt(arrow.from[1]);
               let toFile = arrow.to.charCodeAt(0) - 97;
@@ -767,16 +799,18 @@ export const InteractiveOpeningTree = ({
                 toRank = 7 - toRank;
               }
               
-              const x1 = fromFile + 0.5;
-              const y1 = fromRank + 0.5;
-              const x2 = toFile + 0.5;
-              const y2 = toRank + 0.5;
+              // Calculate pixel centers in 800x800 viewBox (each square = 100px)
+              const squareSize = 100;
+              const x1 = fromFile * squareSize + squareSize / 2;
+              const y1 = fromRank * squareSize + squareSize / 2;
+              const x2 = toFile * squareSize + squareSize / 2;
+              const y2 = toRank * squareSize + squareSize / 2;
               
-              // Shorten arrow to prevent overlap with piece
+              // Shorten arrow end to prevent overlap with arrowhead/piece
               const dx = x2 - x1;
               const dy = y2 - y1;
               const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 0.25;
+              const shortenBy = 20; // pixels to shorten
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
@@ -788,7 +822,7 @@ export const InteractiveOpeningTree = ({
                   x2={x2Shortened}
                   y2={y2Shortened}
                   stroke={arrow.color}
-                  strokeWidth="0.18"
+                  strokeWidth="14"
                   strokeLinecap="round"
                   markerEnd={`url(#arrowhead-${idx})`}
                 />
@@ -809,15 +843,17 @@ export const InteractiveOpeningTree = ({
                 toRank = 7 - toRank;
               }
               
-              const x1 = fromFile + 0.5;
-              const y1 = fromRank + 0.5;
-              const x2 = toFile + 0.5;
-              const y2 = toRank + 0.5;
+              // Use 800x800 viewBox coordinate system
+              const squareSize = 100;
+              const x1 = fromFile * squareSize + squareSize / 2;
+              const y1 = fromRank * squareSize + squareSize / 2;
+              const x2 = toFile * squareSize + squareSize / 2;
+              const y2 = toRank * squareSize + squareSize / 2;
               
               const dx = x2 - x1;
               const dy = y2 - y1;
               const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 0.25;
+              const shortenBy = 20;
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
@@ -826,14 +862,14 @@ export const InteractiveOpeningTree = ({
                   <defs>
                     <marker
                       id={`user-arrowhead-${idx}`}
-                      markerWidth="4"
-                      markerHeight="4"
-                      refX="2.5"
-                      refY="2"
+                      markerWidth="12"
+                      markerHeight="12"
+                      refX="6"
+                      refY="6"
                       orient="auto"
-                      markerUnits="strokeWidth"
+                      markerUnits="userSpaceOnUse"
                     >
-                      <polygon points="0 0, 4 2, 0 4" fill="#646F41" fillOpacity="0.8" />
+                      <polygon points="0 0, 12 6, 0 12" fill="#646F41" fillOpacity="0.8" />
                     </marker>
                   </defs>
                   <line
@@ -842,7 +878,7 @@ export const InteractiveOpeningTree = ({
                     x2={x2Shortened}
                     y2={y2Shortened}
                     stroke="#646F41"
-                    strokeWidth="0.18"
+                    strokeWidth="14"
                     strokeOpacity="0.8"
                     strokeLinecap="round"
                     markerEnd={`url(#user-arrowhead-${idx})`}
@@ -861,15 +897,20 @@ export const InteractiveOpeningTree = ({
                 rank = 7 - rank;
               }
               
+              // Use 800x800 viewBox coordinate system
+              const squareSize = 100;
+              const cx = file * squareSize + squareSize / 2;
+              const cy = rank * squareSize + squareSize / 2;
+              
               return (
                 <circle
                   key={`user-circle-${square}`}
-                  cx={file + 0.5}
-                  cy={rank + 0.5}
-                  r={0.4}
+                  cx={cx}
+                  cy={cy}
+                  r={35}
                   fill="none"
                   stroke="#646F41"
-                  strokeWidth="0.08"
+                  strokeWidth="6"
                   strokeOpacity="0.8"
                 />
               );
