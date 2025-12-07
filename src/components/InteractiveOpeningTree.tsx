@@ -13,11 +13,6 @@ interface MoveArrow {
   isScoutedPlayer: boolean;
 }
 
-interface TranspositionPath {
-  path: string[];
-  count: number;
-}
-
 interface SerializedOpeningNode {
   move: string;
   san: string;
@@ -29,7 +24,6 @@ interface SerializedOpeningNode {
   children?: any[];
   key?: string;
   fen?: string;
-  transpositions?: TranspositionPath[];
 }
 
 interface InteractiveOpeningTreeProps {
@@ -432,9 +426,9 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     }
   }, [node, selectedPath, currentPosition, isOffTree]);
 
-  // Get current opening name and transpositions
-  const { currentOpening, transpositions } = useMemo(() => {
-    if (selectedPath.length === 0) return { currentOpening: "Starting Position", transpositions: [] };
+  // Get current opening name
+  const currentOpening = useMemo(() => {
+    if (selectedPath.length === 0) return "Starting Position";
     
     let currentNode = node;
     for (const san of selectedPath) {
@@ -443,16 +437,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
       currentNode = child;
     }
     
-    // Get transpositions for this position (exclude current path)
-    const currentPathStr = selectedPath.join(' ');
-    const altPaths = (currentNode.transpositions || [])
-      .filter(t => t.path.join(' ') !== currentPathStr && t.count > 0)
-      .sort((a, b) => b.count - a.count);
-    
-    return {
-      currentOpening: currentNode.key || "Position",
-      transpositions: altPaths
-    };
+    return currentNode.key || "Position";
   }, [node, selectedPath]);
 
   // Format move path for display (e.g., "1.d4 Nf6 2.c4 e6")
@@ -717,32 +702,11 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
           </svg>
         </div>
         
-        {/* Opening name and transpositions below board */}
+        {/* Opening name below board */}
         <div className="text-center max-w-[340px] sm:max-w-[480px] md:max-w-[560px] lg:max-w-[640px]">
           <div className="text-xs sm:text-sm text-muted-foreground">
             {currentOpening}
           </div>
-          
-          {/* Transposition info */}
-          {transpositions.length > 0 && (
-            <div className="mt-2 p-2 bg-accent/30 rounded-md border border-border/50">
-              <div className="text-xs font-medium text-muted-foreground mb-1">
-                Also reached via ({transpositions.length} other path{transpositions.length > 1 ? 's' : ''}):
-              </div>
-              <div className="space-y-1 max-h-20 overflow-y-auto">
-                {transpositions.slice(0, 3).map((t, i) => (
-                  <div key={i} className="text-xs text-foreground/80 font-mono">
-                    {formatMovePath(t.path)} <span className="text-muted-foreground">({t.count} game{t.count > 1 ? 's' : ''})</span>
-                  </div>
-                ))}
-                {transpositions.length > 3 && (
-                  <div className="text-xs text-muted-foreground">
-                    +{transpositions.length - 3} more...
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
