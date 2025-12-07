@@ -196,6 +196,10 @@ export async function fetchLichessGames(
   }
   
   const url = `https://lichess.org/api/games/user/${username}?${params.toString()}`;
+  
+  console.log('[LICHESS-API] Request URL:', url);
+  console.log('[LICHESS-API] Filters applied:', { timeControls, playerColor, mode, dateFrom, dateTo, ratingMin, ratingMax, opponentName });
+  const fetchStartTime = performance.now();
 
   const response = await fetch(url, {
     headers: {
@@ -203,6 +207,8 @@ export async function fetchLichessGames(
     },
     signal, // Add abort signal to fetch
   });
+  
+  console.log('[LICHESS-API] Response received in', (performance.now() - fetchStartTime).toFixed(0), 'ms, status:', response.status);
 
   if (!response.ok) {
     if (response.status === 429) {
@@ -223,6 +229,11 @@ export async function fetchLichessGames(
   let count = 0;
   let batchBuffer: GameData[] = [];
   const MAX_GAMES = 3000; // Limit to prevent crashes
+  
+  // Filter tracking counters
+  let rawGamesRead = 0;
+  const filterDrops = { color: 0, opponentName: 0, rating: 0, timeControl: 0 };
+  console.log('[STREAM] Starting to read games...');
 
   try {
     while (true) {
@@ -255,9 +266,11 @@ export async function fetchLichessGames(
         if (line.trim()) {
           try {
             const game = JSON.parse(line);
+            rawGamesRead++;
             
-            // Apply client-side filters
+            // Apply client-side filters with tracking
             let shouldInclude = true;
+            let dropReason = '';
             
             // Color filter - only include games where scouted player played the selected color
             if (playerColor) {
@@ -267,41 +280,57 @@ export async function fetchLichessGames(
               // Only show games where scouted player played the selected color
               if (scoutedPlayerColor !== playerColor) {
                 shouldInclude = false;
+                dropReason = 'color';
+                filterDrops.color++;
               }
             }
             
             // Opponent name filter
-            if (opponentName && opponentName.trim()) {
+            if (shouldInclude && opponentName && opponentName.trim()) {
               const opponent = game.players.white.user?.name?.toLowerCase() === username.toLowerCase() 
                 ? game.players.black.user?.name 
                 : game.players.white.user?.name;
               if (!opponent?.toLowerCase().includes(opponentName.toLowerCase())) {
                 shouldInclude = false;
+                dropReason = 'opponentName';
+                filterDrops.opponentName++;
               }
             }
             
             // Opponent rating range filter (matches UI label "Opponent Rating Range")
-            if (ratingMin !== undefined || ratingMax !== undefined) {
+            if (shouldInclude && (ratingMin !== undefined || ratingMax !== undefined)) {
               const playerIsWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
               const opponentRating = playerIsWhite ? game.players.black.rating : game.players.white.rating;
               
               if (ratingMin !== undefined && opponentRating < ratingMin) {
                 shouldInclude = false;
+                dropReason = 'rating';
+                filterDrops.rating++;
               }
-              if (ratingMax !== undefined && opponentRating > ratingMax) {
+              if (shouldInclude && ratingMax !== undefined && opponentRating > ratingMax) {
                 shouldInclude = false;
+                dropReason = 'rating';
+                filterDrops.rating++;
               }
             }
             
             // Time control filter - validate API returned correct time control
-            if (timeControls.length > 0 && !timeControls.includes("all")) {
+            if (shouldInclude && timeControls.length > 0 && !timeControls.includes("all")) {
               const gameSpeed = game.speed; // bullet, blitz, rapid, etc.
               if (!timeControls.includes(gameSpeed)) {
                 shouldInclude = false;
+                dropReason = 'timeControl';
+                filterDrops.timeControl++;
               }
             }
             
-            if (!shouldInclude) continue;
+            if (!shouldInclude) {
+              // Log every 100th dropped game to avoid console spam
+              if ((filterDrops.color + filterDrops.opponentName + filterDrops.rating + filterDrops.timeControl) % 100 === 1) {
+                console.log('[FILTER-DROP] Game', game.id, 'dropped for:', dropReason);
+              }
+              continue;
+            }
             
             const gameData: GameData = {
               pgn: game.pgn,
@@ -341,13 +370,21 @@ export async function fetchLichessGames(
     
     // Send remaining games in batch
     if (batchBuffer.length > 0 && onBatch) {
+      console.log('[STREAM] Sending final batch of', batchBuffer.length, 'games');
       onBatch([...batchBuffer]);
     }
     
     if (onProgress && count > 0) {
       onProgress(count);
     }
+    
+    // Log final stream summary
+    console.log('[STREAM-COMPLETE] Raw games from API:', rawGamesRead);
+    console.log('[STREAM-COMPLETE] Games passed filters:', count);
+    console.log('[STREAM-COMPLETE] Filter drop summary:', filterDrops);
+    console.log('[STREAM-COMPLETE] Drop rate:', ((rawGamesRead - count) / rawGamesRead * 100).toFixed(1) + '%');
   } catch (error: any) {
+    console.log('[STREAM-ERROR] Error at game', rawGamesRead, '- filter drops so far:', filterDrops);
     // Ensure reader is properly closed
     try {
       await reader.cancel();

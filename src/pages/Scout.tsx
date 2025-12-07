@@ -185,6 +185,9 @@ const Scout = () => {
   };
 
   const handleSubmit = async (e: React.FormEvent, preservePrevious: boolean = false) => {
+    const t0 = performance.now();
+    console.log('[TIMING] Form submitted');
+    
     e.preventDefault();
     
     if (!username.trim()) {
@@ -198,7 +201,9 @@ const Scout = () => {
     }
 
     // Check usage limit
+    console.log('[TIMING] Starting usage check at', (performance.now() - t0).toFixed(0), 'ms');
     const canProceed = await checkUsageLimit();
+    console.log('[TIMING] Usage check complete at', (performance.now() - t0).toFixed(0), 'ms');
     if (!canProceed) {
       setShowAuthDialog(true);
       return;
@@ -213,9 +218,11 @@ const Scout = () => {
     }
 
     if (abortControllerRef.current) {
+      console.log('[TIMING] Aborting previous request at', (performance.now() - t0).toFixed(0), 'ms');
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 100)); // Reduced from 1000ms
+      console.log('[TIMING] Abort complete at', (performance.now() - t0).toFixed(0), 'ms');
     }
 
     abortControllerRef.current = new AbortController();
@@ -226,6 +233,7 @@ const Scout = () => {
     setCurrentAnalysis(null);
     setIsAnalysisComplete(false);
     progressRef.current = 0; // Reset progress ref
+    console.log('[TIMING] State reset, starting fetch at', (performance.now() - t0).toFixed(0), 'ms');
 
     try {
       const actualPlatform = platform === "auto" ? "lichess" : platform;
@@ -242,6 +250,9 @@ const Scout = () => {
         opponentName: opponentName || undefined,
         playerColor: color
       };
+      
+      console.log('[FETCH-CONFIG] Platform:', actualPlatform, 'User:', username, 'Color:', color);
+      console.log('[FETCH-CONFIG] Filters:', JSON.stringify(fetchOptions, null, 2));
 
       const progressToast = toast.loading("Fetching games...", { duration: Infinity });
       
