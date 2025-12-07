@@ -1,11 +1,6 @@
 import { Chess } from "chess.js";
 import { GameData } from "./chessApi";
 
-export interface TranspositionPath {
-  path: string[];  // Move sequence that led to this position
-  count: number;   // How many games reached via this path
-}
-
 export interface OpeningNode {
   move: string;
   san: string;
@@ -16,7 +11,6 @@ export interface OpeningNode {
   winRate: number;
   children: Map<string, OpeningNode>;
   fen?: string;  // Position FEN for this node (board + turn only)
-  transpositions?: TranspositionPath[];  // Alternative paths that reach this position
 }
 
 export interface AnalysisResult {
@@ -62,7 +56,6 @@ export function createEmptyAnalysis(playerColor: "white" | "black" | "both" = "b
     winRate: 0,
     children: new Map(),
     fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w',
-    transpositions: [],
   };
 
   return {
@@ -85,11 +78,6 @@ export async function analyzeGamesIncremental(
   const playerColor = existingAnalysis.playerColor;
 
   console.log(`[ANALYSIS] Starting incremental analysis for ${targetUsername}, playerColor: ${playerColor}, newGames: ${newGames.length}`);
-
-  // CRITICAL FIX: Move fenToNode OUTSIDE game loop for proper transposition detection across ALL games
-  const globalFenToNode = new Map<string, OpeningNode>();
-  const startFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w';
-  globalFenToNode.set(startFen, rootNode);
 
   for (let i = 0; i < newGames.length; i++) {
     const game = newGames[i];
@@ -141,21 +129,17 @@ export async function analyzeGamesIncremental(
 
     // Create tracking chess instance that moves forward incrementally (O(n) instead of O(n²))
     const trackingChess = new Chess();
-    
-    // Track move sequence for transposition detection
-    const selectedPath: string[] = [];
 
     // Add ALL moves to create a continuous tree structure
-    // Statistics are tracked from target player's perspective for the entire game
-    for (let i = 0; i < maxPlies; i++) {
-      const move = history[i];
+    // Each path creates separate nodes - no FEN-based sharing
+    for (let j = 0; j < maxPlies; j++) {
+      const move = history[j];
       
       // Make the move on tracking instance (O(1) per move instead of O(n²))
       try {
         trackingChess.move(move);
-        selectedPath.push(move.san);
       } catch (e) {
-        console.warn(`[ANALYSIS] Failed to process move ${i}:`, move.san, e);
+        console.warn(`[ANALYSIS] Failed to process move ${j}:`, move.san, e);
         break; // Skip rest of this game if move fails
       }
       const positionFen = trackingChess.fen().split(' ').slice(0, 2).join(' '); // Board + turn only
@@ -164,19 +148,14 @@ export async function analyzeGamesIncremental(
       
       // Debug logging (first 3 games)
       if (totalGames <= 3) {
-        console.log(`  Move ${i}: ${move.san} (${moveKey})`);
+        console.log(`  Move ${j}: ${move.san} (${moveKey})`);
       }
 
-      // Build the current move path for transposition tracking
-      const currentMoveSequence = selectedPath.slice(0, i + 1).map((_, idx) => history[idx].san);
-      currentMoveSequence[i] = move.san;
-      
-      // Check if we've seen this position before (transposition) - use GLOBAL map
-      let targetNode = globalFenToNode.get(positionFen);
-      const isTransposition = !!targetNode;
-      
-      if (!targetNode) {
-        // New position - create new node
+      // Build tree by move sequence - each path creates separate nodes
+      let targetNode: OpeningNode;
+      if (currentNode.children.has(moveKey)) {
+        targetNode = currentNode.children.get(moveKey)!;
+      } else {
         targetNode = {
           move: moveKey,
           san: move.san,
@@ -186,36 +165,9 @@ export async function analyzeGamesIncremental(
           losses: 0,
           winRate: 0,
           children: new Map(),
-          fen: positionFen,
-          transpositions: [],
+          fen: positionFen, // Store FEN for lookup purposes
         };
-        globalFenToNode.set(positionFen, targetNode);
-      }
-      
-      // CRITICAL FIX: Always add node as child with moveKey, even for transpositions
-      // This creates links from multiple move orders to the SAME node
-      if (!currentNode.children.has(moveKey)) {
         currentNode.children.set(moveKey, targetNode);
-      }
-
-      // Track transposition paths
-      if (!targetNode.transpositions) {
-        targetNode.transpositions = [];
-      }
-      
-      // Get the full path to this position
-      const fullPath = selectedPath.slice(0, i + 1);
-      fullPath[i] = move.san;
-      const pathStr = fullPath.join(' ');
-      
-      const existingPath = targetNode.transpositions.find(t => t.path.join(' ') === pathStr);
-      if (existingPath) {
-        existingPath.count++;
-      } else {
-        targetNode.transpositions.push({
-          path: [...fullPath],
-          count: 1
-        });
       }
 
       currentNode = targetNode;
@@ -233,7 +185,7 @@ export async function analyzeGamesIncremental(
     
     console.log(`[ANALYSIS] Game ${totalGames} added all ${maxPlies} moves to tree`);
     
-    // Optional: Call progress callback after each game (not used anymore to avoid conflicts)
+    // Optional: Call progress callback after each game
     if (onProgress) {
       onProgress(totalGames);
     }
@@ -274,15 +226,9 @@ export function analyzeGames(
     winRate: 0,
     children: new Map(),
     fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w',
-    transpositions: [],
   };
 
   let totalGames = 0;
-
-  // CRITICAL FIX: Move fenToNode OUTSIDE game loop for proper transposition detection across ALL games
-  const globalFenToNode = new Map<string, OpeningNode>();
-  const startFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w';
-  globalFenToNode.set(startFen, rootNode);
 
   for (const game of games) {
     const chess = new Chess();
@@ -323,19 +269,15 @@ export function analyzeGames(
 
     // Create tracking chess instance that moves forward incrementally (O(n) instead of O(n²))
     const trackingChess = new Chess();
-    
-    // Track move sequence for transposition detection
-    const selectedPath: string[] = [];
 
     // Add ALL moves to create a continuous tree structure
-    // Statistics are tracked from target player's perspective for the entire game
+    // Each path creates separate nodes - no FEN-based sharing
     for (let i = 0; i < maxPlies; i++) {
       const move = history[i];
       
       // Make the move on tracking instance (O(1) per move instead of O(n²))
       try {
         trackingChess.move(move);
-        selectedPath.push(move.san);
       } catch (e) {
         console.warn(`Failed to process move ${i}:`, move.san, e);
         break; // Skip rest of this game if move fails
@@ -344,11 +286,11 @@ export function analyzeGames(
       
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
 
-      // Check if we've seen this position before (transposition) - use GLOBAL map
-      let targetNode = globalFenToNode.get(positionFen);
-      
-      if (!targetNode) {
-        // New position - create new node
+      // Build tree by move sequence - each path creates separate nodes
+      let targetNode: OpeningNode;
+      if (currentNode.children.has(moveKey)) {
+        targetNode = currentNode.children.get(moveKey)!;
+      } else {
         targetNode = {
           move: moveKey,
           san: move.san,
@@ -358,34 +300,9 @@ export function analyzeGames(
           losses: 0,
           winRate: 0,
           children: new Map(),
-          fen: positionFen,
-          transpositions: [],
+          fen: positionFen, // Store FEN for lookup purposes
         };
-        globalFenToNode.set(positionFen, targetNode);
-      }
-      
-      // CRITICAL FIX: Always add node as child with moveKey, even for transpositions
-      // This creates links from multiple move orders to the SAME node
-      if (!currentNode.children.has(moveKey)) {
         currentNode.children.set(moveKey, targetNode);
-      }
-
-      // Track transposition paths
-      if (!targetNode.transpositions) {
-        targetNode.transpositions = [];
-      }
-      
-      // Get the full path to this position
-      const pathStr = selectedPath.join(' ');
-      
-      const existingPath = targetNode.transpositions.find(t => t.path.join(' ') === pathStr);
-      if (existingPath) {
-        existingPath.count++;
-      } else {
-        targetNode.transpositions.push({
-          path: [...selectedPath],
-          count: 1
-        });
       }
 
       currentNode = targetNode;
@@ -456,7 +373,6 @@ export function serializeOpeningTree(node: OpeningNode): any {
     losses: node.losses,
     winRate: node.winRate,
     fen: node.fen,
-    transpositions: node.transpositions,
     children: Array.from(node.children.entries()).map(([key, child]) => ({
       key,
       ...serializeOpeningTree(child),
@@ -482,7 +398,6 @@ export function deserializeOpeningTree(serialized: any): OpeningNode {
     losses: serialized.losses,
     winRate: serialized.winRate,
     fen: serialized.fen,
-    transpositions: serialized.transpositions || [],
     children,
   };
 }
