@@ -30,10 +30,18 @@ interface InteractiveOpeningTreeProps {
   node: SerializedOpeningNode;
   maxDepth?: number;
   playerColor: "white" | "black";
+  initialSelectedPath?: string[];
+  onPathChange?: (path: string[]) => void;
 }
 
-export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: InteractiveOpeningTreeProps) => {
-  const [selectedPath, setSelectedPath] = useState<string[]>([]);
+export const InteractiveOpeningTree = ({ 
+  node, 
+  maxDepth = 10, 
+  playerColor,
+  initialSelectedPath = [],
+  onPathChange
+}: InteractiveOpeningTreeProps) => {
+  const [selectedPath, setSelectedPathInternal] = useState<string[]>(initialSelectedPath);
   const [boardOrientation, setBoardOrientation] = useState<"white" | "black">("white");
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [possibleMoves, setPossibleMoves] = useState<string[]>([]);
@@ -43,6 +51,17 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   const [userArrows, setUserArrows] = useState<Array<{ from: string; to: string }>>([]);
   const [userCircles, setUserCircles] = useState<string[]>([]);
   const [rightClickStart, setRightClickStart] = useState<string | null>(null);
+
+  // Wrapper to notify parent of path changes
+  const setSelectedPath = useCallback((pathOrUpdater: string[] | ((prev: string[]) => string[])) => {
+    setSelectedPathInternal(prev => {
+      const newPath = typeof pathOrUpdater === 'function' ? pathOrUpdater(prev) : pathOrUpdater;
+      if (onPathChange) {
+        onPathChange(newPath);
+      }
+      return newPath;
+    });
+  }, [onPathChange]);
 
   // Build FEN-to-nodes lookup map for transposition detection (built AFTER tree is complete)
   const fenToNodes = useMemo(() => {

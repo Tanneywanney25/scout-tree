@@ -14,10 +14,7 @@ import { analyzeGames, serializeOpeningTree, createEmptyAnalysis, analyzeGamesIn
 import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Calendar } from "@/components/ui/calendar";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { format } from "date-fns";
-import { CalendarIcon } from "lucide-react";
+import { DateInput } from "@/components/ui/date-input";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
@@ -53,6 +50,7 @@ const Scout = () => {
   const [isAnalysisComplete, setIsAnalysisComplete] = useState(false);
   const [finalGameCount, setFinalGameCount] = useState<number>(0);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
+  const [currentBoardPath, setCurrentBoardPath] = useState<string[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
   
   // Get available time controls based on platform
@@ -305,7 +303,9 @@ const Scout = () => {
       totalGames: currentAnalysis.totalGames,
       openingTree: serializeOpeningTree(currentAnalysis.openingTree),
       weakestLines: currentAnalysis.weakestLines,
-      strongestLines: currentAnalysis.strongestLines
+      strongestLines: currentAnalysis.strongestLines,
+      // Preserve the current navigation state
+      initialSelectedPath: currentBoardPath
     };
     
     sessionStorage.setItem('scoutAnalysis', JSON.stringify(serializedAnalysis));
@@ -442,29 +442,20 @@ const Scout = () => {
                     <div className="space-y-2">
                       <Label>Date Range</Label>
                       <div className="grid grid-cols-2 gap-2">
-                        <Popover>
-                          <PopoverTrigger asChild>
-                            <Button variant="outline" className={cn("justify-start text-left font-normal", !dateFrom && "text-muted-foreground")}>
-                              <CalendarIcon className="mr-2 h-4 w-4" />
-                              {dateFrom ? format(dateFrom, "PPP") : "From: Forever"}
-                            </Button>
-                          </PopoverTrigger>
-                          <PopoverContent className="w-auto p-0" align="start">
-                            <Calendar mode="single" selected={dateFrom} onSelect={setDateFrom} initialFocus className="pointer-events-auto" />
-                          </PopoverContent>
-                        </Popover>
-
-                        <Popover>
-                          <PopoverTrigger asChild>
-                            <Button variant="outline" className={cn("justify-start text-left font-normal", !dateTo && "text-muted-foreground")}>
-                              <CalendarIcon className="mr-2 h-4 w-4" />
-                              {dateTo ? format(dateTo, "PPP") : "To: Now"}
-                            </Button>
-                          </PopoverTrigger>
-                          <PopoverContent className="w-auto p-0" align="start">
-                            <Calendar mode="single" selected={dateTo} onSelect={setDateTo} initialFocus className="pointer-events-auto" />
-                          </PopoverContent>
-                        </Popover>
+                        <div>
+                          <DateInput
+                            date={dateFrom}
+                            onDateChange={setDateFrom}
+                            placeholder="From: Forever"
+                          />
+                        </div>
+                        <div>
+                          <DateInput
+                            date={dateTo}
+                            onDateChange={setDateTo}
+                            placeholder="To: Now"
+                          />
+                        </div>
                       </div>
                     </div>
 
@@ -596,6 +587,8 @@ const Scout = () => {
                   <InteractiveOpeningTree 
                     node={serializeOpeningTree(currentAnalysis.openingTree)}
                     playerColor={currentAnalysis.playerColor === "both" ? "white" : currentAnalysis.playerColor}
+                    initialSelectedPath={currentBoardPath}
+                    onPathChange={setCurrentBoardPath}
                   />
                 </ErrorBoundary>
               </CardContent>
