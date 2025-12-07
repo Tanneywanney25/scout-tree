@@ -331,7 +331,8 @@ export async function fetchChessComGames(
   username: string,
   options: FetchOptions = {},
   onProgress?: (count: number) => void,
-  onBatch?: (games: GameData[]) => void
+  onBatch?: (games: GameData[]) => void,
+  signal?: AbortSignal
 ): Promise<GameData[]> {
   const {
     variant = "standard",
@@ -435,6 +436,11 @@ export async function fetchChessComGames(
     const MAX_GAMES = 3000; // Limit to prevent crashes
 
     for (const archiveUrl of recentArchives) {
+      // Check if aborted
+      if (signal?.aborted) {
+        throw new DOMException('Request aborted', 'AbortError');
+      }
+      
       // Stop if we've reached the game limit
       if (count >= MAX_GAMES) {
         console.log(`Reached maximum of ${MAX_GAMES} games, stopping fetch`);
@@ -450,6 +456,7 @@ export async function fetchChessComGames(
           headers: {
             "User-Agent": "ScoutTree/1.0 (contact: support@scouttree.com)",
           },
+          signal, // Add abort signal to fetch
         });
 
         if (!response.ok) {
