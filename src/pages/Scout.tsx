@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import Header from "@/components/Header";
 import { Button } from "@/components/ui/button";
@@ -7,7 +7,22 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { Search, Upload, Loader2, ChevronDown, StopCircle, ArrowRight } from "lucide-react";
+import { Search, Upload, Loader2, ChevronDown, StopCircle, ArrowRight, RefreshCw, History } from "lucide-react";
+
+// Filter snapshot interface for tracking filter changes
+interface FilterSnapshot {
+  username: string;
+  platform: string;
+  color: "white" | "black";
+  variant: string;
+  timeControls: string[];
+  mode: "all" | "rated" | "casual";
+  dateFrom: Date | undefined;
+  dateTo: Date | undefined;
+  ratingMin: string;
+  ratingMax: string;
+  opponentName: string;
+}
 import { toast } from "sonner";
 import { fetchLichessGames, fetchChessComGames } from "@/lib/chessApi";
 import { analyzeGames, serializeOpeningTree, createEmptyAnalysis, analyzeGamesIncremental, type AnalysisResult } from "@/lib/chessAnalysis";
@@ -54,8 +69,51 @@ const Scout = () => {
   const abortControllerRef = useRef<AbortController | null>(null);
   const progressRef = useRef<number>(0); // Track accurate game count imperatively
   
+  // Filter change detection state
+  const [baselineFilters, setBaselineFilters] = useState<FilterSnapshot | null>(null);
+  
+  // Previous report state (preserved when new analysis starts)
+  const [previousAnalysis, setPreviousAnalysis] = useState<AnalysisResult | null>(null);
+  const [previousFinalGameCount, setPreviousFinalGameCount] = useState<number>(0);
+  const [previousBoardPath, setPreviousBoardPath] = useState<string[]>([]);
+  const [previousUsername, setPreviousUsername] = useState<string>("");
+  
   // Get available time controls based on platform
   const availableTimeControls = platform === "chesscom" ? chesscomTimeControls : lichessTimeControls;
+
+  // Current filters as a snapshot for comparison
+  const currentFilters: FilterSnapshot = useMemo(() => ({
+    username,
+    platform,
+    color,
+    variant,
+    timeControls,
+    mode,
+    dateFrom,
+    dateTo,
+    ratingMin,
+    ratingMax,
+    opponentName
+  }), [username, platform, color, variant, timeControls, mode, dateFrom, dateTo, ratingMin, ratingMax, opponentName]);
+
+  // Detect if filters have changed from baseline
+  const filtersChanged = useMemo(() => {
+    if (!baselineFilters) return false;
+    
+    return (
+      baselineFilters.username !== currentFilters.username ||
+      baselineFilters.platform !== currentFilters.platform ||
+      baselineFilters.color !== currentFilters.color ||
+      baselineFilters.variant !== currentFilters.variant ||
+      JSON.stringify(baselineFilters.timeControls.slice().sort()) !== JSON.stringify(currentFilters.timeControls.slice().sort()) ||
+      baselineFilters.mode !== currentFilters.mode ||
+      baselineFilters.dateFrom?.getTime() !== currentFilters.dateFrom?.getTime() ||
+      baselineFilters.dateTo?.getTime() !== currentFilters.dateTo?.getTime() ||
+      baselineFilters.ratingMin !== currentFilters.ratingMin ||
+      baselineFilters.ratingMax !== currentFilters.ratingMax ||
+      baselineFilters.opponentName !== currentFilters.opponentName
+    );
+  }, [baselineFilters, currentFilters]);
 
   const toggleTimeControl = (tc: string) => {
     setTimeControls(prev => 
@@ -126,7 +184,7 @@ const Scout = () => {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent, preservePrevious: boolean = false) => {
     e.preventDefault();
     
     if (!username.trim()) {
@@ -144,6 +202,14 @@ const Scout = () => {
     if (!canProceed) {
       setShowAuthDialog(true);
       return;
+    }
+
+    // Preserve current report as previous if requested and a valid report exists
+    if (preservePrevious && currentAnalysis && isAnalysisComplete && finalGameCount > 0) {
+      setPreviousAnalysis(currentAnalysis);
+      setPreviousFinalGameCount(finalGameCount);
+      setPreviousBoardPath(currentBoardPath);
+      setPreviousUsername(username);
     }
 
     if (abortControllerRef.current) {
@@ -239,6 +305,10 @@ const Scout = () => {
       console.log(`[SCOUT] Final count: progressRef=${progressRef.current}, analysis.totalGames=${analysis.totalGames}, using=${finalCount}`);
       setFinalGameCount(finalCount);
       setIsAnalysisComplete(true);
+      
+      // Store baseline filters for change detection
+      setBaselineFilters({ ...currentFilters });
+      
       toast.success(`Analysis complete! Analyzed ${finalCount} games.`);
     } catch (error: any) {
       console.error("Scout error:", error);
@@ -297,10 +367,38 @@ const Scout = () => {
     setRatingMax("");
     setOpponentName("");
     
+    // Clear baseline and previous report
+    setBaselineFilters(null);
+    setPreviousAnalysis(null);
+    setPreviousFinalGameCount(0);
+    setPreviousBoardPath([]);
+    setPreviousUsername("");
+    
     // Clear session storage
     sessionStorage.removeItem('scoutAnalysis');
     
     toast.success("Ready for new scout");
+  };
+
+  const handleRegenerateWithNewFilters = (e: React.FormEvent) => {
+    // Preserve current report and start new analysis
+    handleSubmit(e, true);
+  };
+
+  const handleViewPreviousReport = () => {
+    if (!previousAnalysis) return;
+    
+    const serializedAnalysis = {
+      playerColor: previousAnalysis.playerColor,
+      totalGames: previousAnalysis.totalGames,
+      openingTree: serializeOpeningTree(previousAnalysis.openingTree),
+      weakestLines: previousAnalysis.weakestLines,
+      strongestLines: previousAnalysis.strongestLines,
+      initialSelectedPath: previousBoardPath
+    };
+    
+    sessionStorage.setItem('scoutAnalysis', JSON.stringify(serializedAnalysis));
+    navigate(`/report/${previousUsername}`);
   };
 
   const handleViewFullReport = () => {
@@ -534,7 +632,24 @@ const Scout = () => {
                   </div>
                 )}
 
-                {!isAnalysisComplete && (
+                {/* Show regenerate button when filters changed during loading */}
+                {loading && filtersChanged && (
+                  <div className="p-3 bg-amber-50 dark:bg-amber-900/30 rounded-md border border-amber-200 dark:border-amber-800">
+                    <p className="text-sm text-amber-800 dark:text-amber-200 mb-2">
+                      Filters have changed. Current analysis will continue.
+                    </p>
+                    <Button 
+                      type="button"
+                      onClick={handleRegenerateWithNewFilters}
+                      className="w-full bg-orange-600 hover:bg-orange-700 text-white"
+                    >
+                      <RefreshCw className="mr-2 w-4 h-4" />
+                      Start New Analysis with Updated Filters
+                    </Button>
+                  </div>
+                )}
+
+                {!isAnalysisComplete && !filtersChanged && (
                   <Button 
                     type="submit" 
                     disabled={loading}
@@ -556,14 +671,39 @@ const Scout = () => {
 
                 {isAnalysisComplete && currentAnalysis && finalGameCount > 0 && (
                   <div className="space-y-3">
+                    {/* Show regenerate button if filters have changed */}
+                    {filtersChanged && (
+                      <Button 
+                        type="button"
+                        onClick={handleRegenerateWithNewFilters}
+                        className="w-full bg-orange-600 hover:bg-orange-700 text-white"
+                      >
+                        <RefreshCw className="mr-2 w-4 h-4" />
+                        Generate Scout Report with New Filters
+                      </Button>
+                    )}
+                    
                     <Button 
                       type="button"
                       onClick={handleViewFullReport}
                       className="w-full bg-primary hover:bg-primary-dark text-primary-foreground"
                     >
                       <ArrowRight className="mr-2 w-4 h-4" />
-                      View Full Report ({finalGameCount} games)
+                      {previousAnalysis ? `View Current Report (${finalGameCount} games)` : `View Full Report (${finalGameCount} games)`}
                     </Button>
+                    
+                    {/* Show previous report button if one exists */}
+                    {previousAnalysis && previousFinalGameCount > 0 && (
+                      <Button 
+                        type="button"
+                        onClick={handleViewPreviousReport}
+                        variant="outline"
+                        className="w-full"
+                      >
+                        <History className="mr-2 w-4 h-4" />
+                        Previous Report ({previousFinalGameCount} games)
+                      </Button>
+                    )}
                     
                     <Button 
                       type="button"
