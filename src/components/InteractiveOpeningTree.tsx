@@ -743,6 +743,7 @@ export const InteractiveOpeningTree = ({
               position={currentPosition}
               orientation={boardOrientation}
               draggable={true}
+              dropSquareStyle={{ backgroundColor: 'transparent' }}
               onDrop={onDrop}
               onSquareClick={onSquareClick}
               onSquareRightClick={handleSquareRightClick}
@@ -774,15 +775,15 @@ export const InteractiveOpeningTree = ({
                 <marker
                   key={`marker-${idx}`}
                   id={`arrowhead-${idx}`}
-                  markerWidth="32"
-                  markerHeight="32"
-                  refX="28"
-                  refY="16"
+                  markerWidth="60"
+                  markerHeight="60"
+                  refX="52"
+                  refY="30"
                   orient="auto"
                   markerUnits="userSpaceOnUse"
                 >
                   <polygon 
-                    points="0 0, 32 16, 0 32" 
+                    points="0 0, 60 30, 0 60" 
                     fill={arrow.isScoutedPlayer ? "#646F41" : "#900009"}
                     fillOpacity={arrow.opacity}
                   />
@@ -815,7 +816,7 @@ export const InteractiveOpeningTree = ({
               const dx = x2 - x1;
               const dy = y2 - y1;
               const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 25; // pixels to shorten (slightly more for larger arrowhead)
+              const shortenBy = 40; // pixels to shorten for larger arrowhead
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
@@ -827,7 +828,7 @@ export const InteractiveOpeningTree = ({
                   x2={x2Shortened}
                   y2={y2Shortened}
                   stroke={arrow.color}
-                  strokeWidth="14"
+                  strokeWidth="20"
                   strokeLinecap="round"
                   markerEnd={`url(#arrowhead-${idx})`}
                 />
@@ -858,7 +859,7 @@ export const InteractiveOpeningTree = ({
               const dx = x2 - x1;
               const dy = y2 - y1;
               const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 30;
+              const shortenBy = 40;
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
@@ -867,14 +868,14 @@ export const InteractiveOpeningTree = ({
                   <defs>
                     <marker
                       id={`user-arrowhead-${idx}`}
-                      markerWidth="32"
-                      markerHeight="32"
-                      refX="28"
-                      refY="16"
+                      markerWidth="60"
+                      markerHeight="60"
+                      refX="52"
+                      refY="30"
                       orient="auto"
                       markerUnits="userSpaceOnUse"
                     >
-                      <polygon points="0 0, 32 16, 0 32" fill="#646F41" fillOpacity="0.8" />
+                      <polygon points="0 0, 60 30, 0 60" fill="#646F41" fillOpacity="0.8" />
                     </marker>
                   </defs>
                   <line
@@ -883,7 +884,7 @@ export const InteractiveOpeningTree = ({
                     x2={x2Shortened}
                     y2={y2Shortened}
                     stroke="#646F41"
-                    strokeWidth="14"
+                    strokeWidth="20"
                     strokeOpacity="0.8"
                     strokeLinecap="round"
                     markerEnd={`url(#user-arrowhead-${idx})`}
