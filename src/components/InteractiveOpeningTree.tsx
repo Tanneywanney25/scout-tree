@@ -687,7 +687,6 @@ export const InteractiveOpeningTree = ({
             .square-55d63:hover,
             div[data-squareid]:hover {
               box-shadow: none !important;
-              background: inherit !important;
             }
             
             /* ============================================= */
@@ -779,7 +778,7 @@ export const InteractiveOpeningTree = ({
                   id={`arrowhead-${idx}`}
                   markerWidth="60"
                   markerHeight="60"
-                  refX="52"
+                  refX="60"
                   refY="30"
                   orient="auto"
                   markerUnits="userSpaceOnUse"
@@ -818,7 +817,7 @@ export const InteractiveOpeningTree = ({
               const dx = x2 - x1;
               const dy = y2 - y1;
               const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 8; // Arrow tip extends 8px past line end (60-52=8), so shorten by 8 to end exactly at target
+              const shortenBy = 0; // No shortening - refX=60 places tip exactly at target center
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
@@ -861,7 +860,7 @@ export const InteractiveOpeningTree = ({
               const dx = x2 - x1;
               const dy = y2 - y1;
               const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 8;
+              const shortenBy = 0;
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
@@ -872,7 +871,7 @@ export const InteractiveOpeningTree = ({
                       id={`user-arrowhead-${idx}`}
                       markerWidth="60"
                       markerHeight="60"
-                      refX="52"
+                      refX="60"
                       refY="30"
                       orient="auto"
                       markerUnits="userSpaceOnUse"
