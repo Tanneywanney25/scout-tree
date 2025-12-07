@@ -176,24 +176,26 @@ export async function analyzeGamesIncremental(
       const isTransposition = !!targetNode;
       
       if (!targetNode) {
-        // New position - add move to tree
-        if (!currentNode.children.has(moveKey)) {
-          currentNode.children.set(moveKey, {
-            move: moveKey,
-            san: move.san,
-            count: 0,
-            wins: 0,
-            draws: 0,
-            losses: 0,
-            winRate: 0,
-            children: new Map(),
-            fen: positionFen,
-            transpositions: [],
-          });
-        }
-        targetNode = currentNode.children.get(moveKey)!;
-        targetNode.fen = positionFen;
+        // New position - create new node
+        targetNode = {
+          move: moveKey,
+          san: move.san,
+          count: 0,
+          wins: 0,
+          draws: 0,
+          losses: 0,
+          winRate: 0,
+          children: new Map(),
+          fen: positionFen,
+          transpositions: [],
+        };
         globalFenToNode.set(positionFen, targetNode);
+      }
+      
+      // CRITICAL FIX: Always add node as child with moveKey, even for transpositions
+      // This creates links from multiple move orders to the SAME node
+      if (!currentNode.children.has(moveKey)) {
+        currentNode.children.set(moveKey, targetNode);
       }
 
       // Track transposition paths
@@ -346,24 +348,26 @@ export function analyzeGames(
       let targetNode = globalFenToNode.get(positionFen);
       
       if (!targetNode) {
-        // New position - add move to tree
-        if (!currentNode.children.has(moveKey)) {
-          currentNode.children.set(moveKey, {
-            move: moveKey,
-            san: move.san,
-            count: 0,
-            wins: 0,
-            draws: 0,
-            losses: 0,
-            winRate: 0,
-            children: new Map(),
-            fen: positionFen,
-            transpositions: [],
-          });
-        }
-        targetNode = currentNode.children.get(moveKey)!;
-        targetNode.fen = positionFen;
+        // New position - create new node
+        targetNode = {
+          move: moveKey,
+          san: move.san,
+          count: 0,
+          wins: 0,
+          draws: 0,
+          losses: 0,
+          winRate: 0,
+          children: new Map(),
+          fen: positionFen,
+          transpositions: [],
+        };
         globalFenToNode.set(positionFen, targetNode);
+      }
+      
+      // CRITICAL FIX: Always add node as child with moveKey, even for transpositions
+      // This creates links from multiple move orders to the SAME node
+      if (!currentNode.children.has(moveKey)) {
+        currentNode.children.set(moveKey, targetNode);
       }
 
       // Track transposition paths

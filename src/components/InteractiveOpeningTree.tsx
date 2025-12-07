@@ -46,7 +46,6 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   const [isOffTree, setIsOffTree] = useState(false);
   const [showArrows, setShowArrows] = useState(true);
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
-  const [navigationArrow, setNavigationArrow] = useState<{ from: string; to: string } | null>(null);
   const [userArrows, setUserArrows] = useState<Array<{ from: string; to: string }>>([]);
   const [userCircles, setUserCircles] = useState<string[]>([]);
   const [rightClickStart, setRightClickStart] = useState<string | null>(null);
@@ -193,9 +192,8 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
           const baseOpacity = isScoutedPlayerTurn ? frequency : Math.min(frequency * 0.5, 0.4);
           const opacity = Math.max(0.15, baseOpacity);
           
-          // Darker green for scouted player, red for opponent
-          const baseColor = isScoutedPlayerTurn ? '0, 100, 0' : '220, 38, 38'; // darker green : red
-          const color = `rgba(${baseColor}, ${opacity})`;
+          // Use brand color #646F41 for all arrows
+          const color = `rgba(100, 111, 65, ${opacity})`;
           
           moveArrows.push({
             from: move.from,
@@ -229,10 +227,6 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   }, []);
 
   const handleMoveBack = useCallback(() => {
-    // Hide arrows first for smoother transition
-    setShowArrows(false);
-    setNavigationArrow(null);
-    
     setSelectedPath(prev => {
       if (prev.length === 0) return prev;
       const newPath = prev.slice(0, -1);
@@ -254,29 +248,11 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         setIsOffTree(false);
       }
       
-      // Set navigation arrow after 100ms delay for smooth transition
-      setTimeout(() => {
-        if (newPath.length > 0) {
-          const chess = new Chess();
-          for (let i = 0; i < newPath.length - 1; i++) {
-            chess.move(newPath[i]);
-          }
-          const lastMoveObj = chess.move(newPath[newPath.length - 1]);
-          if (lastMoveObj) {
-            setNavigationArrow({ from: lastMoveObj.from, to: lastMoveObj.to });
-          }
-        }
-        setShowArrows(true);
-      }, 100);
-      
       return newPath;
     });
   }, [node]);
 
   const handleMoveForward = useCallback(() => {
-    setShowArrows(false);
-    setNavigationArrow(null);
-    
     setSelectedPath(prev => {
       // Find current node
       let currentNode = node;
@@ -291,51 +267,14 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         const mostPopular = currentNode.children.reduce((prevChild, curr) => 
           curr.count > prevChild.count ? curr : prevChild
         );
-        const newPath = [...prev, mostPopular.san];
-        
-        // Set navigation arrow after 100ms delay
-        setTimeout(() => {
-          const chess = new Chess();
-          for (let i = 0; i < newPath.length - 1; i++) {
-            chess.move(newPath[i]);
-          }
-          const lastMoveObj = chess.move(newPath[newPath.length - 1]);
-          if (lastMoveObj) {
-            setNavigationArrow({ from: lastMoveObj.from, to: lastMoveObj.to });
-          }
-          setShowArrows(true);
-        }, 100);
-        
-        return newPath;
+        return [...prev, mostPopular.san];
       }
       return prev;
     });
   }, [node]);
 
   const handleJumpToMove = useCallback((moveIndex: number) => {
-    setShowArrows(false);
-    setNavigationArrow(null);
-    
-    setSelectedPath(prev => {
-      const newPath = prev.slice(0, moveIndex);
-      
-      // Set navigation arrow after 100ms delay
-      setTimeout(() => {
-        if (newPath.length > 0) {
-          const chess = new Chess();
-          for (let i = 0; i < newPath.length - 1; i++) {
-            chess.move(newPath[i]);
-          }
-          const lastMoveObj = chess.move(newPath[newPath.length - 1]);
-          if (lastMoveObj) {
-            setNavigationArrow({ from: lastMoveObj.from, to: lastMoveObj.to });
-          }
-        }
-        setShowArrows(true);
-      }, 100);
-      
-      return newPath;
-    });
+    setSelectedPath(prev => prev.slice(0, moveIndex));
   }, []);
 
   // Keyboard navigation
@@ -559,7 +498,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         </div>
 
         {/* Chess Board */}
-        <div className="relative aspect-square w-full max-w-[280px] sm:max-w-[400px] md:max-w-[500px] lg:max-w-[600px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
+        <div className="relative aspect-square w-full max-w-[340px] sm:max-w-[480px] md:max-w-[560px] lg:max-w-[640px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
           <style>{`
             /* Fix dragged piece size and make dragging smoother */
             .piece-417db {
@@ -614,11 +553,11 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               onSquareRightClick={handleSquareRightClick}
               squareStyles={squareStyles}
               calcWidth={({ screenWidth }) => {
-                // Calculate board width based on screen size for responsive sizing
-                if (screenWidth < 640) return Math.min(280, screenWidth - 32);
-                if (screenWidth < 768) return Math.min(400, screenWidth - 32);
-                if (screenWidth < 1024) return Math.min(500, screenWidth - 32);
-                return Math.min(600, screenWidth - 400);
+                // Calculate board width - larger sizes for better visibility
+                if (screenWidth < 640) return Math.min(340, screenWidth - 24);
+                if (screenWidth < 768) return Math.min(480, screenWidth - 24);
+                if (screenWidth < 1024) return Math.min(560, screenWidth - 24);
+                return Math.min(640, screenWidth - 280);
               }}
               boardStyle={{
                 borderRadius: '0.5rem',
@@ -648,7 +587,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
                 >
                   <polygon 
                     points="0 0, 4 2, 0 4" 
-                    fill={arrow.isScoutedPlayer ? "rgb(0, 100, 0)" : "rgb(220, 38, 38)"} 
+                    fill="#646F41"
                     fillOpacity={arrow.opacity}
                   />
                 </marker>
@@ -696,63 +635,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               );
             })}
             
-            {/* Navigation arrow showing last move (green #749C63) */}
-            {navigationArrow && (() => {
-              let fromFile = navigationArrow.from.charCodeAt(0) - 97;
-              let fromRank = 8 - parseInt(navigationArrow.from[1]);
-              let toFile = navigationArrow.to.charCodeAt(0) - 97;
-              let toRank = 8 - parseInt(navigationArrow.to[1]);
-              
-              if (boardOrientation === "black") {
-                fromFile = 7 - fromFile;
-                fromRank = 7 - fromRank;
-                toFile = 7 - toFile;
-                toRank = 7 - toRank;
-              }
-              
-              const x1 = fromFile + 0.5;
-              const y1 = fromRank + 0.5;
-              const x2 = toFile + 0.5;
-              const y2 = toRank + 0.5;
-              
-              const dx = x2 - x1;
-              const dy = y2 - y1;
-              const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 0.25;
-              const x2Shortened = x2 - (dx / length) * shortenBy;
-              const y2Shortened = y2 - (dy / length) * shortenBy;
-              
-              return (
-                <>
-                  <defs>
-                    <marker
-                      id="nav-arrowhead"
-                      markerWidth="4"
-                      markerHeight="4"
-                      refX="2.5"
-                      refY="2"
-                      orient="auto"
-                      markerUnits="strokeWidth"
-                    >
-                      <polygon points="0 0, 4 2, 0 4" fill="#749C63" fillOpacity="0.9" />
-                    </marker>
-                  </defs>
-                  <line
-                    x1={x1}
-                    y1={y1}
-                    x2={x2Shortened}
-                    y2={y2Shortened}
-                    stroke="#749C63"
-                    strokeWidth="0.18"
-                    strokeOpacity="0.9"
-                    strokeLinecap="round"
-                    markerEnd="url(#nav-arrowhead)"
-                  />
-                </>
-              );
-            })()}
-            
-            {/* User-drawn arrows (green #749C63) */}
+            {/* User-drawn arrows (brand green #646F41) */}
             {userArrows.map((arrow, idx) => {
               let fromFile = arrow.from.charCodeAt(0) - 97;
               let fromRank = 8 - parseInt(arrow.from[1]);
@@ -790,7 +673,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
                       orient="auto"
                       markerUnits="strokeWidth"
                     >
-                      <polygon points="0 0, 4 2, 0 4" fill="#749C63" fillOpacity="0.8" />
+                      <polygon points="0 0, 4 2, 0 4" fill="#646F41" fillOpacity="0.8" />
                     </marker>
                   </defs>
                   <line
@@ -798,7 +681,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
                     y1={y1}
                     x2={x2Shortened}
                     y2={y2Shortened}
-                    stroke="#749C63"
+                    stroke="#646F41"
                     strokeWidth="0.18"
                     strokeOpacity="0.8"
                     strokeLinecap="round"
@@ -808,7 +691,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
               );
             })}
             
-            {/* User-drawn circles (green #749C63) */}
+            {/* User-drawn circles (brand green #646F41) */}
             {userCircles.map(square => {
               let file = square.charCodeAt(0) - 97;
               let rank = 8 - parseInt(square[1]);
@@ -825,7 +708,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
                   cy={rank + 0.5}
                   r={0.4}
                   fill="none"
-                  stroke="#749C63"
+                  stroke="#646F41"
                   strokeWidth="0.08"
                   strokeOpacity="0.8"
                 />
@@ -835,7 +718,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
         </div>
         
         {/* Opening name and transpositions below board */}
-        <div className="text-center max-w-[280px] sm:max-w-[400px] md:max-w-[500px] lg:max-w-[600px]">
+        <div className="text-center max-w-[340px] sm:max-w-[480px] md:max-w-[560px] lg:max-w-[640px]">
           <div className="text-xs sm:text-sm text-muted-foreground">
             {currentOpening}
           </div>
