@@ -58,7 +58,20 @@ export async function fetchLichessGames(
   if (timeControls.length > 1) {
     const allGames: GameData[] = [];
     const seenGameIds = new Set<string>(); // Track unique games to prevent duplicates
-    let totalCount = 0;
+    let cumulativeCount = 0; // Track total games across all time controls
+    
+    // Helper function to extract Lichess game ID from PGN
+    const extractGameId = (game: GameData): string => {
+      // Try to extract game ID from [Site "https://lichess.org/GAMEID"]
+      const siteMatch = game.pgn?.match(/\[Site "https:\/\/lichess\.org\/([^"]+)"\]/);
+      if (siteMatch?.[1]) {
+        return `lichess_${siteMatch[1]}`;
+      }
+      // Fallback: use more unique key
+      return `${game.white}-${game.black}-${game.timeControl}-${game.pgn?.substring(0, 200)}`;
+    };
+    
+    console.log(`[FETCH-MULTI] Starting multi-TC fetch for ${username}, TCs: ${timeControls.join(', ')}`);
     
     // SEQUENTIAL fetching - await each request before starting the next
     for (const tc of timeControls) {
@@ -67,26 +80,33 @@ export async function fetchLichessGames(
         throw new DOMException('Request aborted', 'AbortError');
       }
       
+      const tcStartCount = cumulativeCount;
+      let tcGameCount = 0;
+      
       try {
         const tcGames = await fetchLichessGames(
           username,
           { ...options, timeControls: [tc] },
           (count) => {
-            totalCount = allGames.length + count;
-            if (onProgress) onProgress(totalCount);
+            // Report cumulative total: games from previous TCs + current TC progress
+            tcGameCount = count;
+            const totalSoFar = cumulativeCount + count;
+            console.log(`[FETCH-MULTI] TC ${tc}: ${count} games, cumulative total: ${totalSoFar}`);
+            if (onProgress) onProgress(totalSoFar);
           },
           (batch) => {
             // Deduplicate games before passing to batch callback
             const uniqueBatch = batch.filter(game => {
-              // Create a unique ID from game data (using PGN hash or first line of PGN)
-              const gameId = `${game.white}-${game.black}-${game.pgn?.substring(0, 100)}`;
+              const gameId = extractGameId(game);
               if (seenGameIds.has(gameId)) {
+                console.log(`[FETCH-MULTI] Duplicate game skipped: ${gameId.substring(0, 30)}...`);
                 return false;
               }
               seenGameIds.add(gameId);
               return true;
             });
             if (uniqueBatch.length > 0 && onBatch) {
+              console.log(`[BATCH] Sending batch of ${uniqueBatch.length} unique games to analyzer`);
               onBatch(uniqueBatch);
             }
           },
@@ -95,14 +115,19 @@ export async function fetchLichessGames(
         
         // Deduplicate games before adding to allGames
         const uniqueGames = tcGames.filter(game => {
-          const gameId = `${game.white}-${game.black}-${game.pgn?.substring(0, 100)}`;
+          const gameId = extractGameId(game);
           if (seenGameIds.has(gameId)) {
             return false;
           }
           seenGameIds.add(gameId);
           return true;
         });
+        
+        // Update cumulative count based on unique games actually added
+        cumulativeCount += uniqueGames.length;
         allGames.push(...uniqueGames);
+        
+        console.log(`[FETCH-MULTI] TC ${tc} complete: ${tcGames.length} fetched, ${uniqueGames.length} unique added, cumulative: ${cumulativeCount}`);
         
         // Add delay between time controls only if games were found (to respect rate limits)
         if (timeControls.indexOf(tc) < timeControls.length - 1 && tcGames.length > 0) {
@@ -116,13 +141,14 @@ export async function fetchLichessGames(
         
         // If we hit rate limit, stop and return what we have
         if (error.message.includes('429') || error.message.includes('rate limit')) {
-          console.warn(`Rate limit hit at time control ${tc}, returning ${allGames.length} games`);
+          console.warn(`[FETCH-MULTI] Rate limit hit at time control ${tc}, returning ${allGames.length} games`);
           break;
         }
         throw error;
       }
     }
     
+    console.log(`[FETCH-MULTI] All TCs complete. Total unique games: ${allGames.length}`);
     return allGames;
   }
 

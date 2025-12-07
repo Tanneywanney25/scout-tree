@@ -300,9 +300,10 @@ const Scout = () => {
       // Record usage
       await recordUsage();
 
-      // Mark analysis as complete and store accurate game count from ref (not async state)
-      const finalCount = progressRef.current || analysis.totalGames;
-      console.log(`[SCOUT] Final count: progressRef=${progressRef.current}, analysis.totalGames=${analysis.totalGames}, using=${finalCount}`);
+      // Mark analysis as complete - use analysis.totalGames as the authoritative count
+      // since it's incremented for every game actually added to the opening tree
+      const finalCount = analysis.totalGames;
+      console.log(`[SCOUT] Final count: progressRef=${progressRef.current}, analysis.totalGames=${analysis.totalGames}, using analysis.totalGames=${finalCount}`);
       setFinalGameCount(finalCount);
       setIsAnalysisComplete(true);
       
@@ -316,7 +317,9 @@ const Scout = () => {
       
       if (error.name === 'AbortError') {
         if (currentAnalysis && currentAnalysis.totalGames > 0) {
-          const stoppedCount = progressRef.current || currentAnalysis.totalGames;
+          // Use analysis.totalGames as authoritative count
+          const stoppedCount = currentAnalysis.totalGames;
+          console.log(`[SCOUT] Analysis stopped. progressRef=${progressRef.current}, analysis.totalGames=${stoppedCount}`);
           setFinalGameCount(stoppedCount);
           setIsAnalysisComplete(true);
           toast.success(`Analysis stopped. ${stoppedCount} games analyzed.`);
