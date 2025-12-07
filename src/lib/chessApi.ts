@@ -82,6 +82,8 @@ export async function fetchLichessGames(
     console.log(`[FETCH-MULTI] Filters: mode=${mode}, dateFrom=${dateFrom?.toISOString()}, dateTo=${dateTo?.toISOString()}`);
     console.log(`[FETCH-MULTI] Rating filter: ${ratingMin ?? 'any'}-${ratingMax ?? 'any'}, color=${playerColor ?? 'any'}`);
     
+    let lastReportedCount = 0; // Track highest count ever reported - NEVER go backwards
+    
     // SEQUENTIAL fetching - await each request before starting the next
     for (const tc of timeControls) {
       // Check if aborted
@@ -100,8 +102,14 @@ export async function fetchLichessGames(
             // Report cumulative total: games from previous TCs + current TC progress
             tcGameCount = count;
             const totalSoFar = cumulativeCount + count;
-            console.log(`[FETCH-MULTI] TC ${tc}: ${count} games, cumulative total: ${totalSoFar}`);
-            if (onProgress) onProgress(totalSoFar);
+            // NEVER report a lower count than previously reported
+            if (totalSoFar >= lastReportedCount) {
+              lastReportedCount = totalSoFar;
+              console.log(`[FETCH-MULTI] TC ${tc}: ${count} games, cumulative total: ${totalSoFar}`);
+              if (onProgress) onProgress(totalSoFar);
+            } else {
+              console.warn(`[FETCH-MULTI] Skipping lower count: ${totalSoFar} < ${lastReportedCount}`);
+            }
           },
           (batch) => {
             // Deduplicate games before passing to batch callback

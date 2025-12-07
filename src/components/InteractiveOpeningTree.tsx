@@ -843,21 +843,14 @@ export const InteractiveOpeningTree = ({
               const distance = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
               const arrowheadSize = distance < 120 ? 36 : 60;
               
-              // Shorten line by arrowhead size so tip lands exactly at target center
-              const dx = x2 - x1;
-              const dy = y2 - y1;
-              const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = arrowheadSize;
-              const x2Shortened = x2 - (dx / length) * shortenBy;
-              const y2Shortened = y2 - (dy / length) * shortenBy;
-              
+              // Don't shorten line - let marker refX handle tip placement at line end
               return (
                 <line
                   key={idx}
                   x1={x1}
                   y1={y1}
-                  x2={x2Shortened}
-                  y2={y2Shortened}
+                  x2={x2}
+                  y2={y2}
                   stroke={arrow.color}
                   strokeWidth="16"
                   strokeLinecap="round"
@@ -892,13 +885,7 @@ export const InteractiveOpeningTree = ({
               const arrowheadSize = distance < 120 ? 36 : 60;
               const halfHead = arrowheadSize / 2;
               
-              const dx = x2 - x1;
-              const dy = y2 - y1;
-              const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = arrowheadSize;
-              const x2Shortened = x2 - (dx / length) * shortenBy;
-              const y2Shortened = y2 - (dy / length) * shortenBy;
-              
+              // Don't shorten line - let marker refX handle tip placement
               return (
                 <g key={`user-arrow-${idx}`}>
                   <defs>
@@ -917,8 +904,8 @@ export const InteractiveOpeningTree = ({
                   <line
                     x1={x1}
                     y1={y1}
-                    x2={x2Shortened}
-                    y2={y2Shortened}
+                    x2={x2}
+                    y2={y2}
                     stroke="#646F41"
                     strokeWidth="16"
                     strokeOpacity="0.8"
