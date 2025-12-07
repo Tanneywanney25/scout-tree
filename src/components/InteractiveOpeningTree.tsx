@@ -90,6 +90,67 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     };
   }, [fenToNodes, node, selectedPath]);
 
+  // Get merged children for current position (handles transpositions - shows UNION of all children)
+  const mergedChildren = useMemo(() => {
+    // Navigate to current node
+    let currentNode = node;
+    for (const san of selectedPath) {
+      const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
+      if (!child) return [];
+      currentNode = child;
+    }
+    
+    if (!currentNode.children) {
+      return [];
+    }
+    
+    // If no FEN or no transpositions, return normal children
+    if (!currentNode.fen) {
+      return currentNode.children;
+    }
+    
+    const allNodes = fenToNodes.get(currentNode.fen);
+    if (!allNodes || allNodes.length <= 1) {
+      return currentNode.children; // No transposition, use normal children
+    }
+    
+    // Collect ALL children from ALL transposed nodes
+    const mergedMap = new Map<string, SerializedOpeningNode>();
+    
+    for (const n of allNodes) {
+      for (const child of n.children || []) {
+        if (!mergedMap.has(child.san)) {
+          // First time seeing this move - clone it
+          mergedMap.set(child.san, {
+            ...child,
+            count: 0,
+            wins: 0,
+            draws: 0,
+            losses: 0,
+          });
+        }
+        
+        // Aggregate stats
+        const merged = mergedMap.get(child.san)!;
+        merged.count += child.count;
+        merged.wins += child.wins;
+        merged.draws += child.draws;
+        merged.losses += child.losses;
+      }
+    }
+    
+    // Recalculate win rates and return as array
+    const result: SerializedOpeningNode[] = [];
+    for (const child of mergedMap.values()) {
+      child.winRate = child.count > 0 
+        ? (child.wins + child.draws * 0.5) / child.count 
+        : 0;
+      result.push(child);
+    }
+    
+    return result;
+  }, [node, selectedPath, fenToNodes]);
+
   // Calculate the current position based on selected moves
   const currentPosition = useMemo(() => {
     const chess = new Chess();
@@ -183,32 +244,20 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     return styles;
   }, [possibleMoves, currentPosition, lastMove, selectedSquare]);
 
-  // Find current node in tree and calculate arrows
+  // Find current node in tree and calculate arrows using merged children (handles transpositions)
   const arrows = useMemo(() => {
     // Don't show arrows if we're off the tree or if they're temporarily hidden
     if (isOffTree || !showArrows) {
       return [];
     }
     
-    let currentNode = node;
-    
-    // Navigate to current position in tree
-    for (const san of selectedPath) {
-      const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
-      if (!child) break;
-      currentNode = child;
-    }
-
-    if (!currentNode.children || currentNode.children.length === 0) {
+    // Use merged children which contains union of all children from transposed positions
+    if (!mergedChildren || mergedChildren.length === 0) {
       return [];
     }
 
-    // Sort children by frequency to find variations
-    const sortedChildren = [...currentNode.children].sort((a, b) => b.count - a.count);
-    
-    if (sortedChildren.length === 0) {
-      return [];
-    }
+    // Sort merged children by frequency to find variations
+    const sortedChildren = [...mergedChildren].sort((a, b) => b.count - a.count);
     
     // Find the most common move's count for opacity scaling
     const maxCount = sortedChildren[0].count;
@@ -251,7 +300,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     });
     
     return moveArrows;
-  }, [node, selectedPath, currentPosition, playerColor, isOffTree]);
+  }, [mergedChildren, selectedPath, currentPosition, playerColor, isOffTree, showArrows]);
 
   const handleMoveClick = useCallback((movePath: string[]) => {
     setSelectedPath(movePath);
