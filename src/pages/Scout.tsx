@@ -216,7 +216,8 @@ const Scout = () => {
               console.error('Error processing game batch:', error);
               toast.error("Error processing game batch");
             }
-          }
+          },
+          abortControllerRef.current?.signal
         );
         toast.dismiss(progressToast);
       }
