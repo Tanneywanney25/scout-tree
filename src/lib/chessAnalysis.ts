@@ -58,6 +58,7 @@ export interface SerializedAnalysisResult {
     count: number;
   }>;
   playerColor: "white" | "black" | "both";
+  initialSelectedPath?: string[]; // Preserved navigation state
 }
 
 export function createEmptyAnalysis(playerColor: "white" | "black" | "both" = "both"): AnalysisResult {

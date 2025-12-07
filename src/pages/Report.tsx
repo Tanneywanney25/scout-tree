@@ -12,6 +12,7 @@ const Report = () => {
   const { id } = useParams();
   const [analysis, setAnalysis] = useState<SerializedAnalysisResult | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [initialPath, setInitialPath] = useState<string[]>([]);
 
   useEffect(() => {
     const storedAnalysis = sessionStorage.getItem('scoutAnalysis');
@@ -26,6 +27,12 @@ const Report = () => {
         
         console.log('[REPORT] Loaded analysis from sessionStorage:', parsed.totalGames, 'games');
         setAnalysis(parsed);
+        
+        // Preserve the navigation state if it was passed
+        if (parsed.initialSelectedPath && Array.isArray(parsed.initialSelectedPath)) {
+          setInitialPath(parsed.initialSelectedPath);
+        }
+        
         sessionStorage.removeItem('scoutAnalysis'); // Clean up after use
       } catch (e) {
         console.error('Failed to parse analysis:', e);
@@ -155,6 +162,7 @@ const Report = () => {
                   node={analysis.openingTree} 
                   maxDepth={15}
                   playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
+                  initialSelectedPath={initialPath}
                 />
               </ErrorBoundary>
             ) : (
