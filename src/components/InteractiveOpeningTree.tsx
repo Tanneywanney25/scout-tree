@@ -678,35 +678,59 @@ export const InteractiveOpeningTree = ({
             [data-piece="bQ"] img {
               filter: none !important;
             }
-            /* Disable ALL hover highlighting on squares - remove black/yellow backgrounds */
-            .square-55d63:hover {
+            
+            /* ============================================= */
+            /* CRITICAL: Remove ALL hover highlighting completely */
+            /* ============================================= */
+            .square-55d63:hover,
+            div[data-squareid]:hover,
+            [class*="square"]:hover {
               background-color: inherit !important;
               background: inherit !important;
+              box-shadow: none !important;
             }
-            div[data-squareid]:hover {
-              background-color: inherit !important;
-              background: inherit !important;
+            
+            /* ============================================= */
+            /* CRITICAL: Remove ALL yellow drag highlighting */
+            /* ============================================= */
+            .square.dragging,
+            .square.drag-over,
+            .square[data-dragging],
+            .square[data-dragging='true'],
+            div[data-squareid].dragging,
+            div[data-squareid].drag-over,
+            [class*="drag-square"],
+            [class*="drop-target"],
+            [class*="drag-over"],
+            [class*="dragging"],
+            [data-testid*="drag"],
+            [data-testid*="drop"] {
+              background-color: transparent !important;
+              background: transparent !important;
+              box-shadow: none !important;
+              border: none !important;
+              outline: none !important;
             }
-            /* Remove any yellow/drag hover effects from chessboardjsx */
+            
+            /* Remove chessboardjsx specific highlight classes */
             .hover-highlight,
             .highlight-square,
             [class*="highlight"] {
               display: none !important;
               background: none !important;
             }
-            /* Remove ALL drag-related styling - yellow squares */
-            .square.dragging,
-            .square.drag-over,
-            [class*="drag"],
-            div[data-squareid].dragging,
-            div[data-squareid].drag-over {
-              background: none !important;
-              box-shadow: none !important;
-              border: none !important;
-            }
-            /* Prevent any background changes on any interaction */
-            div[data-squareid] {
+            
+            /* Disable ALL transitions on squares to prevent flash effects */
+            div[data-squareid],
+            .square-55d63,
+            [class*="square"] {
               transition: none !important;
+            }
+            
+            /* Override any inline styles that might be added during drag */
+            div[data-squareid][style*="background"],
+            .square-55d63[style*="background"] {
+              background-color: inherit !important;
             }
           `}</style>
           <div 
