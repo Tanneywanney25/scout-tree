@@ -93,6 +93,7 @@ export async function fetchLichessGames(
       
       const tcStartCount = cumulativeCount;
       let tcGameCount = 0;
+      let tcUniqueGamesCount = 0; // Track unique games added in THIS time control
       
       try {
         const tcGames = await fetchLichessGames(
@@ -112,7 +113,7 @@ export async function fetchLichessGames(
             }
           },
           (batch) => {
-            // Deduplicate games before passing to batch callback
+            // Deduplicate games and add to allGames HERE (single deduplication point)
             const uniqueBatch = batch.filter(game => {
               const gameId = extractGameId(game);
               if (seenGameIds.has(gameId)) {
@@ -122,29 +123,23 @@ export async function fetchLichessGames(
               seenGameIds.add(gameId);
               return true;
             });
-            if (uniqueBatch.length > 0 && onBatch) {
-              console.log(`[BATCH] Sending batch of ${uniqueBatch.length} unique games to analyzer`);
-              onBatch(uniqueBatch);
+            if (uniqueBatch.length > 0) {
+              // Add to allGames here - this is the ONLY place games are added
+              allGames.push(...uniqueBatch);
+              tcUniqueGamesCount += uniqueBatch.length;
+              console.log(`[BATCH] Added ${uniqueBatch.length} unique games, TC total: ${tcUniqueGamesCount}`);
+              if (onBatch) {
+                onBatch(uniqueBatch);
+              }
             }
           },
           signal
         );
         
-        // Deduplicate games before adding to allGames
-        const uniqueGames = tcGames.filter(game => {
-          const gameId = extractGameId(game);
-          if (seenGameIds.has(gameId)) {
-            return false;
-          }
-          seenGameIds.add(gameId);
-          return true;
-        });
+        // Update cumulative count AFTER TC completes using actual unique count
+        cumulativeCount += tcUniqueGamesCount;
         
-        // Update cumulative count based on unique games actually added
-        cumulativeCount += uniqueGames.length;
-        allGames.push(...uniqueGames);
-        
-        console.log(`[FETCH-MULTI] TC ${tc} complete: ${tcGames.length} fetched, ${uniqueGames.length} unique added, cumulative: ${cumulativeCount}`);
+        console.log(`[FETCH-MULTI] TC ${tc} complete: ${tcGames.length} fetched, ${tcUniqueGamesCount} unique added, cumulative: ${cumulativeCount}`);
         
         // Add delay between time controls only if games were found (to respect rate limits)
         if (timeControls.indexOf(tc) < timeControls.length - 1 && tcGames.length > 0) {
