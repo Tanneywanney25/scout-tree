@@ -271,18 +271,26 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
     const chess = new Chess(currentPosition);
     const moveArrows: MoveArrow[] = [];
     
-    sortedChildren.forEach((child: SerializedOpeningNode) => {
+    sortedChildren.forEach((child: SerializedOpeningNode, index: number) => {
       try {
         const move = chess.move(child.san);
         if (move) {
-          // Calculate opacity: most common = 1.0, scale down to 0.2 minimum for rare moves
+          // Calculate opacity based on frequency relative to top move
           const frequency = child.count / maxCount;
-          // For opponent moves, make them all more transparent (max 0.4)
-          const baseOpacity = isScoutedPlayerTurn ? frequency : Math.min(frequency * 0.5, 0.4);
-          const opacity = Math.max(0.15, baseOpacity);
+          let opacity: number;
+          let color: string;
           
-          // Use brand color #646F41 for all arrows
-          const color = `rgba(100, 111, 65, ${opacity})`;
+          if (isScoutedPlayerTurn) {
+            // Scouted player: green #646F41
+            // Top move = 1.0 opacity, others scale from 0.4 to 0.8
+            opacity = index === 0 ? 1.0 : 0.4 + frequency * 0.4;
+            color = `rgba(100, 111, 65, ${opacity})`;
+          } else {
+            // Opponent: red rgb(220, 38, 38)
+            // Top move = 1.0 opacity, others scale from 0.4 to 0.8
+            opacity = index === 0 ? 1.0 : 0.4 + frequency * 0.4;
+            color = `rgba(220, 38, 38, ${opacity})`;
+          }
           
           moveArrows.push({
             from: move.from,
@@ -667,7 +675,7 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
                 >
                   <polygon 
                     points="0 0, 4 2, 0 4" 
-                    fill="#646F41"
+                    fill={arrow.isScoutedPlayer ? "#646F41" : "#dc2626"}
                     fillOpacity={arrow.opacity}
                   />
                 </marker>
