@@ -772,24 +772,50 @@ export const InteractiveOpeningTree = ({
             style={{ width: '100%', height: '100%' }}
           >
             <defs>
-              {arrows.map((arrow, idx) => (
-                <marker
-                  key={`marker-${idx}`}
-                  id={`arrowhead-${idx}`}
-                  markerWidth="60"
-                  markerHeight="60"
-                  refX="60"
-                  refY="30"
-                  orient="auto"
-                  markerUnits="userSpaceOnUse"
-                >
-                  <polygon 
-                    points="0 0, 60 30, 0 60" 
-                    fill={arrow.isScoutedPlayer ? "#646F41" : "#900009"}
-                    fillOpacity={arrow.opacity}
-                  />
-                </marker>
-              ))}
+              {arrows.map((arrow, idx) => {
+                // Calculate distance to determine arrowhead size
+                let fromFile = arrow.from.charCodeAt(0) - 97;
+                let fromRank = 8 - parseInt(arrow.from[1]);
+                let toFile = arrow.to.charCodeAt(0) - 97;
+                let toRank = 8 - parseInt(arrow.to[1]);
+                
+                if (boardOrientation === "black") {
+                  fromFile = 7 - fromFile;
+                  fromRank = 7 - fromRank;
+                  toFile = 7 - toFile;
+                  toRank = 7 - toRank;
+                }
+                
+                const squareSize = 100;
+                const x1 = fromFile * squareSize + squareSize / 2;
+                const y1 = fromRank * squareSize + squareSize / 2;
+                const x2 = toFile * squareSize + squareSize / 2;
+                const y2 = toRank * squareSize + squareSize / 2;
+                const distance = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+                
+                // Use smaller arrowhead for short moves (1 square = 100px)
+                const arrowheadSize = distance < 120 ? 36 : 60;
+                const halfHead = arrowheadSize / 2;
+                
+                return (
+                  <marker
+                    key={`marker-${idx}`}
+                    id={`arrowhead-${idx}`}
+                    markerWidth={arrowheadSize}
+                    markerHeight={arrowheadSize}
+                    refX={arrowheadSize}
+                    refY={halfHead}
+                    orient="auto"
+                    markerUnits="userSpaceOnUse"
+                  >
+                    <polygon 
+                      points={`0 0, ${arrowheadSize} ${halfHead}, 0 ${arrowheadSize}`}
+                      fill={arrow.isScoutedPlayer ? "#646F41" : "#900009"}
+                      fillOpacity={arrow.opacity}
+                    />
+                  </marker>
+                );
+              })}
             </defs>
             {arrows.map((arrow, idx) => {
               // Calculate file (a-h → 0-7) and rank (1-8 → visual row from top)
@@ -813,11 +839,15 @@ export const InteractiveOpeningTree = ({
               const x2 = toFile * squareSize + squareSize / 2;
               const y2 = toRank * squareSize + squareSize / 2;
               
-              // Shorten arrow end to prevent overlap with arrowhead/piece
+              // Calculate distance for dynamic arrowhead sizing
+              const distance = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+              const arrowheadSize = distance < 120 ? 36 : 60;
+              
+              // Shorten line by arrowhead size so tip lands exactly at target center
               const dx = x2 - x1;
               const dy = y2 - y1;
               const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 0; // No shortening - refX=60 places tip exactly at target center
+              const shortenBy = arrowheadSize;
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
@@ -829,7 +859,7 @@ export const InteractiveOpeningTree = ({
                   x2={x2Shortened}
                   y2={y2Shortened}
                   stroke={arrow.color}
-                  strokeWidth="20"
+                  strokeWidth="16"
                   strokeLinecap="round"
                   markerEnd={`url(#arrowhead-${idx})`}
                 />
@@ -857,10 +887,15 @@ export const InteractiveOpeningTree = ({
               const x2 = toFile * squareSize + squareSize / 2;
               const y2 = toRank * squareSize + squareSize / 2;
               
+              // Calculate distance for dynamic arrowhead sizing
+              const distance = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+              const arrowheadSize = distance < 120 ? 36 : 60;
+              const halfHead = arrowheadSize / 2;
+              
               const dx = x2 - x1;
               const dy = y2 - y1;
               const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 0;
+              const shortenBy = arrowheadSize;
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
@@ -869,14 +904,14 @@ export const InteractiveOpeningTree = ({
                   <defs>
                     <marker
                       id={`user-arrowhead-${idx}`}
-                      markerWidth="60"
-                      markerHeight="60"
-                      refX="60"
-                      refY="30"
+                      markerWidth={arrowheadSize}
+                      markerHeight={arrowheadSize}
+                      refX={arrowheadSize}
+                      refY={halfHead}
                       orient="auto"
                       markerUnits="userSpaceOnUse"
                     >
-                      <polygon points="0 0, 60 30, 0 60" fill="#646F41" fillOpacity="0.8" />
+                      <polygon points={`0 0, ${arrowheadSize} ${halfHead}, 0 ${arrowheadSize}`} fill="#646F41" fillOpacity="0.8" />
                     </marker>
                   </defs>
                   <line
@@ -885,7 +920,7 @@ export const InteractiveOpeningTree = ({
                     x2={x2Shortened}
                     y2={y2Shortened}
                     stroke="#646F41"
-                    strokeWidth="20"
+                    strokeWidth="16"
                     strokeOpacity="0.8"
                     strokeLinecap="round"
                     markerEnd={`url(#user-arrowhead-${idx})`}
