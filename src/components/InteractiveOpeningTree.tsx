@@ -44,6 +44,52 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
   const [userCircles, setUserCircles] = useState<string[]>([]);
   const [rightClickStart, setRightClickStart] = useState<string | null>(null);
 
+  // Build FEN-to-nodes lookup map for transposition detection (built AFTER tree is complete)
+  const fenToNodes = useMemo(() => {
+    const map = new Map<string, SerializedOpeningNode[]>();
+    function traverse(n: SerializedOpeningNode) {
+      if (n.fen) {
+        if (!map.has(n.fen)) map.set(n.fen, []);
+        map.get(n.fen)!.push(n);
+      }
+      n.children?.forEach(c => traverse(c));
+    }
+    traverse(node);
+    return map;
+  }, [node]);
+
+  // Calculate aggregated stats for current position (transposition handling)
+  const aggregatedStats = useMemo(() => {
+    // Navigate to current node
+    let currentNode = node;
+    for (const san of selectedPath) {
+      const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
+      if (!child) return null;
+      currentNode = child;
+    }
+    
+    if (!currentNode.fen) return null;
+    
+    const allNodes = fenToNodes.get(currentNode.fen) || [];
+    if (allNodes.length <= 1) return null; // No transposition
+    
+    // Aggregate stats across all paths to this position
+    const totals = allNodes.reduce((acc, n) => ({
+      count: acc.count + n.count,
+      wins: acc.wins + n.wins,
+      draws: acc.draws + n.draws,
+      losses: acc.losses + n.losses,
+    }), { count: 0, wins: 0, draws: 0, losses: 0 });
+    
+    return {
+      pathCount: allNodes.length,
+      totalGames: totals.count,
+      winRate: totals.count > 0 
+        ? (totals.wins + totals.draws * 0.5) / totals.count 
+        : 0,
+    };
+  }, [fenToNodes, node, selectedPath]);
+
   // Calculate the current position based on selected moves
   const currentPosition = useMemo(() => {
     const chess = new Chess();
@@ -707,6 +753,17 @@ export const InteractiveOpeningTree = ({ node, maxDepth = 10, playerColor }: Int
           <div className="text-xs sm:text-sm text-muted-foreground">
             {currentOpening}
           </div>
+          {/* Transposition indicator with aggregated stats */}
+          {aggregatedStats && (
+            <div className="text-xs text-muted-foreground mt-1 flex items-center justify-center gap-2">
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-accent/50 text-accent-foreground">
+                ⇄ {aggregatedStats.pathCount} paths
+              </span>
+              <span>{aggregatedStats.totalGames} games total</span>
+              <span>·</span>
+              <span>{(aggregatedStats.winRate * 100).toFixed(0)}% win rate</span>
+            </div>
+          )}
         </div>
       </div>
 

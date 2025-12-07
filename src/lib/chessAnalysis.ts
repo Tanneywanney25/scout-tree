@@ -29,6 +29,21 @@ export interface AnalysisResult {
   playerColor: "white" | "black" | "both";
 }
 
+// Build a FEN-to-nodes lookup map for transposition detection (post-processing step)
+export function buildFenToNodesMap(
+  node: OpeningNode, 
+  map = new Map<string, OpeningNode[]>()
+): Map<string, OpeningNode[]> {
+  if (node.fen) {
+    if (!map.has(node.fen)) map.set(node.fen, []);
+    map.get(node.fen)!.push(node);
+  }
+  for (const child of node.children.values()) {
+    buildFenToNodesMap(child, map);
+  }
+  return map;
+}
+
 export interface SerializedAnalysisResult {
   totalGames: number;
   openingTree: any; // Serialized tree structure
