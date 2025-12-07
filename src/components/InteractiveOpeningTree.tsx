@@ -659,7 +659,6 @@ export const InteractiveOpeningTree = ({
             }
             .piece-417db:hover {
               transform: none !important;
-              background: none !important;
             }
             .piece-417db:active {
               cursor: grabbing;
@@ -680,33 +679,24 @@ export const InteractiveOpeningTree = ({
             }
             
             /* ============================================= */
-            /* CRITICAL: Remove ALL hover highlighting completely */
+            /* Remove hover highlighting on squares */
+            /* Use specific selectors to not affect base board colors */
             /* ============================================= */
-            .square-55d63:hover,
-            div[data-squareid]:hover,
-            [class*="square"]:hover {
-              background-color: inherit !important;
-              background: inherit !important;
+            .square-55d63:hover {
+              box-shadow: none !important;
+            }
+            div[data-squareid]:hover {
               box-shadow: none !important;
             }
             
             /* ============================================= */
-            /* CRITICAL: Remove ALL yellow drag highlighting */
+            /* Remove yellow drag highlighting */
+            /* Only target drag-specific classes, not base squares */
             /* ============================================= */
-            .square.dragging,
-            .square.drag-over,
-            .square[data-dragging],
-            .square[data-dragging='true'],
+            .square-55d63.dragging,
+            .square-55d63.drag-over,
             div[data-squareid].dragging,
-            div[data-squareid].drag-over,
-            [class*="drag-square"],
-            [class*="drop-target"],
-            [class*="drag-over"],
-            [class*="dragging"],
-            [data-testid*="drag"],
-            [data-testid*="drop"] {
-              background-color: transparent !important;
-              background: transparent !important;
+            div[data-squareid].drag-over {
               box-shadow: none !important;
               border: none !important;
               outline: none !important;
@@ -714,23 +704,14 @@ export const InteractiveOpeningTree = ({
             
             /* Remove chessboardjsx specific highlight classes */
             .hover-highlight,
-            .highlight-square,
-            [class*="highlight"] {
+            .highlight-square {
               display: none !important;
-              background: none !important;
             }
             
-            /* Disable ALL transitions on squares to prevent flash effects */
+            /* Disable transitions on squares to prevent flash effects */
             div[data-squareid],
-            .square-55d63,
-            [class*="square"] {
+            .square-55d63 {
               transition: none !important;
-            }
-            
-            /* Override any inline styles that might be added during drag */
-            div[data-squareid][style*="background"],
-            .square-55d63[style*="background"] {
-              background-color: inherit !important;
             }
           `}</style>
           <div 
@@ -793,15 +774,15 @@ export const InteractiveOpeningTree = ({
                 <marker
                   key={`marker-${idx}`}
                   id={`arrowhead-${idx}`}
-                  markerWidth="24"
-                  markerHeight="24"
-                  refX="20"
-                  refY="12"
+                  markerWidth="32"
+                  markerHeight="32"
+                  refX="28"
+                  refY="16"
                   orient="auto"
                   markerUnits="userSpaceOnUse"
                 >
                   <polygon 
-                    points="0 0, 24 12, 0 24" 
+                    points="0 0, 32 16, 0 32" 
                     fill={arrow.isScoutedPlayer ? "#646F41" : "#900009"}
                     fillOpacity={arrow.opacity}
                   />
@@ -877,7 +858,7 @@ export const InteractiveOpeningTree = ({
               const dx = x2 - x1;
               const dy = y2 - y1;
               const length = Math.sqrt(dx * dx + dy * dy);
-              const shortenBy = 25;
+              const shortenBy = 30;
               const x2Shortened = x2 - (dx / length) * shortenBy;
               const y2Shortened = y2 - (dy / length) * shortenBy;
               
@@ -886,14 +867,14 @@ export const InteractiveOpeningTree = ({
                   <defs>
                     <marker
                       id={`user-arrowhead-${idx}`}
-                      markerWidth="24"
-                      markerHeight="24"
-                      refX="20"
-                      refY="12"
+                      markerWidth="32"
+                      markerHeight="32"
+                      refX="28"
+                      refY="16"
                       orient="auto"
                       markerUnits="userSpaceOnUse"
                     >
-                      <polygon points="0 0, 24 12, 0 24" fill="#646F41" fillOpacity="0.8" />
+                      <polygon points="0 0, 32 16, 0 32" fill="#646F41" fillOpacity="0.8" />
                     </marker>
                   </defs>
                   <line
