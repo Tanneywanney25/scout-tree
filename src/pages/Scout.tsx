@@ -24,7 +24,7 @@ interface FilterSnapshot {
   opponentName: string;
 }
 import { toast } from "sonner";
-import { fetchLichessGames, fetchChessComGames } from "@/lib/chessApi";
+import { fetchLichessGames, fetchChessComGames, type GameData } from "@/lib/chessApi";
 import { analyzeGames, serializeOpeningTree, createEmptyAnalysis, analyzeGamesIncremental, type AnalysisResult } from "@/lib/chessAnalysis";
 import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -269,37 +269,54 @@ const Scout = () => {
 
       toast.loading("Fetching games...", { id: progressToast, duration: Infinity });
       
+      // Queue-based batch processing to prevent blocking stream reading
+      const batchQueue: GameData[][] = [];
+      let processingBatches = false;
+      let lastAnalysisUpdate = 0;
+      
+      const processBatches = async () => {
+        if (processingBatches) return;
+        processingBatches = true;
+        while (batchQueue.length > 0) {
+          const batch = batchQueue.shift()!;
+          try {
+            analysis = await analyzeGamesIncremental(analysis, batch, username);
+            // Throttle state updates to max 5 per second
+            const now = performance.now();
+            if (now - lastAnalysisUpdate > 200) {
+              setCurrentAnalysis(analysis);
+              lastAnalysisUpdate = now;
+            }
+          } catch (error) {
+            console.error('Error processing game batch:', error);
+          }
+        }
+        processingBatches = false;
+      };
+      
       if (actualPlatform === "lichess") {
         await fetchLichessGames(
           username,
           fetchOptions,
           (count) => {
-            progressRef.current = count; // Update ref imperatively
+            progressRef.current = count;
             setProgress(count);
             toast.loading(`Analyzing ${count} games...`, { id: progressToast, duration: Infinity });
             if (count > 2000 && !warning) {
               setWarning("Large dataset - processing all games...");
             }
           },
-          (() => {
-            let lastAnalysisUpdate = 0;
-            return async (gameBatch) => {
-              try {
-                analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
-                // Throttle state updates to max 5 per second to reduce re-renders
-                const now = performance.now();
-                if (now - lastAnalysisUpdate > 200) {
-                  setCurrentAnalysis(analysis);
-                  lastAnalysisUpdate = now;
-                }
-              } catch (error) {
-                console.error('Error processing game batch:', error);
-              }
-            };
-          })(),
+          (gameBatch) => {
+            // Queue batch for processing - don't block stream
+            batchQueue.push(gameBatch);
+            processBatches(); // Fire and forget - no await
+          },
           abortControllerRef.current?.signal
         );
-        // Always set final analysis state (throttling may have skipped last update)
+        // Wait for any remaining batches to finish
+        while (batchQueue.length > 0 || processingBatches) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
         setCurrentAnalysis(analysis);
         toast.dismiss(progressToast);
       } else {
@@ -307,32 +324,21 @@ const Scout = () => {
           username,
           fetchOptions,
           (count) => {
-            progressRef.current = count; // Update ref imperatively
+            progressRef.current = count;
             setProgress(count);
             toast.loading(`Analyzing ${count} games...`, { id: progressToast, duration: Infinity });
           },
-          (() => {
-            let lastAnalysisUpdate = 0;
-            return async (gameBatch) => {
-              console.log(`[CHESS.COM-BATCH] Received batch of ${gameBatch.length} games for analysis`);
-              try {
-                const prevTotal = analysis.totalGames;
-                analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
-                console.log(`[CHESS.COM-BATCH] After analysis: ${prevTotal} → ${analysis.totalGames} (added ${analysis.totalGames - prevTotal})`);
-                // Throttle state updates to max 5 per second to reduce re-renders
-                const now = performance.now();
-                if (now - lastAnalysisUpdate > 200) {
-                  setCurrentAnalysis(analysis);
-                  lastAnalysisUpdate = now;
-                }
-              } catch (error) {
-                console.error('Error processing game batch:', error);
-              }
-            };
-          })(),
+          (gameBatch) => {
+            // Queue batch for processing - don't block stream
+            batchQueue.push(gameBatch);
+            processBatches(); // Fire and forget - no await
+          },
           abortControllerRef.current?.signal
         );
-        // Always set final analysis state (throttling may have skipped last update)
+        // Wait for any remaining batches to finish
+        while (batchQueue.length > 0 || processingBatches) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
         setCurrentAnalysis(analysis);
         toast.dismiss(progressToast);
       }
