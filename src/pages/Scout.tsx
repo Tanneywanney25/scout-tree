@@ -281,17 +281,26 @@ const Scout = () => {
               setWarning("Large dataset - processing all games...");
             }
           },
-          async (gameBatch) => {
-            try {
-              analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
-              setCurrentAnalysis(analysis);
-            } catch (error) {
-              console.error('Error processing game batch:', error);
-              toast.error("Error processing game batch");
-            }
-          },
+          (() => {
+            let lastAnalysisUpdate = 0;
+            return async (gameBatch) => {
+              try {
+                analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
+                // Throttle state updates to max 5 per second to reduce re-renders
+                const now = performance.now();
+                if (now - lastAnalysisUpdate > 200) {
+                  setCurrentAnalysis(analysis);
+                  lastAnalysisUpdate = now;
+                }
+              } catch (error) {
+                console.error('Error processing game batch:', error);
+              }
+            };
+          })(),
           abortControllerRef.current?.signal
         );
+        // Always set final analysis state (throttling may have skipped last update)
+        setCurrentAnalysis(analysis);
         toast.dismiss(progressToast);
       } else {
         await fetchChessComGames(
@@ -302,17 +311,26 @@ const Scout = () => {
             setProgress(count);
             toast.loading(`Analyzing ${count} games...`, { id: progressToast, duration: Infinity });
           },
-          async (gameBatch) => {
-            try {
-              analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
-              setCurrentAnalysis(analysis);
-            } catch (error) {
-              console.error('Error processing game batch:', error);
-              toast.error("Error processing game batch");
-            }
-          },
+          (() => {
+            let lastAnalysisUpdate = 0;
+            return async (gameBatch) => {
+              try {
+                analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
+                // Throttle state updates to max 5 per second to reduce re-renders
+                const now = performance.now();
+                if (now - lastAnalysisUpdate > 200) {
+                  setCurrentAnalysis(analysis);
+                  lastAnalysisUpdate = now;
+                }
+              } catch (error) {
+                console.error('Error processing game batch:', error);
+              }
+            };
+          })(),
           abortControllerRef.current?.signal
         );
+        // Always set final analysis state (throttling may have skipped last update)
+        setCurrentAnalysis(analysis);
         toast.dismiss(progressToast);
       }
 

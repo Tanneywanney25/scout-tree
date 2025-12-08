@@ -55,7 +55,7 @@ export async function fetchLichessGames(
     playerColor
   } = options;
 
-  // If multiple time controls selected, fetch them SEQUENTIALLY to avoid 429 rate limit
+  // If multiple time controls selected, fetch them in PARALLEL batches for speed
   if (timeControls.length > 1) {
     const allGames: GameData[] = [];
     const seenGameIds = new Set<string>(); // Track unique games to prevent duplicates
@@ -78,73 +78,88 @@ export async function fetchLichessGames(
       return `${game.white}-${game.black}-${game.timeControl}-${pgnLen}-${pgnEnd}`;
     };
     
-    console.log(`[FETCH-MULTI] Starting multi-TC fetch for ${username}`);
+    console.log(`[FETCH-MULTI] Starting PARALLEL multi-TC fetch for ${username}`);
     console.log(`[FETCH-MULTI] Time controls to fetch: [${timeControls.join(', ')}] (${timeControls.length} total)`);
     console.log(`[FETCH-MULTI] Filters: mode=${mode}, dateFrom=${dateFrom?.toISOString()}, dateTo=${dateTo?.toISOString()}`);
     console.log(`[FETCH-MULTI] Rating filter: ${ratingMin ?? 'any'}-${ratingMax ?? 'any'}, color=${playerColor ?? 'any'}`);
     
     let lastReportedCount = 0; // Track highest count ever reported - NEVER go backwards
     
-    // SEQUENTIAL fetching - await each request before starting the next
-    for (const tc of timeControls) {
+    // PARALLEL fetching with limit of 2 concurrent requests to respect rate limits
+    const PARALLEL_LIMIT = 2;
+    const tcChunks: string[][] = [];
+    for (let i = 0; i < timeControls.length; i += PARALLEL_LIMIT) {
+      tcChunks.push(timeControls.slice(i, i + PARALLEL_LIMIT));
+    }
+    
+    for (const chunk of tcChunks) {
       // Check if aborted
       if (signal?.aborted) {
         throw new DOMException('Request aborted', 'AbortError');
       }
       
-      const tcStartCount = cumulativeCount;
-      let tcGameCount = 0;
-      let tcUniqueGamesCount = 0; // Track unique games added in THIS time control
+      const chunkStartCount = cumulativeCount;
       
       try {
-        const tcGames = await fetchLichessGames(
-          username,
-          { ...options, timeControls: [tc] },
-          (count) => {
-            // Report cumulative total: games from previous TCs + current TC progress
-            tcGameCount = count;
-            const totalSoFar = cumulativeCount + count;
-            // NEVER report a lower count than previously reported
-            if (totalSoFar >= lastReportedCount) {
-              lastReportedCount = totalSoFar;
-              console.log(`[FETCH-MULTI] TC ${tc}: ${count} games, cumulative total: ${totalSoFar}`);
-              if (onProgress) onProgress(totalSoFar);
-            } else {
-              console.warn(`[FETCH-MULTI] Skipping lower count: ${totalSoFar} < ${lastReportedCount}`);
-            }
-          },
-          (batch) => {
-            // Deduplicate games and add to allGames HERE (single deduplication point)
-            const uniqueBatch = batch.filter(game => {
-              const gameId = extractGameId(game);
-              if (seenGameIds.has(gameId)) {
-                console.log(`[FETCH-MULTI] Duplicate game skipped: ${gameId.substring(0, 30)}...`);
-                return false;
-              }
-              seenGameIds.add(gameId);
-              return true;
-            });
-            if (uniqueBatch.length > 0) {
-              // Add to allGames here - this is the ONLY place games are added
-              allGames.push(...uniqueBatch);
-              tcUniqueGamesCount += uniqueBatch.length;
-              console.log(`[BATCH] Added ${uniqueBatch.length} unique games, TC total: ${tcUniqueGamesCount}`);
-              if (onBatch) {
-                onBatch(uniqueBatch);
-              }
-            }
-          },
-          signal
+        // Fetch chunk in parallel
+        const results = await Promise.allSettled(
+          chunk.map(tc => {
+            let tcUniqueGamesCount = 0;
+            
+            return fetchLichessGames(
+              username,
+              { ...options, timeControls: [tc] },
+              (count) => {
+                // Report cumulative total: games from previous TCs + current chunk progress
+                const totalSoFar = cumulativeCount + count;
+                // NEVER report a lower count than previously reported
+                if (totalSoFar >= lastReportedCount) {
+                  lastReportedCount = totalSoFar;
+                  if (onProgress) onProgress(totalSoFar);
+                }
+              },
+              (batch) => {
+                // Deduplicate games and add to allGames HERE (single deduplication point)
+                const uniqueBatch = batch.filter(game => {
+                  const gameId = extractGameId(game);
+                  if (seenGameIds.has(gameId)) {
+                    return false;
+                  }
+                  seenGameIds.add(gameId);
+                  return true;
+                });
+                if (uniqueBatch.length > 0) {
+                  // Add to allGames here - this is the ONLY place games are added
+                  allGames.push(...uniqueBatch);
+                  tcUniqueGamesCount += uniqueBatch.length;
+                  if (onBatch) {
+                    onBatch(uniqueBatch);
+                  }
+                }
+              },
+              signal
+            ).then(games => ({ games, tcUniqueGamesCount }));
+          })
         );
         
-        // Update cumulative count AFTER TC completes using actual unique count
-        cumulativeCount += tcUniqueGamesCount;
+        // Process results and update cumulative count
+        let chunkUniqueGames = 0;
+        for (const result of results) {
+          if (result.status === 'fulfilled') {
+            // Games already added to allGames via onBatch callback
+            console.log(`[FETCH-MULTI] Chunk TC complete: ${result.value.games.length} fetched`);
+          } else if (result.reason?.name !== 'AbortError') {
+            // Log non-abort errors but continue
+            console.warn(`[FETCH-MULTI] TC fetch failed:`, result.reason?.message);
+          }
+        }
         
-        console.log(`[FETCH-MULTI] TC ${tc} complete: ${tcGames.length} fetched, ${tcUniqueGamesCount} unique added, cumulative: ${cumulativeCount}`);
+        // Update cumulative count based on allGames length
+        cumulativeCount = allGames.length;
         
-        // Add delay between time controls only if games were found (to respect rate limits)
-        if (timeControls.indexOf(tc) < timeControls.length - 1 && tcGames.length > 0) {
-          await new Promise(resolve => setTimeout(resolve, 300)); // Reduced to 300ms for speed
+        // Minimal delay between chunks (50ms) to avoid rate limit spikes
+        if (tcChunks.indexOf(chunk) < tcChunks.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 50));
         }
       } catch (error: any) {
         // If aborted, propagate the error
@@ -154,7 +169,7 @@ export async function fetchLichessGames(
         
         // If we hit rate limit, stop and return what we have
         if (error.message.includes('429') || error.message.includes('rate limit')) {
-          console.warn(`[FETCH-MULTI] Rate limit hit at time control ${tc}, returning ${allGames.length} games`);
+          console.warn(`[FETCH-MULTI] Rate limit hit, returning ${allGames.length} games`);
           break;
         }
         throw error;
@@ -239,6 +254,7 @@ export async function fetchLichessGames(
   
   // Filter tracking counters
   let rawGamesRead = 0;
+  let lastProgressUpdate = 0; // For throttling progress updates
   const filterDrops = { color: 0, opponentName: 0, rating: 0, timeControl: 0 };
   console.log('[STREAM] Starting to read games...');
 
@@ -397,9 +413,13 @@ export async function fetchLichessGames(
             batchBuffer.push(gameData);
             count++;
             
-            // Update progress every game for smooth counting
-            if (onProgress) {
-              onProgress(count);
+            // Throttle progress updates to max 10 per second to reduce React re-renders
+            const now = performance.now();
+            if (!lastProgressUpdate || now - lastProgressUpdate > 100) {
+              if (onProgress) {
+                onProgress(count);
+              }
+              lastProgressUpdate = now;
             }
             
             // Send first game immediately for instant visualization
