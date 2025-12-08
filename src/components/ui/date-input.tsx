@@ -135,12 +135,9 @@ export function DateInput({ date, onDateChange, placeholder = "MM/DD/YYYY", clas
         </PopoverTrigger>
         <PopoverContent 
           className="w-auto p-0 bg-popover z-50" 
-          align="center"
+          align="end"
           side="bottom"
           sideOffset={4}
-          alignOffset={0}
-          avoidCollisions={false}
-          style={{ position: 'relative', left: '50%', transform: 'translateX(-50%)' }}
         >
           <Calendar
             mode="single"
