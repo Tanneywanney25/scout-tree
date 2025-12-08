@@ -376,27 +376,28 @@ export async function fetchLichessGames(
               const opponentRating = playerIsWhite ? game.players.black.rating : game.players.white.rating;
               const opponentProvisional = playerIsWhite ? game.players.black.provisional : game.players.white.provisional;
               
-              // Log rating details for debugging (every 10th game to avoid spam)
-              if (count % 10 === 1) {
-                console.log(`[RATING-DEBUG] Game ${game.id}: opponent=${opponentRating}, provisional=${opponentProvisional}, filter=${ratingMin ?? 'any'}-${ratingMax ?? 'any'}`);
-              }
+              // Log ALL games' rating info for debugging
+              console.log(`[RATING-FILTER] Game ${game.id}: playerIsWhite=${playerIsWhite}, opponentRating=${opponentRating}, provisional=${opponentProvisional}, filter: min=${ratingMin} max=${ratingMax}`);
               
               // If opponent rating is missing/undefined, INCLUDE the game (don't filter on unknown)
               if (opponentRating === undefined || opponentRating === null) {
-                console.log('[FILTER-WARN] Game', game.id, 'has no opponent rating, including anyway');
+                console.log(`[RATING-FILTER] Game ${game.id}: PASS (no rating data, including anyway)`);
               } else {
-                // Use < for inclusive "Minimum X" semantics (rating >= ratingMin)
-                // Changed from <= to < to be more inclusive - "Above 1886" means >= 1886
+                // "Minimum X" in UI means opponent rating >= X, so exclude if rating < X
+                // "Above X" in UI means opponent rating > X, so exclude if rating <= X
+                // Current behavior: ratingMin is treated as "Minimum" (inclusive), so rating >= ratingMin passes
                 if (ratingMin !== undefined && opponentRating < ratingMin) {
                   shouldInclude = false;
                   dropReason = 'rating';
                   filterDrops.rating++;
-                  console.log(`[RATING-DROP] Game ${game.id}: opponent=${opponentRating} < min=${ratingMin}`);
-                }
-                if (shouldInclude && ratingMax !== undefined && opponentRating > ratingMax) {
+                  console.log(`[RATING-FILTER] Game ${game.id}: DROPPED (${opponentRating} < min ${ratingMin})`);
+                } else if (ratingMax !== undefined && opponentRating > ratingMax) {
                   shouldInclude = false;
                   dropReason = 'rating';
                   filterDrops.rating++;
+                  console.log(`[RATING-FILTER] Game ${game.id}: DROPPED (${opponentRating} > max ${ratingMax})`);
+                } else {
+                  console.log(`[RATING-FILTER] Game ${game.id}: PASS (${opponentRating} within ${ratingMin ?? 'any'}-${ratingMax ?? 'any'})`);
                 }
               }
             }
