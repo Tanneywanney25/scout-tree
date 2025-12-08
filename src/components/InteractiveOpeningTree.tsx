@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { Chess } from "chess.js";
 import Chessboard from "chessboardjsx";
 import { Button } from "./ui/button";
@@ -51,6 +51,7 @@ export const InteractiveOpeningTree = ({
   const [userArrows, setUserArrows] = useState<Array<{ from: string; to: string }>>([]);
   const [userCircles, setUserCircles] = useState<string[]>([]);
   const [rightClickStart, setRightClickStart] = useState<string | null>(null);
+  const navigationTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Wrapper to notify parent of path changes
   const setSelectedPath = useCallback((pathOrUpdater: string[] | ((prev: string[]) => string[])) => {
@@ -343,6 +344,11 @@ export const InteractiveOpeningTree = ({
   }, []);
 
   const handleMoveBack = useCallback(() => {
+    // Clear any pending arrow show timer
+    if (navigationTimerRef.current) {
+      clearTimeout(navigationTimerRef.current);
+    }
+    
     // Hide arrows immediately before position changes
     setShowArrows(false);
     
@@ -392,32 +398,24 @@ export const InteractiveOpeningTree = ({
       return newPath;
     });
     
-    // Show arrows after a small delay to allow position to update first
-    setTimeout(() => {
+    // Show arrows after 300ms of no navigation (user stopped holding)
+    navigationTimerRef.current = setTimeout(() => {
       setShowArrows(true);
-    }, 50);
+    }, 300);
   }, [node]);
 
   const handleMoveForward = useCallback(() => {
+    // Forward only works if we have moves to replay - do NOT auto-play new moves
+    // At starting position or end of current line, do nothing
     setSelectedPath(prev => {
-      // Find current node
-      let currentNode = node;
-      for (const san of prev) {
-        const child = currentNode.children?.find((c: SerializedOpeningNode) => c.san === san);
-        if (!child) return prev;
-        currentNode = child;
-      }
+      // If at starting position, do nothing (don't auto-play most common move)
+      if (prev.length === 0) return prev;
       
-      // Move to most popular child if available
-      if (currentNode.children && currentNode.children.length > 0) {
-        const mostPopular = currentNode.children.reduce((prevChild, curr) => 
-          curr.count > prevChild.count ? curr : prevChild
-        );
-        return [...prev, mostPopular.san];
-      }
+      // Forward navigation is disabled - user must click moves to explore
+      // This prevents auto-playing the most common move at any position
       return prev;
     });
-  }, [node]);
+  }, []);
 
   const handleJumpToMove = useCallback((moveIndex: number) => {
     setSelectedPath(prev => prev.slice(0, moveIndex));
