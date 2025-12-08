@@ -101,11 +101,9 @@ export async function fetchLichessGames(
       const chunkStartCount = cumulativeCount;
       
       try {
-        // Fetch chunk in parallel
+        // Fetch chunk in parallel - DON'T pass onBatch to inner fetches to avoid race condition
         const results = await Promise.allSettled(
           chunk.map(tc => {
-            let tcUniqueGamesCount = 0;
-            
             return fetchLichessGames(
               username,
               { ...options, timeControls: [tc] },
@@ -118,43 +116,47 @@ export async function fetchLichessGames(
                   if (onProgress) onProgress(totalSoFar);
                 }
               },
-              (batch) => {
-                // Deduplicate games and add to allGames HERE (single deduplication point)
-                const uniqueBatch = batch.filter(game => {
-                  const gameId = extractGameId(game);
-                  if (seenGameIds.has(gameId)) {
-                    return false;
-                  }
-                  seenGameIds.add(gameId);
-                  return true;
-                });
-                if (uniqueBatch.length > 0) {
-                  // Add to allGames here - this is the ONLY place games are added
-                  allGames.push(...uniqueBatch);
-                  tcUniqueGamesCount += uniqueBatch.length;
-                  if (onBatch) {
-                    onBatch(uniqueBatch);
-                  }
-                }
-              },
+              undefined, // Don't pass onBatch - we handle dedup/batching synchronously below
               signal
-            ).then(games => ({ games, tcUniqueGamesCount }));
+            );
           })
         );
         
-        // Process results and update cumulative count
-        let chunkUniqueGames = 0;
+        // Collect ALL games from this parallel chunk first
+        const chunkGames: GameData[] = [];
         for (const result of results) {
           if (result.status === 'fulfilled') {
-            // Games already added to allGames via onBatch callback
-            console.log(`[FETCH-MULTI] Chunk TC complete: ${result.value.games.length} fetched`);
+            chunkGames.push(...result.value);
+            console.log(`[FETCH-MULTI] TC complete: ${result.value.length} games fetched`);
           } else if (result.reason?.name !== 'AbortError') {
-            // Log non-abort errors but continue
             console.warn(`[FETCH-MULTI] TC fetch failed:`, result.reason?.message);
           }
         }
         
-        // Update cumulative count based on allGames length
+        // NOW deduplicate synchronously (no race condition - single threaded)
+        const uniqueChunkGames: GameData[] = [];
+        let duplicatesRemoved = 0;
+        for (const game of chunkGames) {
+          const gameId = extractGameId(game);
+          if (seenGameIds.has(gameId)) {
+            duplicatesRemoved++;
+          } else {
+            seenGameIds.add(gameId);
+            uniqueChunkGames.push(game);
+          }
+        }
+        
+        if (duplicatesRemoved > 0) {
+          console.log(`[DEDUP] Chunk: ${chunkGames.length} games, ${uniqueChunkGames.length} unique, ${duplicatesRemoved} duplicates removed`);
+        }
+        
+        // Add unique games to allGames and send batch
+        allGames.push(...uniqueChunkGames);
+        if (onBatch && uniqueChunkGames.length > 0) {
+          onBatch(uniqueChunkGames);
+        }
+        
+        // Update cumulative count
         cumulativeCount = allGames.length;
         
         // Minimal delay between chunks (50ms) to avoid rate limit spikes
@@ -377,7 +379,8 @@ export async function fetchLichessGames(
               if (opponentRating === undefined || opponentRating === null) {
                 console.log('[FILTER-WARN] Game', game.id, 'has no opponent rating, including anyway');
               } else {
-                if (ratingMin !== undefined && opponentRating < ratingMin) {
+                // Use <= for "Above X" semantics (strictly greater than ratingMin)
+                if (ratingMin !== undefined && opponentRating <= ratingMin) {
                   shouldInclude = false;
                   dropReason = 'rating';
                   filterDrops.rating++;
