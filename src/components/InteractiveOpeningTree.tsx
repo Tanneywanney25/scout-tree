@@ -644,7 +644,7 @@ export const InteractiveOpeningTree = ({
         </div>
 
         {/* Chess Board */}
-        <div className="relative aspect-square w-full max-w-[340px] sm:max-w-[480px] md:max-w-[560px] lg:max-w-[640px] border-2 border-border rounded-lg overflow-hidden shadow-xl">
+        <div className="relative inline-block border-2 border-border rounded-lg overflow-hidden shadow-xl">
           <style>{`
             /* Fix dragged piece size and prevent ALL hover/drag scaling */
             .piece-417db,
@@ -762,12 +762,12 @@ export const InteractiveOpeningTree = ({
             />
           </div>
           
-          {/* Arrow overlay - using filled polygon arrows for consistent sizing */}
+          {/* Arrow overlay - positioned absolutely over the Chessboard which sizes itself */}
+          <div className="absolute inset-0 pointer-events-none">
           <svg 
-            className="absolute inset-0 pointer-events-none" 
+            className="w-full h-full" 
             viewBox="0 0 800 800"
-            preserveAspectRatio="xMidYMid meet"
-            style={{ width: '100%', height: '100%' }}
+            preserveAspectRatio="none"
           >
             {arrows.map((arrow, idx) => {
               // Calculate file (a-h → 0-7) and rank (1-8 → visual row from top)
@@ -933,6 +933,7 @@ export const InteractiveOpeningTree = ({
               );
             })}
           </svg>
+          </div>
         </div>
         
         {/* Opening name below board */}
