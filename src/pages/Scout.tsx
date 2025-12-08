@@ -186,7 +186,7 @@ const Scout = () => {
 
   const handleSubmit = async (e: React.FormEvent, preservePrevious: boolean = false) => {
     const t0 = performance.now();
-    console.log('[TIMING] Form submitted');
+    console.log('[TIMING] Form submitted at', new Date().toISOString());
     
     e.preventDefault();
     
@@ -200,11 +200,24 @@ const Scout = () => {
       return;
     }
 
-    // Check usage limit
+    // IMMEDIATE visual feedback - show loading state BEFORE any async operations
+    setLoading(true);
+    console.log('[TIMING] setLoading(true) at', (performance.now() - t0).toFixed(0), 'ms');
+    
+    // Force React to flush state updates so user sees the loading indicator
+    await new Promise(r => setTimeout(r, 0));
+    console.log('[TIMING] React flush at', (performance.now() - t0).toFixed(0), 'ms');
+    
+    const progressToast = toast.loading("Starting analysis...", { duration: Infinity });
+    console.log('[TIMING] Toast shown at', (performance.now() - t0).toFixed(0), 'ms');
+
+    // Check usage limit (fast for logged-in users)
     console.log('[TIMING] Starting usage check at', (performance.now() - t0).toFixed(0), 'ms');
     const canProceed = await checkUsageLimit();
     console.log('[TIMING] Usage check complete at', (performance.now() - t0).toFixed(0), 'ms');
     if (!canProceed) {
+      setLoading(false);
+      toast.dismiss(progressToast);
       setShowAuthDialog(true);
       return;
     }
@@ -221,19 +234,18 @@ const Scout = () => {
       console.log('[TIMING] Aborting previous request at', (performance.now() - t0).toFixed(0), 'ms');
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
-      await new Promise(resolve => setTimeout(resolve, 100)); // Reduced from 1000ms
+      await new Promise(resolve => setTimeout(resolve, 50)); // Minimal delay for cleanup
       console.log('[TIMING] Abort complete at', (performance.now() - t0).toFixed(0), 'ms');
     }
 
     abortControllerRef.current = new AbortController();
 
-    setLoading(true);
     setProgress(null);
     setWarning(null);
     setCurrentAnalysis(null);
     setIsAnalysisComplete(false);
     progressRef.current = 0; // Reset progress ref
-    console.log('[TIMING] State reset, starting fetch at', (performance.now() - t0).toFixed(0), 'ms');
+    console.log('[TIMING] State reset at', (performance.now() - t0).toFixed(0), 'ms');
 
     try {
       const actualPlatform = platform === "auto" ? "lichess" : platform;
@@ -251,10 +263,11 @@ const Scout = () => {
         playerColor: color
       };
       
+      console.log('[TIMING] Starting fetch at', (performance.now() - t0).toFixed(0), 'ms');
       console.log('[FETCH-CONFIG] Platform:', actualPlatform, 'User:', username, 'Color:', color);
       console.log('[FETCH-CONFIG] Filters:', JSON.stringify(fetchOptions, null, 2));
 
-      const progressToast = toast.loading("Fetching games...", { duration: Infinity });
+      toast.loading("Fetching games...", { id: progressToast, duration: Infinity });
       
       if (actualPlatform === "lichess") {
         await fetchLichessGames(
@@ -308,8 +321,8 @@ const Scout = () => {
         return;
       }
 
-      // Record usage
-      await recordUsage();
+      // Record usage in background - don't block the UI
+      recordUsage().catch(err => console.error('[TIMING] Usage recording failed:', err));
 
       // Mark analysis as complete - use analysis.totalGames as the authoritative count
       // since it's incremented for every game actually added to the opening tree
