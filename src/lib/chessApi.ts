@@ -258,9 +258,11 @@ export async function fetchLichessGames(
   const filterDrops = { color: 0, opponentName: 0, rating: 0, timeControl: 0 };
   console.log('[STREAM] Starting to read games...');
 
+  let streamStartTime = performance.now();
+  let lastChunkTime = streamStartTime;
+  
   try {
     while (true) {
-      // Check if aborted during streaming
       if (signal?.aborted) {
         console.log('Abort signal detected, stopping stream...');
         try {
@@ -271,13 +273,20 @@ export async function fetchLichessGames(
         throw new DOMException('Request aborted', 'AbortError');
       }
       
-      // Stop if we've reached the game limit
       if (count >= MAX_GAMES) {
         console.log(`Reached maximum of ${MAX_GAMES} games, stopping fetch`);
         break;
       }
       
+      const chunkStart = performance.now();
       const { done, value } = await reader.read();
+      const chunkEnd = performance.now();
+      
+      // Log stalls longer than 2 seconds
+      if (chunkEnd - chunkStart > 2000) {
+        console.warn('[STREAM-STALL] Chunk read took', (chunkEnd - chunkStart).toFixed(0), 'ms after', count, 'games');
+      }
+      lastChunkTime = chunkEnd;
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });

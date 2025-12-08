@@ -98,14 +98,15 @@ export async function analyzeGamesIncremental(
   let skipPlayerNotFound = 0;
   const normalizedTarget = targetUsername.toLowerCase();
 
-  console.log(`[ANALYSIS] Starting incremental analysis for "${targetUsername}" (normalized: "${normalizedTarget}"), playerColor: ${playerColor}, newGames: ${newGames.length}`);
+  // Reduced logging - only log batch summary
+  console.log(`[ANALYSIS] Batch: ${newGames.length} games for "${normalizedTarget}", color: ${playerColor}`);
 
   for (let i = 0; i < newGames.length; i++) {
     const game = newGames[i];
     const chess = new Chess();
     
-    // Yield to browser every 2 games to prevent freezing
-    if (i > 0 && i % 2 === 0) {
+    // Yield to browser every 10 games (reduced from 2 to minimize overhead)
+    if (i > 0 && i % 10 === 0) {
       await new Promise(resolve => setTimeout(resolve, 0));
     }
     
@@ -113,8 +114,7 @@ export async function analyzeGamesIncremental(
       chess.loadPgn(game.pgn);
     } catch (e) {
       skipPgn++;
-      console.log(`[ANALYSIS] SKIP PGN PARSE: gameId=${game.gameId || 'unknown'}, error:`, e);
-      continue;
+      continue; // Silent skip - logged in summary
     }
 
     const normalizedWhite = game.white.toLowerCase();
@@ -122,16 +122,12 @@ export async function analyzeGamesIncremental(
     const isWhite = normalizedWhite === normalizedTarget;
     const isBlack = normalizedBlack === normalizedTarget;
 
-    // Games are already filtered by color in chessApi.ts during fetching
-    // Just verify the player is in the game
     if (!isWhite && !isBlack) {
       skipPlayerNotFound++;
-      console.log(`[ANALYSIS] SKIP PLAYER NOT FOUND: Looking for "${normalizedTarget}", got white="${normalizedWhite}", black="${normalizedBlack}", gameId=${game.gameId || 'unknown'}`);
-      continue;
+      continue; // Silent skip - logged in summary
     }
 
     totalGames++;
-    console.log(`[ANALYSIS] Processing game #${totalGames}: ${game.white} vs ${game.black}, target is ${isWhite ? 'white' : 'black'}`);
 
     let result: "win" | "draw" | "loss";
     if (!game.winner) {
@@ -147,10 +143,7 @@ export async function analyzeGamesIncremental(
 
     const history = chess.history({ verbose: true });
     let currentNode = rootNode;
-    // Limit to opening phase (30 plies = 15 full moves) for performance and relevance
     const maxPlies = Math.min(history.length, 30);
-
-    console.log(`[ANALYSIS] Game ${totalGames} has ${history.length} total moves, analyzing first ${maxPlies} plies`);
 
     // Create tracking chess instance that moves forward incrementally (O(n) instead of O(n²))
     const trackingChess = new Chess();
