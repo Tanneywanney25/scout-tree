@@ -78,7 +78,8 @@ export async function fetchLichessGames(
       return `${game.white}-${game.black}-${game.timeControl}-${pgnLen}-${pgnEnd}`;
     };
     
-    console.log(`[FETCH-MULTI] Starting multi-TC fetch for ${username}, TCs: ${timeControls.join(', ')}`);
+    console.log(`[FETCH-MULTI] Starting multi-TC fetch for ${username}`);
+    console.log(`[FETCH-MULTI] Time controls to fetch: [${timeControls.join(', ')}] (${timeControls.length} total)`);
     console.log(`[FETCH-MULTI] Filters: mode=${mode}, dateFrom=${dateFrom?.toISOString()}, dateTo=${dateTo?.toISOString()}`);
     console.log(`[FETCH-MULTI] Rating filter: ${ratingMin ?? 'any'}-${ratingMax ?? 'any'}, color=${playerColor ?? 'any'}`);
     
@@ -180,12 +181,18 @@ export async function fetchLichessGames(
   // Always include pgnInJson
   params.append('pgnInJson', 'true');
   
-  // Date filtering
+  // Date filtering - normalize to day boundaries for inclusive behavior
   if (dateFrom) {
-    params.append('since', dateFrom.getTime().toString());
+    const fromStartOfDay = new Date(dateFrom.getTime());
+    fromStartOfDay.setHours(0, 0, 0, 0);
+    params.append('since', fromStartOfDay.getTime().toString());
+    console.log('[LICHESS-API] dateFrom normalized to start of day:', fromStartOfDay.toISOString());
   }
   if (dateTo) {
-    params.append('until', dateTo.getTime().toString());
+    const toEndOfDay = new Date(dateTo.getTime());
+    toEndOfDay.setHours(23, 59, 59, 999);
+    params.append('until', toEndOfDay.getTime().toString());
+    console.log('[LICHESS-API] dateTo normalized to end of day:', toEndOfDay.toISOString());
   }
   
   // Mode filtering (rated/casual/all)
@@ -274,14 +281,53 @@ export async function fetchLichessGames(
             
             // Color filter - only include games where scouted player played the selected color
             if (playerColor) {
-              const scoutedPlayerPlayedWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
-              const scoutedPlayerColor = scoutedPlayerPlayedWhite ? "white" : "black";
+              const whiteUser = game.players?.white?.user;
+              const blackUser = game.players?.black?.user;
               
-              // Only show games where scouted player played the selected color
-              if (scoutedPlayerColor !== playerColor) {
+              // Handle anonymous/missing user data - skip games where we can't determine player
+              if (!whiteUser && !blackUser) {
+                console.log('[FILTER-WARN] Game', game.id, 'has no user data on either side, skipping');
                 shouldInclude = false;
-                dropReason = 'color';
-                filterDrops.color++;
+                dropReason = 'noUserData';
+                continue;
+              }
+              
+              const scoutedPlayerPlayedWhite = whiteUser?.name?.toLowerCase() === username.toLowerCase();
+              const scoutedPlayerPlayedBlack = blackUser?.name?.toLowerCase() === username.toLowerCase();
+              
+              // If player not found on either side (e.g., anonymous opponent), skip
+              if (!scoutedPlayerPlayedWhite && !scoutedPlayerPlayedBlack) {
+                // This is normal for games vs anonymous - include if we can infer from other side
+                // If white is anonymous and black matches username, player is black
+                if (!whiteUser && blackUser?.name?.toLowerCase() === username.toLowerCase()) {
+                  // Player is black
+                  if (playerColor !== "black") {
+                    shouldInclude = false;
+                    dropReason = 'color';
+                    filterDrops.color++;
+                  }
+                } else if (!blackUser && whiteUser?.name?.toLowerCase() === username.toLowerCase()) {
+                  // Player is white
+                  if (playerColor !== "white") {
+                    shouldInclude = false;
+                    dropReason = 'color';
+                    filterDrops.color++;
+                  }
+                } else {
+                  console.log('[FILTER-WARN] Game', game.id, 'player not found in either color, skipping');
+                  shouldInclude = false;
+                  dropReason = 'playerNotFound';
+                  continue;
+                }
+              } else {
+                const scoutedPlayerColor = scoutedPlayerPlayedWhite ? "white" : "black";
+                
+                // Only show games where scouted player played the selected color
+                if (scoutedPlayerColor !== playerColor) {
+                  shouldInclude = false;
+                  dropReason = 'color';
+                  filterDrops.color++;
+                }
               }
             }
             
@@ -302,15 +348,20 @@ export async function fetchLichessGames(
               const playerIsWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
               const opponentRating = playerIsWhite ? game.players.black.rating : game.players.white.rating;
               
-              if (ratingMin !== undefined && opponentRating < ratingMin) {
-                shouldInclude = false;
-                dropReason = 'rating';
-                filterDrops.rating++;
-              }
-              if (shouldInclude && ratingMax !== undefined && opponentRating > ratingMax) {
-                shouldInclude = false;
-                dropReason = 'rating';
-                filterDrops.rating++;
+              // If opponent rating is missing/undefined, INCLUDE the game (don't filter on unknown)
+              if (opponentRating === undefined || opponentRating === null) {
+                console.log('[FILTER-WARN] Game', game.id, 'has no opponent rating, including anyway');
+              } else {
+                if (ratingMin !== undefined && opponentRating < ratingMin) {
+                  shouldInclude = false;
+                  dropReason = 'rating';
+                  filterDrops.rating++;
+                }
+                if (shouldInclude && ratingMax !== undefined && opponentRating > ratingMax) {
+                  shouldInclude = false;
+                  dropReason = 'rating';
+                  filterDrops.rating++;
+                }
               }
             }
             
@@ -378,11 +429,15 @@ export async function fetchLichessGames(
       onProgress(count);
     }
     
-    // Log final stream summary
+    // Log final stream summary with comparison info
     console.log('[STREAM-COMPLETE] Raw games from API:', rawGamesRead);
     console.log('[STREAM-COMPLETE] Games passed filters:', count);
     console.log('[STREAM-COMPLETE] Filter drop summary:', filterDrops);
-    console.log('[STREAM-COMPLETE] Drop rate:', ((rawGamesRead - count) / rawGamesRead * 100).toFixed(1) + '%');
+    console.log('[STREAM-COMPLETE] Drop rate:', rawGamesRead > 0 ? ((rawGamesRead - count) / rawGamesRead * 100).toFixed(1) + '%' : '0%');
+    console.log('[COMPARISON] To verify against OpeningTree.org:');
+    console.log(`[COMPARISON] 1. Same filters: ${username}, color=${playerColor ?? 'any'}, TCs=${timeControls.join(',')}`);
+    console.log(`[COMPARISON] 2. ScoutTree count: ${count} games after filtering from ${rawGamesRead} raw`);
+    console.log(`[COMPARISON] 3. If gap exists, check: date boundaries, rating filter edge cases, anonymous players`);
   } catch (error: any) {
     console.log('[STREAM-ERROR] Error at game', rawGamesRead, '- filter drops so far:', filterDrops);
     // Ensure reader is properly closed
@@ -590,13 +645,17 @@ export async function fetchChessComGames(
             }
           }
           
-          // Rating filter
+          // Rating filter - handle missing ratings gracefully
           const opponentRating = game.white.username.toLowerCase() === normalizedUsername
             ? game.black.rating
             : game.white.rating;
           
-          if (ratingMin && opponentRating < ratingMin) continue;
-          if (ratingMax && opponentRating > ratingMax) continue;
+          // Only filter if opponent rating exists AND is outside range
+          if (opponentRating !== undefined && opponentRating !== null) {
+            if (ratingMin && opponentRating < ratingMin) continue;
+            if (ratingMax && opponentRating > ratingMax) continue;
+          }
+          // If rating is missing, include the game (don't filter on unknown)
           
           // Opponent name filter (use partial match like Lichess)
           if (opponentName) {
