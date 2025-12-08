@@ -764,63 +764,17 @@ export const InteractiveOpeningTree = ({
             />
           </div>
           
-          {/* Arrow overlay */}
+          {/* Arrow overlay - using filled polygon arrows for consistent sizing */}
           <svg 
             className="absolute inset-0 pointer-events-none" 
             viewBox="0 0 800 800"
             preserveAspectRatio="xMidYMid meet"
             style={{ width: '100%', height: '100%' }}
           >
-            <defs>
-              {arrows.map((arrow, idx) => {
-                // Calculate distance to determine arrowhead size
-                let fromFile = arrow.from.charCodeAt(0) - 97;
-                let fromRank = 8 - parseInt(arrow.from[1]);
-                let toFile = arrow.to.charCodeAt(0) - 97;
-                let toRank = 8 - parseInt(arrow.to[1]);
-                
-                if (boardOrientation === "black") {
-                  fromFile = 7 - fromFile;
-                  fromRank = 7 - fromRank;
-                  toFile = 7 - toFile;
-                  toRank = 7 - toRank;
-                }
-                
-                const squareSize = 100;
-                const x1 = fromFile * squareSize + squareSize / 2;
-                const y1 = fromRank * squareSize + squareSize / 2;
-                const x2 = toFile * squareSize + squareSize / 2;
-                const y2 = toRank * squareSize + squareSize / 2;
-                const distance = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
-                
-                // Use smaller arrowhead for short moves (1 square = 100px)
-                const arrowheadSize = distance < 120 ? 36 : 60;
-                const halfHead = arrowheadSize / 2;
-                
-                return (
-                  <marker
-                    key={`marker-${idx}`}
-                    id={`arrowhead-${idx}`}
-                    markerWidth={arrowheadSize}
-                    markerHeight={arrowheadSize}
-                    refX={arrowheadSize}
-                    refY={halfHead}
-                    orient="auto"
-                    markerUnits="userSpaceOnUse"
-                  >
-                    <polygon 
-                      points={`0 0, ${arrowheadSize} ${halfHead}, 0 ${arrowheadSize}`}
-                      fill={arrow.isScoutedPlayer ? "#646F41" : "#900009"}
-                      fillOpacity={arrow.opacity}
-                    />
-                  </marker>
-                );
-              })}
-            </defs>
             {arrows.map((arrow, idx) => {
               // Calculate file (a-h → 0-7) and rank (1-8 → visual row from top)
-              let fromFile = arrow.from.charCodeAt(0) - 97; // a=0, h=7
-              let fromRank = 8 - parseInt(arrow.from[1]);   // 8=0 (top), 1=7 (bottom)
+              let fromFile = arrow.from.charCodeAt(0) - 97;
+              let fromRank = 8 - parseInt(arrow.from[1]);
               let toFile = arrow.to.charCodeAt(0) - 97;
               let toRank = 8 - parseInt(arrow.to[1]);
               
@@ -839,27 +793,58 @@ export const InteractiveOpeningTree = ({
               const x2 = toFile * squareSize + squareSize / 2;
               const y2 = toRank * squareSize + squareSize / 2;
               
-              // Calculate distance for dynamic arrowhead sizing
-              const distance = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
-              const arrowheadSize = distance < 120 ? 36 : 60;
+              // Fixed arrow dimensions for consistency
+              const shaftWidth = 20;
+              const headWidth = 50;
+              const headLength = 40;
               
-              // Don't shorten line - let marker refX handle tip placement at line end
+              // Calculate direction and length
+              const dx = x2 - x1;
+              const dy = y2 - y1;
+              const length = Math.sqrt(dx * dx + dy * dy);
+              
+              if (length === 0) return null;
+              
+              // Unit vectors
+              const ux = dx / length;
+              const uy = dy / length;
+              
+              // Perpendicular vectors
+              const px = -uy;
+              const py = ux;
+              
+              // Arrow shaft ends before head
+              const shaftEndX = x2 - ux * headLength;
+              const shaftEndY = y2 - uy * headLength;
+              
+              // Build polygon points for unified arrow shape
+              const halfShaft = shaftWidth / 2;
+              const halfHead = headWidth / 2;
+              
+              // Points: start-left → shaft-end-left → head-left → tip → head-right → shaft-end-right → start-right
+              const points = [
+                `${x1 + px * halfShaft},${y1 + py * halfShaft}`,
+                `${shaftEndX + px * halfShaft},${shaftEndY + py * halfShaft}`,
+                `${shaftEndX + px * halfHead},${shaftEndY + py * halfHead}`,
+                `${x2},${y2}`,
+                `${shaftEndX - px * halfHead},${shaftEndY - py * halfHead}`,
+                `${shaftEndX - px * halfShaft},${shaftEndY - py * halfShaft}`,
+                `${x1 - px * halfShaft},${y1 - py * halfShaft}`,
+              ].join(' ');
+              
+              const fillColor = arrow.isScoutedPlayer ? "#646F41" : "#900009";
+              
               return (
-                <line
+                <polygon
                   key={idx}
-                  x1={x1}
-                  y1={y1}
-                  x2={x2}
-                  y2={y2}
-                  stroke={arrow.color}
-                  strokeWidth="16"
-                  strokeLinecap="round"
-                  markerEnd={`url(#arrowhead-${idx})`}
+                  points={points}
+                  fill={fillColor}
+                  fillOpacity={arrow.opacity}
                 />
               );
             })}
             
-            {/* User-drawn arrows (brand green #646F41) */}
+            {/* User-drawn arrows (brand green #646F41) - also using polygon */}
             {userArrows.map((arrow, idx) => {
               let fromFile = arrow.from.charCodeAt(0) - 97;
               let fromRank = 8 - parseInt(arrow.from[1]);
@@ -873,46 +858,51 @@ export const InteractiveOpeningTree = ({
                 toRank = 7 - toRank;
               }
               
-              // Use 800x800 viewBox coordinate system
               const squareSize = 100;
               const x1 = fromFile * squareSize + squareSize / 2;
               const y1 = fromRank * squareSize + squareSize / 2;
               const x2 = toFile * squareSize + squareSize / 2;
               const y2 = toRank * squareSize + squareSize / 2;
               
-              // Calculate distance for dynamic arrowhead sizing
-              const distance = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
-              const arrowheadSize = distance < 120 ? 36 : 60;
-              const halfHead = arrowheadSize / 2;
+              // Fixed arrow dimensions
+              const shaftWidth = 20;
+              const headWidth = 50;
+              const headLength = 40;
               
-              // Don't shorten line - let marker refX handle tip placement
+              const dx = x2 - x1;
+              const dy = y2 - y1;
+              const length = Math.sqrt(dx * dx + dy * dy);
+              
+              if (length === 0) return null;
+              
+              const ux = dx / length;
+              const uy = dy / length;
+              const px = -uy;
+              const py = ux;
+              
+              const shaftEndX = x2 - ux * headLength;
+              const shaftEndY = y2 - uy * headLength;
+              
+              const halfShaft = shaftWidth / 2;
+              const halfHead = headWidth / 2;
+              
+              const points = [
+                `${x1 + px * halfShaft},${y1 + py * halfShaft}`,
+                `${shaftEndX + px * halfShaft},${shaftEndY + py * halfShaft}`,
+                `${shaftEndX + px * halfHead},${shaftEndY + py * halfHead}`,
+                `${x2},${y2}`,
+                `${shaftEndX - px * halfHead},${shaftEndY - py * halfHead}`,
+                `${shaftEndX - px * halfShaft},${shaftEndY - py * halfShaft}`,
+                `${x1 - px * halfShaft},${y1 - py * halfShaft}`,
+              ].join(' ');
+              
               return (
-                <g key={`user-arrow-${idx}`}>
-                  <defs>
-                    <marker
-                      id={`user-arrowhead-${idx}`}
-                      markerWidth={arrowheadSize}
-                      markerHeight={arrowheadSize}
-                      refX={arrowheadSize}
-                      refY={halfHead}
-                      orient="auto"
-                      markerUnits="userSpaceOnUse"
-                    >
-                      <polygon points={`0 0, ${arrowheadSize} ${halfHead}, 0 ${arrowheadSize}`} fill="#646F41" fillOpacity="0.8" />
-                    </marker>
-                  </defs>
-                  <line
-                    x1={x1}
-                    y1={y1}
-                    x2={x2}
-                    y2={y2}
-                    stroke="#646F41"
-                    strokeWidth="16"
-                    strokeOpacity="0.8"
-                    strokeLinecap="round"
-                    markerEnd={`url(#user-arrowhead-${idx})`}
-                  />
-                </g>
+                <polygon
+                  key={`user-arrow-${idx}`}
+                  points={points}
+                  fill="#646F41"
+                  fillOpacity={0.8}
+                />
               );
             })}
             
