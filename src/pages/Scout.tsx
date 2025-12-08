@@ -139,6 +139,64 @@ const Scout = () => {
     };
   }, []);
 
+  // Clean up stale pending params on mount (older than 10 minutes)
+  useEffect(() => {
+    const pendingParams = sessionStorage.getItem('pendingScoutParams');
+    if (pendingParams) {
+      try {
+        const params = JSON.parse(pendingParams);
+        if (Date.now() - params.timestamp > 600000) {
+          sessionStorage.removeItem('pendingScoutParams');
+        }
+      } catch {
+        sessionStorage.removeItem('pendingScoutParams');
+      }
+    }
+  }, []);
+
+  // Restore and auto-submit after successful auth
+  useEffect(() => {
+    if (user && !loading) {
+      const pendingParams = sessionStorage.getItem('pendingScoutParams');
+      if (pendingParams) {
+        try {
+          const params = JSON.parse(pendingParams);
+          
+          // Check if params are recent (within last 10 minutes)
+          if (Date.now() - params.timestamp < 600000) {
+            // Restore form state
+            setPlatform(params.platform);
+            setUsername(params.username);
+            setColor(params.color);
+            setVariant(params.variant);
+            setTimeControls(params.timeControls);
+            setMode(params.mode);
+            setDateFrom(params.dateFrom ? new Date(params.dateFrom) : undefined);
+            setDateTo(params.dateTo ? new Date(params.dateTo) : undefined);
+            setRatingMin(params.ratingMin);
+            setRatingMax(params.ratingMax);
+            setOpponentName(params.opponentName);
+            
+            // Clear from storage
+            sessionStorage.removeItem('pendingScoutParams');
+            
+            toast.success('Continuing your scout with saved parameters');
+            
+            // Auto-submit after brief delay to let state settle
+            setTimeout(() => {
+              const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
+              handleSubmit(fakeEvent, false);
+            }, 500);
+          } else {
+            sessionStorage.removeItem('pendingScoutParams');
+          }
+        } catch {
+          sessionStorage.removeItem('pendingScoutParams');
+        }
+      }
+    }
+  }, [user, loading]);
+
   const checkUsageLimit = async (): Promise<boolean> => {
     // If user is logged in, allow unlimited scouts
     if (user) {
@@ -216,6 +274,22 @@ const Scout = () => {
     const canProceed = await checkUsageLimit();
     console.log('[TIMING] Usage check complete at', (performance.now() - t0).toFixed(0), 'ms');
     if (!canProceed) {
+      // Save current form state to sessionStorage before showing auth modal
+      sessionStorage.setItem('pendingScoutParams', JSON.stringify({
+        platform,
+        username,
+        color,
+        variant,
+        timeControls,
+        mode,
+        dateFrom: dateFrom?.toISOString(),
+        dateTo: dateTo?.toISOString(),
+        ratingMin,
+        ratingMax,
+        opponentName,
+        timestamp: Date.now()
+      }));
+      
       setLoading(false);
       toast.dismiss(progressToast);
       setShowAuthDialog(true);

@@ -374,16 +374,24 @@ export async function fetchLichessGames(
             if (shouldInclude && (ratingMin !== undefined || ratingMax !== undefined)) {
               const playerIsWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
               const opponentRating = playerIsWhite ? game.players.black.rating : game.players.white.rating;
+              const opponentProvisional = playerIsWhite ? game.players.black.provisional : game.players.white.provisional;
+              
+              // Log rating details for debugging (every 10th game to avoid spam)
+              if (count % 10 === 1) {
+                console.log(`[RATING-DEBUG] Game ${game.id}: opponent=${opponentRating}, provisional=${opponentProvisional}, filter=${ratingMin ?? 'any'}-${ratingMax ?? 'any'}`);
+              }
               
               // If opponent rating is missing/undefined, INCLUDE the game (don't filter on unknown)
               if (opponentRating === undefined || opponentRating === null) {
                 console.log('[FILTER-WARN] Game', game.id, 'has no opponent rating, including anyway');
               } else {
-                // Use <= for "Above X" semantics (strictly greater than ratingMin)
-                if (ratingMin !== undefined && opponentRating <= ratingMin) {
+                // Use < for inclusive "Minimum X" semantics (rating >= ratingMin)
+                // Changed from <= to < to be more inclusive - "Above 1886" means >= 1886
+                if (ratingMin !== undefined && opponentRating < ratingMin) {
                   shouldInclude = false;
                   dropReason = 'rating';
                   filterDrops.rating++;
+                  console.log(`[RATING-DROP] Game ${game.id}: opponent=${opponentRating} < min=${ratingMin}`);
                 }
                 if (shouldInclude && ratingMax !== undefined && opponentRating > ratingMax) {
                   shouldInclude = false;
