@@ -691,8 +691,8 @@ export async function fetchChessComGames(
           
           const gameData: GameData = {
             pgn: game.pgn,
-            white: game.white.username,
-            black: game.black.username,
+            white: game.white.username.toLowerCase(), // Normalize to lowercase for consistent matching
+            black: game.black.username.toLowerCase(), // Normalize to lowercase for consistent matching
             winner: game.white.result === "win" ? "white" : 
                     game.black.result === "win" ? "black" : undefined,
             timeControl: game.time_class,

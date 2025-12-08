@@ -314,8 +314,11 @@ const Scout = () => {
           (() => {
             let lastAnalysisUpdate = 0;
             return async (gameBatch) => {
+              console.log(`[CHESS.COM-BATCH] Received batch of ${gameBatch.length} games for analysis`);
               try {
+                const prevTotal = analysis.totalGames;
                 analysis = await analyzeGamesIncremental(analysis, gameBatch, username);
+                console.log(`[CHESS.COM-BATCH] After analysis: ${prevTotal} → ${analysis.totalGames} (added ${analysis.totalGames - prevTotal})`);
                 // Throttle state updates to max 5 per second to reduce re-renders
                 const now = performance.now();
                 if (now - lastAnalysisUpdate > 200) {

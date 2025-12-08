@@ -92,8 +92,13 @@ export async function analyzeGamesIncremental(
   const rootNode = existingAnalysis.openingTree;
   let totalGames = existingAnalysis.totalGames;
   const playerColor = existingAnalysis.playerColor;
+  
+  // Track skip reasons for debugging
+  let skipPgn = 0;
+  let skipPlayerNotFound = 0;
+  const normalizedTarget = targetUsername.toLowerCase();
 
-  console.log(`[ANALYSIS] Starting incremental analysis for ${targetUsername}, playerColor: ${playerColor}, newGames: ${newGames.length}`);
+  console.log(`[ANALYSIS] Starting incremental analysis for "${targetUsername}" (normalized: "${normalizedTarget}"), playerColor: ${playerColor}, newGames: ${newGames.length}`);
 
   for (let i = 0; i < newGames.length; i++) {
     const game = newGames[i];
@@ -107,16 +112,21 @@ export async function analyzeGamesIncremental(
     try {
       chess.loadPgn(game.pgn);
     } catch (e) {
+      skipPgn++;
+      console.log(`[ANALYSIS] SKIP PGN PARSE: gameId=${game.gameId || 'unknown'}, error:`, e);
       continue;
     }
 
-    const isWhite = game.white.toLowerCase() === targetUsername.toLowerCase();
-    const isBlack = game.black.toLowerCase() === targetUsername.toLowerCase();
+    const normalizedWhite = game.white.toLowerCase();
+    const normalizedBlack = game.black.toLowerCase();
+    const isWhite = normalizedWhite === normalizedTarget;
+    const isBlack = normalizedBlack === normalizedTarget;
 
     // Games are already filtered by color in chessApi.ts during fetching
     // Just verify the player is in the game
     if (!isWhite && !isBlack) {
-      console.log(`[ANALYSIS] Skipping game - player not found. White: ${game.white}, Black: ${game.black}`);
+      skipPlayerNotFound++;
+      console.log(`[ANALYSIS] SKIP PLAYER NOT FOUND: Looking for "${normalizedTarget}", got white="${normalizedWhite}", black="${normalizedBlack}", gameId=${game.gameId || 'unknown'}`);
       continue;
     }
 
@@ -206,7 +216,7 @@ export async function analyzeGamesIncremental(
     }
   }
 
-  console.log(`[ANALYSIS] Complete. Total games analyzed: ${totalGames}`);
+  console.log(`[ANALYSIS] Complete. Processed: ${newGames.length}, Skipped(PGN): ${skipPgn}, Skipped(player): ${skipPlayerNotFound}, Successfully analyzed: ${totalGames - existingAnalysis.totalGames}, Total: ${totalGames}`);
   rootNode.count = totalGames;
 
   const allLines = extractAllLines(rootNode, "", []);
