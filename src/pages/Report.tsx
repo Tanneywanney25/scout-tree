@@ -12,6 +12,7 @@ import DeepAnalysisTab from "@/components/DeepAnalysisTab";
 import WeaknessDashboard from "@/components/WeaknessDashboard";
 import OpponentProfile from "@/components/OpponentProfile";
 import { StructureWeaknesses } from "@/components/StructureWeaknesses";
+import { EndgameProfile } from "@/components/EndgameProfile";
 
 const Report = () => {
   const { id } = useParams();
@@ -144,6 +145,9 @@ const Report = () => {
               <TabsTrigger value="pawn-structures">
                 Pawn Structures
               </TabsTrigger>
+              <TabsTrigger value="endgames">
+                Endgames
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="opening-tree">
@@ -193,6 +197,13 @@ const Report = () => {
 
             <TabsContent value="pawn-structures">
               <StructureWeaknesses 
+                games={analysis.games} 
+                username={id || ''} 
+              />
+            </TabsContent>
+
+            <TabsContent value="endgames">
+              <EndgameProfile 
                 games={analysis.games} 
                 username={id || ''} 
               />
