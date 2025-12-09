@@ -77,6 +77,66 @@ export type Database = {
         }
         Relationships: []
       }
+      training_positions: {
+        Row: {
+          created_at: string
+          difficulty: number
+          easiness_factor: number
+          eval_loss: number
+          explanation: string | null
+          fen: string
+          game_context: string | null
+          id: string
+          mastery_level: number
+          move_to_find: string
+          move_to_find_uci: string
+          next_review: string
+          times_attempted: number
+          times_correct: number
+          updated_at: string
+          user_id: string
+          weakness_category: string
+        }
+        Insert: {
+          created_at?: string
+          difficulty: number
+          easiness_factor?: number
+          eval_loss: number
+          explanation?: string | null
+          fen: string
+          game_context?: string | null
+          id?: string
+          mastery_level?: number
+          move_to_find: string
+          move_to_find_uci: string
+          next_review?: string
+          times_attempted?: number
+          times_correct?: number
+          updated_at?: string
+          user_id: string
+          weakness_category: string
+        }
+        Update: {
+          created_at?: string
+          difficulty?: number
+          easiness_factor?: number
+          eval_loss?: number
+          explanation?: string | null
+          fen?: string
+          game_context?: string | null
+          id?: string
+          mastery_level?: number
+          move_to_find?: string
+          move_to_find_uci?: string
+          next_review?: string
+          times_attempted?: number
+          times_correct?: number
+          updated_at?: string
+          user_id?: string
+          weakness_category?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
