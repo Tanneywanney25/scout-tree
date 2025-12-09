@@ -9,14 +9,48 @@ interface ExplainMoveRequest {
   fen: string;
   movePlayed: string;
   bestMove: string;
-  evalDiff: number; // centipawns lost (positive = bad move)
+  evalDiff: number;
   classification: 'inaccuracy' | 'mistake' | 'blunder';
   gamePhase: 'opening' | 'middlegame' | 'endgame';
   playerColor: 'white' | 'black';
 }
 
+// Parse FEN to get a human-readable board description
+function describeBoardFromFen(fen: string): string {
+  const parts = fen.split(' ');
+  const position = parts[0];
+  const turn = parts[1] === 'w' ? 'White' : 'Black';
+  
+  const pieceCount: Record<string, number> = {
+    'K': 0, 'Q': 0, 'R': 0, 'B': 0, 'N': 0, 'P': 0,
+    'k': 0, 'q': 0, 'r': 0, 'b': 0, 'n': 0, 'p': 0
+  };
+  
+  for (const char of position) {
+    if (pieceCount[char] !== undefined) {
+      pieceCount[char]++;
+    }
+  }
+  
+  const whitePieces = [];
+  const blackPieces = [];
+  
+  if (pieceCount['Q'] > 0) whitePieces.push(`${pieceCount['Q']} queen${pieceCount['Q'] > 1 ? 's' : ''}`);
+  if (pieceCount['R'] > 0) whitePieces.push(`${pieceCount['R']} rook${pieceCount['R'] > 1 ? 's' : ''}`);
+  if (pieceCount['B'] > 0) whitePieces.push(`${pieceCount['B']} bishop${pieceCount['B'] > 1 ? 's' : ''}`);
+  if (pieceCount['N'] > 0) whitePieces.push(`${pieceCount['N']} knight${pieceCount['N'] > 1 ? 's' : ''}`);
+  if (pieceCount['P'] > 0) whitePieces.push(`${pieceCount['P']} pawn${pieceCount['P'] > 1 ? 's' : ''}`);
+  
+  if (pieceCount['q'] > 0) blackPieces.push(`${pieceCount['q']} queen${pieceCount['q'] > 1 ? 's' : ''}`);
+  if (pieceCount['r'] > 0) blackPieces.push(`${pieceCount['r']} rook${pieceCount['r'] > 1 ? 's' : ''}`);
+  if (pieceCount['b'] > 0) blackPieces.push(`${pieceCount['b']} bishop${pieceCount['b'] > 1 ? 's' : ''}`);
+  if (pieceCount['n'] > 0) blackPieces.push(`${pieceCount['n']} knight${pieceCount['n'] > 1 ? 's' : ''}`);
+  if (pieceCount['p'] > 0) blackPieces.push(`${pieceCount['p']} pawn${pieceCount['p'] > 1 ? 's' : ''}`);
+  
+  return `${turn} to move. White has: King, ${whitePieces.join(', ') || 'no other pieces'}. Black has: King, ${blackPieces.join(', ') || 'no other pieces'}.`;
+}
+
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -32,20 +66,25 @@ serve(async (req) => {
       throw new Error('LOVABLE_API_KEY is not configured');
     }
 
-    // Build a focused chess coaching prompt
-    const prompt = `You are an expert chess coach explaining a ${classification} to a club-level player.
+    const boardDescription = describeBoardFromFen(fen);
+    const evalLossPawns = Math.abs(evalDiff / 100).toFixed(1);
 
-Position (FEN): ${fen}
-Player color: ${playerColor}
-Game phase: ${gamePhase}
-Move played: ${movePlayed} (loses approximately ${Math.abs(evalDiff / 100).toFixed(1)} pawns of evaluation)
+    // Build a focused chess coaching prompt with board context
+    const prompt = `You are an expert chess coach. A ${playerColor} player made a ${classification} in the ${gamePhase}.
+
+POSITION BEFORE THE MOVE:
+FEN: ${fen}
+${boardDescription}
+
+THE MOVE:
+Played: ${movePlayed} (this is the ${classification}, losing about ${evalLossPawns} pawns of evaluation)
 Better move: ${bestMove}
 
-In exactly 2-3 sentences, explain:
-1. What is wrong with ${movePlayed} (concrete tactical or positional problem)
-2. Why ${bestMove} is better (what it achieves)
+TASK: In 2-3 clear sentences, explain:
+1. The specific tactical or positional problem with ${movePlayed}
+2. Why ${bestMove} is better and what it achieves
 
-Be specific and instructive. Use chess terminology appropriately. Focus on what the player can learn.`;
+Be concrete and educational. Reference specific squares, pieces, or threats when relevant. Do not be vague.`;
 
     const response = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
       method: 'POST',
@@ -58,27 +97,35 @@ Be specific and instructive. Use chess terminology appropriately. Focus on what 
         messages: [
           {
             role: 'system',
-            content: 'You are a chess coach. Give concise, educational explanations for chess moves. Be direct and specific.'
+            content: 'You are a chess coach helping students understand their mistakes. Give specific, actionable explanations using chess terminology. Always reference concrete squares and pieces.'
           },
           {
             role: 'user',
             content: prompt
           }
         ],
-        max_tokens: 200,
+        max_tokens: 250,
         temperature: 0.7
       }),
     });
 
     if (!response.ok) {
       if (response.status === 429) {
-        return new Response(JSON.stringify({ error: 'Rate limit exceeded, please try again later.' }), {
+        console.error('[explain-move] Rate limit exceeded');
+        return new Response(JSON.stringify({ 
+          error: 'Rate limit exceeded, please try again later.',
+          explanation: 'AI explanation temporarily unavailable due to rate limits.'
+        }), {
           status: 429,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
       if (response.status === 402) {
-        return new Response(JSON.stringify({ error: 'AI credits exhausted. Please add credits to continue.' }), {
+        console.error('[explain-move] Payment required');
+        return new Response(JSON.stringify({ 
+          error: 'AI credits exhausted. Please add credits to continue.',
+          explanation: 'AI explanation unavailable - credits needed.'
+        }), {
           status: 402,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
