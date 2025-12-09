@@ -8,7 +8,8 @@ import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
 import { 
   TrainingPosition, 
-  updateTrainingPosition 
+  updateTrainingPosition,
+  sanToUci 
 } from '@/lib/trainingGeneration';
 import { 
   Lightbulb, 
@@ -20,6 +21,37 @@ import {
   Eye
 } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
+
+// Compare moves using UCI format for reliability
+function movesMatch(fen: string, playedMove: { from: string; to: string; promotion?: string }, targetSan: string, targetUci: string): boolean {
+  // Build UCI from played move
+  let playedUci = playedMove.from + playedMove.to;
+  if (playedMove.promotion) {
+    playedUci += playedMove.promotion;
+  }
+  
+  // Compare with stored UCI
+  if (playedUci === targetUci) {
+    return true;
+  }
+  
+  // Fallback: compare SAN
+  try {
+    const chess = new Chess(fen);
+    const move = chess.move({
+      from: playedMove.from,
+      to: playedMove.to,
+      promotion: playedMove.promotion
+    });
+    if (move && move.san === targetSan) {
+      return true;
+    }
+  } catch (e) {
+    // Move comparison failed
+  }
+  
+  return false;
+}
 
 interface TrainingModeProps {
   positions: TrainingPosition[];
@@ -72,25 +104,33 @@ export function TrainingMode({ positions, onComplete, onPositionComplete }: Trai
     if (selectedSquare) {
       // Try to make a move
       try {
-        const move = chess.move({
+        const moveData = {
           from: selectedSquare,
           to: square,
-          promotion: 'q' // Auto-promote to queen
-        });
+          promotion: 'q' as const // Auto-promote to queen
+        };
+        
+        const move = chess.move(moveData);
 
         if (move) {
-          const moveSan = move.san;
-          const isCorrect = moveSan === currentPosition?.move_to_find;
+          // Use UCI comparison for reliability
+          const isCorrect = currentPosition && movesMatch(
+            currentPosition.fen,
+            { from: selectedSquare, to: square, promotion: move.promotion },
+            currentPosition.move_to_find,
+            currentPosition.move_to_find_uci
+          );
           
           setAttempts(prev => prev + 1);
           
           if (isCorrect) {
+            setBoardPosition(chess.fen());
             setResult('correct');
             setSessionStats(prev => ({ ...prev, correct: prev.correct + 1 }));
             toast.success('Correct!');
             
             // Update in database
-            if (currentPosition.id) {
+            if (currentPosition?.id) {
               updateTrainingPosition(currentPosition.id, true, attempts + 1, usedHint);
               onPositionComplete?.(currentPosition.id, true);
             }
@@ -135,8 +175,13 @@ export function TrainingMode({ positions, onComplete, onPositionComplete }: Trai
       });
 
       if (move) {
-        const moveSan = move.san;
-        const isCorrect = moveSan === currentPosition?.move_to_find;
+        // Use UCI comparison for reliability
+        const isCorrect = currentPosition && movesMatch(
+          currentPosition.fen,
+          { from: sourceSquare, to: targetSquare, promotion: move.promotion },
+          currentPosition.move_to_find,
+          currentPosition.move_to_find_uci
+        );
         
         setAttempts(prev => prev + 1);
         
@@ -191,8 +236,19 @@ export function TrainingMode({ positions, onComplete, onPositionComplete }: Trai
         }
       });
 
-      if (error) throw error;
-      setCurrentHint(data.hint);
+      if (error) {
+        // Check for rate limit or payment errors
+        const errorMessage = error.message || '';
+        if (errorMessage.includes('429') || errorMessage.includes('rate limit')) {
+          toast.error('Rate limit exceeded. Please wait a moment.');
+        } else if (errorMessage.includes('402') || errorMessage.includes('payment')) {
+          toast.error('AI credits exhausted. Please add credits.');
+        }
+        throw error;
+      }
+      
+      // Use hint from response, or fallback if there was an error returned
+      setCurrentHint(data.hint || data.error);
     } catch (e) {
       console.error('Error getting hint:', e);
       // Provide fallback hint

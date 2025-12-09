@@ -1,3 +1,4 @@
+import { Chess } from 'chess.js';
 import { CategorizedMistake } from './weaknessDetection';
 import { supabase } from '@/integrations/supabase/client';
 
@@ -28,6 +29,71 @@ export interface TrainingMistake extends CategorizedMistake {
   bestMoveUci?: string;
   evalLoss: number;
   gameContext?: string;
+}
+
+// Convert SAN move to UCI format
+export function sanToUci(fen: string, sanMove: string): string | null {
+  try {
+    const chess = new Chess(fen);
+    const move = chess.move(sanMove);
+    if (!move) return null;
+    
+    // UCI format: from + to + promotion (e.g., "e2e4", "e7e8q")
+    let uci = move.from + move.to;
+    if (move.promotion) {
+      uci += move.promotion;
+    }
+    return uci;
+  } catch (e) {
+    console.error('Error converting SAN to UCI:', e);
+    return null;
+  }
+}
+
+// Convert UCI move to SAN format
+export function uciToSan(fen: string, uciMove: string): string | null {
+  try {
+    const chess = new Chess(fen);
+    const from = uciMove.slice(0, 2);
+    const to = uciMove.slice(2, 4);
+    const promotion = uciMove.length > 4 ? uciMove.slice(4, 5) : undefined;
+    
+    const move = chess.move({ from, to, promotion });
+    if (!move) return null;
+    return move.san;
+  } catch (e) {
+    console.error('Error converting UCI to SAN:', e);
+    return null;
+  }
+}
+
+// Validate that a move is legal in a position
+export function isMoveLegal(fen: string, move: string): boolean {
+  try {
+    const chess = new Chess(fen);
+    
+    // Try as SAN first
+    try {
+      const result = chess.move(move);
+      return result !== null;
+    } catch {
+      // Not valid SAN, try as UCI
+      if (move.length >= 4) {
+        const from = move.slice(0, 2);
+        const to = move.slice(2, 4);
+        const promotion = move.length > 4 ? move.slice(4, 5) : undefined;
+        try {
+          const result = chess.move({ from, to, promotion });
+          return result !== null;
+        } catch {
+          return false;
+        }
+      }
+      return false;
+    }
+  } catch {
+    return false;
+  }
 }
 
 // Calculate difficulty 1-5 based on eval loss
@@ -114,20 +180,33 @@ export function extractTrainingPositions(
   // Take top N positions
   const selected = sorted.slice(0, maxPositions);
   
-  return selected.map(mistake => ({
-    fen: mistake.move.fenBefore,
-    move_to_find: mistake.move.bestMove,
-    move_to_find_uci: mistake.move.bestMove, // Use SAN as fallback
-    weakness_category: mistake.category,
-    difficulty: calculateDifficulty(Math.abs(mistake.move.evalLoss)),
-    eval_loss: Math.round(Math.abs(mistake.move.evalLoss)),
-    game_context: `Move ${mistake.move.moveNumber}: ${mistake.description}`,
-    times_attempted: 0,
-    times_correct: 0,
-    mastery_level: 0,
-    easiness_factor: 2.5,
-    next_review: new Date().toISOString(),
-  }));
+  return selected.map(mistake => {
+    const fen = mistake.move.fenBefore;
+    const sanMove = mistake.move.bestMove;
+    
+    // Convert SAN to UCI for reliable move validation
+    const uciMove = sanToUci(fen, sanMove) || sanMove;
+    
+    // Validate the move is legal
+    if (!isMoveLegal(fen, sanMove)) {
+      console.warn(`Invalid move ${sanMove} for position ${fen}`);
+    }
+    
+    return {
+      fen,
+      move_to_find: sanMove,
+      move_to_find_uci: uciMove,
+      weakness_category: mistake.category,
+      difficulty: calculateDifficulty(Math.abs(mistake.move.evalLoss)),
+      eval_loss: Math.round(Math.abs(mistake.move.evalLoss)),
+      game_context: `Move ${mistake.move.moveNumber}: ${mistake.description}`,
+      times_attempted: 0,
+      times_correct: 0,
+      mastery_level: 0,
+      easiness_factor: 2.5,
+      next_review: new Date().toISOString(),
+    };
+  });
 }
 
 // Save training positions to database

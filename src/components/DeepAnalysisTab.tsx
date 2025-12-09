@@ -171,7 +171,20 @@ export default function DeepAnalysisTab({ games = [], username }: DeepAnalysisTa
         }
       });
 
-      if (error) throw error;
+      if (error) {
+        // Check for rate limit or payment errors
+        const errorMessage = error.message || '';
+        if (errorMessage.includes('429') || errorMessage.includes('rate limit')) {
+          toast.error('Rate limit exceeded. Please wait a moment before requesting more explanations.');
+          setExplanation('AI explanation temporarily unavailable due to rate limits.');
+          return;
+        } else if (errorMessage.includes('402') || errorMessage.includes('payment')) {
+          toast.error('AI credits exhausted. Please add credits to continue.');
+          setExplanation('AI explanation unavailable - credits needed.');
+          return;
+        }
+        throw error;
+      }
 
       const explanationText = data?.explanation || 'Unable to generate explanation.';
       setExplanation(explanationText);
