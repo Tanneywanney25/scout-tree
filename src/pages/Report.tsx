@@ -7,6 +7,8 @@ import { toast } from "sonner";
 import type { SerializedAnalysisResult } from "@/lib/chessAnalysis";
 import InteractiveOpeningTree from "@/components/InteractiveOpeningTree";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import DeepAnalysisTab from "@/components/DeepAnalysisTab";
 
 const Report = () => {
   const { id } = useParams();
@@ -26,6 +28,9 @@ const Report = () => {
         }
         
         console.log('[REPORT] Loaded analysis from sessionStorage:', parsed.totalGames, 'games');
+        if (parsed.games) {
+          console.log('[REPORT] Games available for deep analysis:', parsed.games.length);
+        }
         setAnalysis(parsed);
         
         // Preserve the navigation state if it was passed
@@ -70,8 +75,6 @@ const Report = () => {
     toast.success("Report downloaded");
   };
 
-
-
   if (!analysis || loadError) {
     return (
       <div className="min-h-screen flex flex-col bg-background">
@@ -93,41 +96,6 @@ const Report = () => {
     );
   }
 
-  const generateSummary = () => {
-    const weakestLine = analysis.weakestLines[0];
-    const strongestLine = analysis.strongestLines[0];
-    
-    const opponentColor = analysis.playerColor === "white" ? "White" : "Black";
-    const yourColor = analysis.playerColor === "white" ? "Black" : "White";
-    
-    return `Analyzing ${id} playing as ${opponentColor} across ${analysis.totalGames} games. ` +
-           (weakestLine ? `They struggle most after ${weakestLine.line} (${(weakestLine.winRate * 100).toFixed(0)}% win rate, ${weakestLine.count} games). ` : '') +
-           (strongestLine ? `They excel after ${strongestLine.line} (${(strongestLine.winRate * 100).toFixed(0)}% win rate, ${strongestLine.count} games). ` : '') +
-           `As ${yourColor}, exploit their weaknesses and avoid their strongest lines.`;
-  };
-
-  const generateChecklist = () => {
-    const items: string[] = [];
-    
-    const opponentColor = analysis.playerColor === "white" ? "White" : "Black";
-    const yourColor = analysis.playerColor === "white" ? "Black" : "White";
-    
-    if (analysis.weakestLines.length > 0) {
-      const line = analysis.weakestLines[0];
-      items.push(`Play ${line.line.split(' ').slice(1).join(' ')} - they score only ${(line.winRate * 100).toFixed(0)}% here`);
-    }
-    
-    if (analysis.strongestLines.length > 0) {
-      const line = analysis.strongestLines[0];
-      items.push(`Avoid ${line.line.split(' ').slice(1).join(' ')} - they score ${(line.winRate * 100).toFixed(0)}% here`);
-    }
-    
-    items.push(`${analysis.totalGames} games analyzed as ${opponentColor} - ${analysis.totalGames > 100 ? 'highly' : 'moderately'} reliable dataset`);
-    items.push(`You play ${yourColor} - prepare your response repertoire`);
-    
-    return items;
-  };
-
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <Header />
@@ -141,6 +109,9 @@ const Report = () => {
               </h1>
               <p className="text-muted-foreground">
                 {analysis.totalGames} total games analyzed • Playing as {analysis.playerColor}
+                {analysis.games && analysis.games.length > 0 && (
+                  <span className="ml-2">• {analysis.games.length} games available for deep analysis</span>
+                )}
               </p>
             </div>
             <Button onClick={handleDownload} variant="outline">
@@ -149,165 +120,51 @@ const Report = () => {
             </Button>
           </div>
 
-          {/* Main Layout: Board and Lines */}
-          <div className="flex justify-center">
-            {analysis.openingTree && analysis.totalGames > 0 ? (
-              <ErrorBoundary fallback={
-                <div className="p-8 text-center border border-destructive/50 rounded-lg bg-destructive/10">
-                  <p className="text-destructive font-semibold">Error rendering opening tree</p>
-                  <p className="text-sm text-muted-foreground mt-2">The tree data may be too large or corrupted.</p>
-                </div>
-              }>
-                <InteractiveOpeningTree 
-                  node={analysis.openingTree} 
-                  maxDepth={15}
-                  playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
-                  initialSelectedPath={initialPath}
-                />
-              </ErrorBoundary>
-            ) : (
-              <div className="text-center py-8 text-muted-foreground">
-                <p>No opening tree data available. No games were found or analysis incomplete.</p>
-              </div>
-            )}
-          </div>
+          {/* Tabs for Opening Tree and Deep Analysis */}
+          <Tabs defaultValue="opening-tree" className="w-full">
+            <TabsList className="mb-6">
+              <TabsTrigger value="opening-tree">Opening Tree</TabsTrigger>
+              <TabsTrigger value="deep-analysis">
+                Deep Analysis
+                {analysis.games && analysis.games.length > 0 && (
+                  <span className="ml-1.5 text-xs bg-primary/20 px-1.5 py-0.5 rounded">
+                    {analysis.games.length}
+                  </span>
+                )}
+              </TabsTrigger>
+            </TabsList>
 
-          {/* COMMENTED OUT FOR LATER - Left Sidebar: Summary & Checklist */}
-          {/* <div className="lg:col-span-2 space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>60-Second Summary</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-foreground leading-relaxed">
-                  {generateSummary()}
-                </p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Pregame Checklist</CardTitle>
-                <CardDescription>Review before the game starts</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <ul className="space-y-3">
-                  {generateChecklist().map((item, i) => (
-                    <li key={i} className="flex items-start gap-2 text-sm">
-                      <ChevronRight className="w-4 h-4 text-primary shrink-0 mt-0.5" />
-                      <span className="text-foreground">{item}</span>
-                    </li>
-                  ))}
-                </ul>
-              </CardContent>
-            </Card>
-          </div> */}
-
-          {/* COMMENTED OUT FOR LATER - Right Sidebar: Stats */}
-          {/* <div className="lg:col-span-2 space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>Statistics</CardTitle>
-                <CardDescription>Key metrics</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  <div>
-                    <p className="text-sm text-muted-foreground">Total Games</p>
-                    <p className="text-2xl font-bold text-foreground">{analysis.totalGames}</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground">Playing As</p>
-                    <p className="text-xl font-semibold text-foreground capitalize">{analysis.playerColor}</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground">Weak Lines</p>
-                    <p className="text-2xl font-bold text-destructive">{analysis.weakestLines.length}</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-muted-foreground">Strong Lines</p>
-                    <p className="text-2xl font-bold text-primary">{analysis.strongestLines.length}</p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </div> */}
-
-          {/* COMMENTED OUT FOR LATER - Bottom Section: Opening Lines */}
-          {/* <div className="grid lg:grid-cols-2 gap-6 mt-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>Weakest Opening Lines</CardTitle>
-                <CardDescription>
-                  Lines where {id} (playing {analysis.playerColor}) struggles most - exploit these as {analysis.playerColor === "white" ? "Black" : "White"}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                {analysis.weakestLines.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    Not enough game data to identify weak lines
-                  </p>
+            <TabsContent value="opening-tree">
+              <div className="flex justify-center">
+                {analysis.openingTree && analysis.totalGames > 0 ? (
+                  <ErrorBoundary fallback={
+                    <div className="p-8 text-center border border-destructive/50 rounded-lg bg-destructive/10">
+                      <p className="text-destructive font-semibold">Error rendering opening tree</p>
+                      <p className="text-sm text-muted-foreground mt-2">The tree data may be too large or corrupted.</p>
+                    </div>
+                  }>
+                    <InteractiveOpeningTree 
+                      node={analysis.openingTree} 
+                      maxDepth={15}
+                      playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
+                      initialSelectedPath={initialPath}
+                    />
+                  </ErrorBoundary>
                 ) : (
-                  <div className="grid grid-cols-1 gap-4">
-                    {analysis.weakestLines.map((line, index) => (
-                      <OpeningLineBoard
-                        key={index}
-                        line={line.line}
-                        winRate={line.winRate}
-                        count={line.count}
-                        isWeakLine={true}
-                        playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
-                      />
-                    ))}
+                  <div className="text-center py-8 text-muted-foreground">
+                    <p>No opening tree data available. No games were found or analysis incomplete.</p>
                   </div>
                 )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Strongest Opening Lines</CardTitle>
-                <CardDescription>
-                  Lines where {id} (playing {analysis.playerColor}) performs best - avoid or prepare deeply as {analysis.playerColor === "white" ? "Black" : "White"}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                {analysis.strongestLines.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    Not enough game data to identify strong lines
-                  </p>
-                ) : (
-                  <div className="grid grid-cols-1 gap-4">
-                    {analysis.strongestLines.map((line, index) => (
-                      <OpeningLineBoard
-                        key={index}
-                        line={line.line}
-                        winRate={line.winRate}
-                        count={line.count}
-                        isWeakLine={false}
-                        playerColor={analysis.playerColor === "both" ? "white" : analysis.playerColor}
-                      />
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div> */}
-
-          {/* COMMENTED OUT FOR LATER - Training Drill Section */}
-          {/* <Card className="mt-6">
-            <CardHeader>
-              <CardTitle>Training Drill</CardTitle>
-              <CardDescription>3 positions to practice before your game</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="bg-muted/30 border border-border rounded-lg p-8 text-center">
-                <p className="text-sm text-muted-foreground">
-                  Training positions coming soon - requires engine analysis
-                </p>
               </div>
-            </CardContent>
-          </Card> */}
+            </TabsContent>
+
+            <TabsContent value="deep-analysis">
+              <DeepAnalysisTab 
+                games={analysis.games} 
+                username={id || ''} 
+              />
+            </TabsContent>
+          </Tabs>
         </div>
       </main>
     </div>

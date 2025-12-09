@@ -44,6 +44,16 @@ export function buildFenToNodesMap(
   return map;
 }
 
+export interface StoredGameData {
+  pgn: string;
+  white: string;
+  black: string;
+  result: string;
+  date?: string;
+  url?: string;
+  timeControl?: string;
+}
+
 export interface SerializedAnalysisResult {
   totalGames: number;
   openingTree: any; // Serialized tree structure
@@ -59,6 +69,7 @@ export interface SerializedAnalysisResult {
   }>;
   playerColor: "white" | "black" | "both";
   initialSelectedPath?: string[]; // Preserved navigation state
+  games?: StoredGameData[]; // Raw games for deep analysis (max 50)
 }
 
 export function createEmptyAnalysis(playerColor: "white" | "black" | "both" = "both"): AnalysisResult {
