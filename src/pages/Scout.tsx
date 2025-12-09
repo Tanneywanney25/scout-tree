@@ -66,8 +66,10 @@ const Scout = () => {
   const [finalGameCount, setFinalGameCount] = useState<number>(0);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [currentBoardPath, setCurrentBoardPath] = useState<string[]>([]);
+  const [collectedGames, setCollectedGames] = useState<GameData[]>([]); // Store games for deep analysis
   const abortControllerRef = useRef<AbortController | null>(null);
   const progressRef = useRef<number>(0); // Track accurate game count imperatively
+  const collectedGamesRef = useRef<GameData[]>([]); // Ref for collecting games during streaming
   
   // Filter change detection state
   const [baselineFilters, setBaselineFilters] = useState<FilterSnapshot | null>(null);
@@ -347,6 +349,7 @@ const Scout = () => {
       const batchQueue: GameData[][] = [];
       let processingBatches = false;
       let lastAnalysisUpdate = 0;
+      collectedGamesRef.current = []; // Reset game collection
       
       const processBatches = async () => {
         if (processingBatches) return;
@@ -354,6 +357,12 @@ const Scout = () => {
         while (batchQueue.length > 0) {
           const batch = batchQueue.shift()!;
           try {
+            // Collect games for deep analysis (max 50)
+            if (collectedGamesRef.current.length < 50) {
+              const remaining = 50 - collectedGamesRef.current.length;
+              collectedGamesRef.current.push(...batch.slice(0, remaining));
+            }
+            
             analysis = await analyzeGamesIncremental(analysis, batch, username);
             // Throttle state updates to max 5 per second
             const now = performance.now();
@@ -532,14 +541,24 @@ const Scout = () => {
   const handleViewFullReport = () => {
     if (!currentAnalysis) return;
     
+    // Convert collected games to storable format
+    const storedGames = collectedGamesRef.current.map(g => ({
+      pgn: g.pgn,
+      white: g.white,
+      black: g.black,
+      result: g.winner === 'white' ? '1-0' : g.winner === 'black' ? '0-1' : '1/2-1/2',
+      timeControl: g.timeControl,
+      url: g.gameId ? `https://lichess.org/${g.gameId}` : undefined
+    }));
+    
     const serializedAnalysis = {
       playerColor: currentAnalysis.playerColor,
       totalGames: currentAnalysis.totalGames,
       openingTree: serializeOpeningTree(currentAnalysis.openingTree),
       weakestLines: currentAnalysis.weakestLines,
       strongestLines: currentAnalysis.strongestLines,
-      // Preserve the current navigation state
-      initialSelectedPath: currentBoardPath
+      initialSelectedPath: currentBoardPath,
+      games: storedGames // Include games for deep analysis
     };
     
     sessionStorage.setItem('scoutAnalysis', JSON.stringify(serializedAnalysis));
