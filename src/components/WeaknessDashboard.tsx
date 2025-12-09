@@ -6,8 +6,11 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Loader2, TrendingDown, Target, AlertTriangle, Lightbulb, Play, BarChart3 } from "lucide-react";
+import { Loader2, TrendingDown, Target, AlertTriangle, Lightbulb, Play, BarChart3, Brain } from "lucide-react";
 import { toast } from "sonner";
+import { useNavigate } from "react-router-dom";
+import { extractTrainingPositions, saveTrainingPositions } from "@/lib/trainingGeneration";
+import { useAuth } from "@/hooks/useAuth";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from "recharts";
 import {
   StockfishEngine,
@@ -62,9 +65,47 @@ export default function WeaknessDashboard({ games = [], username }: WeaknessDash
   const [selectedWeakness, setSelectedWeakness] = useState<WeaknessSummary | null>(null);
   const [selectedExample, setSelectedExample] = useState<CategorizedMistake | null>(null);
   const [boardOrientation, setBoardOrientation] = useState<'white' | 'black'>('white');
+  const [generatingTraining, setGeneratingTraining] = useState(false);
   
   const engineRef = useRef<StockfishEngine | null>(null);
   const abortRef = useRef(false);
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  
+  // Collect all mistakes for training generation
+  const allMistakes = report?.weaknesses.flatMap(w => w.examples) || [];
+
+  const handleGenerateTraining = async () => {
+    if (!user) {
+      toast.error('Please sign in to generate training drills');
+      navigate('/auth');
+      return;
+    }
+    
+    if (allMistakes.length === 0) {
+      toast.error('No mistakes found to generate training from');
+      return;
+    }
+
+    setGeneratingTraining(true);
+    try {
+      const positions = extractTrainingPositions(allMistakes, 20);
+      const { saved, errors } = await saveTrainingPositions(positions);
+      
+      if (saved > 0) {
+        toast.success(`Generated ${saved} training positions!`);
+        navigate('/training');
+      } else if (errors.length > 0) {
+        toast.error(errors[0]);
+      } else {
+        toast.info('All positions already in your training library');
+      }
+    } catch (e) {
+      toast.error('Failed to generate training positions');
+    } finally {
+      setGeneratingTraining(false);
+    }
+  };
 
   // Cleanup on unmount
   useEffect(() => {
@@ -265,6 +306,23 @@ export default function WeaknessDashboard({ games = [], username }: WeaknessDash
               </CardContent>
             </Card>
           </div>
+
+          {/* Generate Training Button */}
+          <Card className="border-primary/20 bg-primary/5">
+            <CardContent className="pt-6 flex items-center justify-between">
+              <div>
+                <p className="font-medium">Generate Training Drills</p>
+                <p className="text-sm text-muted-foreground">Create spaced repetition drills from {allMistakes.length} mistakes</p>
+              </div>
+              <Button 
+                onClick={handleGenerateTraining} 
+                disabled={generatingTraining || allMistakes.length === 0}
+              >
+                {generatingTraining ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Brain className="w-4 h-4 mr-2" />}
+                Generate Training
+              </Button>
+            </CardContent>
+          </Card>
 
           {/* Main Content Grid */}
           <div className="grid lg:grid-cols-[1fr,400px] gap-6">

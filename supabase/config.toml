@@ -2,3 +2,6 @@ project_id = "awngnikycuhkagnqlrlk"
 
 [functions.explain-move]
 verify_jwt = false
+
+[functions.training-hint]
+verify_jwt = false
