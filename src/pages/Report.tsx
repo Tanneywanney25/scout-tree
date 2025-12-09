@@ -9,6 +9,7 @@ import InteractiveOpeningTree from "@/components/InteractiveOpeningTree";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import DeepAnalysisTab from "@/components/DeepAnalysisTab";
+import WeaknessDashboard from "@/components/WeaknessDashboard";
 
 const Report = () => {
   const { id } = useParams();
@@ -120,7 +121,7 @@ const Report = () => {
             </Button>
           </div>
 
-          {/* Tabs for Opening Tree and Deep Analysis */}
+          {/* Tabs for Opening Tree, Deep Analysis, and Weakness Analysis */}
           <Tabs defaultValue="opening-tree" className="w-full">
             <TabsList className="mb-6">
               <TabsTrigger value="opening-tree">Opening Tree</TabsTrigger>
@@ -131,6 +132,9 @@ const Report = () => {
                     {analysis.games.length}
                   </span>
                 )}
+              </TabsTrigger>
+              <TabsTrigger value="weakness-analysis">
+                Weakness Analysis
               </TabsTrigger>
             </TabsList>
 
@@ -160,6 +164,13 @@ const Report = () => {
 
             <TabsContent value="deep-analysis">
               <DeepAnalysisTab 
+                games={analysis.games} 
+                username={id || ''} 
+              />
+            </TabsContent>
+
+            <TabsContent value="weakness-analysis">
+              <WeaknessDashboard 
                 games={analysis.games} 
                 username={id || ''} 
               />
