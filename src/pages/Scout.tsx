@@ -70,6 +70,7 @@ const Scout = () => {
   const abortControllerRef = useRef<AbortController | null>(null);
   const progressRef = useRef<number>(0); // Track accurate game count imperatively
   const collectedGamesRef = useRef<GameData[]>([]); // Ref for collecting games during streaming
+  const currentAnalysisRef = useRef<AnalysisResult | null>(null); // Ref to access current analysis in abort handler
   
   // Filter change detection state
   const [baselineFilters, setBaselineFilters] = useState<FilterSnapshot | null>(null);
@@ -130,6 +131,11 @@ const Scout = () => {
     const controls = platform === "chesscom" ? chesscomTimeControls : lichessTimeControls;
     setTimeControls(controls);
   }, [platform]);
+
+  // Keep currentAnalysisRef in sync with state to avoid stale closure in abort handler
+  useEffect(() => {
+    currentAnalysisRef.current = currentAnalysis;
+  }, [currentAnalysis]);
 
   // Cleanup: abort any running analysis when component unmounts
   useEffect(() => {
@@ -453,9 +459,11 @@ const Scout = () => {
       toast.dismiss();
       
       if (error.name === 'AbortError') {
-        if (currentAnalysis && currentAnalysis.totalGames > 0) {
+        // Use ref to get current analysis value (avoids stale closure)
+        const analysisSnapshot = currentAnalysisRef.current;
+        if (analysisSnapshot && analysisSnapshot.totalGames > 0) {
           // Use analysis.totalGames as authoritative count
-          const stoppedCount = currentAnalysis.totalGames;
+          const stoppedCount = analysisSnapshot.totalGames;
           console.log(`[SCOUT] Analysis stopped. progressRef=${progressRef.current}, analysis.totalGames=${stoppedCount}`);
           setFinalGameCount(stoppedCount);
           setIsAnalysisComplete(true);

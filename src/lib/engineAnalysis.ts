@@ -138,7 +138,30 @@ export class StockfishEngine {
       throw new Error('Engine not initialized');
     }
 
-    return new Promise((resolve) => {
+    // Check if position is terminal (checkmate/stalemate) - engine won't return bestmove
+    try {
+      const chess = new Chess(fen);
+      if (chess.isGameOver()) {
+        const isCheckmate = chess.isCheckmate();
+        const turn = chess.turn();
+        return {
+          evaluation: isCheckmate ? (turn === 'w' ? -10000 : 10000) : 0,
+          bestMove: '',
+          bestMoveSan: '',
+          principalVariation: [],
+          depth: 0,
+          mate: isCheckmate ? (turn === 'w' ? -1 : 1) : undefined
+        };
+      }
+    } catch {
+      // Continue with analysis if FEN parsing fails
+    }
+
+    // Stop any pending analysis first
+    this.worker.postMessage('stop');
+
+    // Create analysis promise with timeout
+    const analysisPromise = new Promise<PositionAnalysis>((resolve) => {
       this.outputBuffer = [];
       
       // Set up position
@@ -162,6 +185,22 @@ export class StockfishEngine {
       
       this.worker!.addEventListener('message', handler);
     });
+
+    // Wrap with 10 second timeout
+    const timeoutPromise = new Promise<PositionAnalysis>((resolve) => {
+      setTimeout(() => {
+        this.worker?.postMessage('stop');
+        resolve({
+          evaluation: 0,
+          bestMove: '',
+          bestMoveSan: '',
+          principalVariation: [],
+          depth: 0
+        });
+      }, 10000);
+    });
+
+    return Promise.race([analysisPromise, timeoutPromise]);
   }
 
   private parseAnalysisOutput(lines: string[], fen: string): PositionAnalysis {

@@ -340,15 +340,15 @@ export default function DeepAnalysisTab({ games = [], username }: DeepAnalysisTa
                 </Button>
               </div>
 
-              {/* Chessboard - use key to force remount on position change to fix piece display */}
+              {/* Chessboard - transitionDuration={0} prevents animation artifacts */}
               <div className="flex justify-center">
                 <Chessboard
-                  key={boardPosition}
                   position={boardPosition}
                   orientation={boardOrientation}
                   width={400}
                   draggable={false}
                   transitionDuration={0}
+                  sparePieces={false}
                 />
               </div>
 
