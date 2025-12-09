@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import DeepAnalysisTab from "@/components/DeepAnalysisTab";
 import WeaknessDashboard from "@/components/WeaknessDashboard";
 import OpponentProfile from "@/components/OpponentProfile";
+import { StructureWeaknesses } from "@/components/StructureWeaknesses";
 
 const Report = () => {
   const { id } = useParams();
@@ -140,6 +141,9 @@ const Report = () => {
               <TabsTrigger value="weakness-analysis">
                 Weakness Analysis
               </TabsTrigger>
+              <TabsTrigger value="pawn-structures">
+                Pawn Structures
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="opening-tree">
@@ -182,6 +186,13 @@ const Report = () => {
 
             <TabsContent value="weakness-analysis">
               <WeaknessDashboard 
+                games={analysis.games} 
+                username={id || ''} 
+              />
+            </TabsContent>
+
+            <TabsContent value="pawn-structures">
+              <StructureWeaknesses 
                 games={analysis.games} 
                 username={id || ''} 
               />
