@@ -92,10 +92,9 @@ export class StockfishEngine {
   async init(): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        // Use stockfish.js from CDN for browser compatibility
+        // Use CDN-hosted Stockfish.js for browser compatibility
         this.worker = new Worker(
-          new URL('stockfish/src/stockfish-nnue-16.js', import.meta.url),
-          { type: 'module' }
+          'https://cdn.jsdelivr.net/npm/stockfish@16.0.0/src/stockfish-nnue-16-single.js'
         );
         
         this.worker.onmessage = (e) => {
