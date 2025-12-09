@@ -90,12 +90,15 @@ export class StockfishEngine {
   private outputBuffer: string[] = [];
 
   async init(): Promise<void> {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
       try {
-        // Use CDN-hosted Stockfish.js for browser compatibility
-        this.worker = new Worker(
-          'https://cdn.jsdelivr.net/npm/stockfish@16.0.0/src/stockfish-nnue-16-single.js'
-        );
+        // Fetch the Stockfish script and create a blob URL to bypass CORS
+        const stockfishUrl = 'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js';
+        const response = await fetch(stockfishUrl);
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        
+        this.worker = new Worker(blobUrl);
         
         this.worker.onmessage = (e) => {
           const message = e.data;
