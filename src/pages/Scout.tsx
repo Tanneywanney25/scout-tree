@@ -444,6 +444,9 @@ const Scout = () => {
       // Store baseline filters for change detection
       setBaselineFilters({ ...currentFilters });
       
+      // Save collected games for deep analysis
+      setCollectedGames([...collectedGamesRef.current]);
+      
       toast.success(`Analysis complete! Analyzed ${finalCount} games.`);
     } catch (error: any) {
       console.error("Scout error:", error);
@@ -456,6 +459,13 @@ const Scout = () => {
           console.log(`[SCOUT] Analysis stopped. progressRef=${progressRef.current}, analysis.totalGames=${stoppedCount}`);
           setFinalGameCount(stoppedCount);
           setIsAnalysisComplete(true);
+          
+          // Store baseline filters for the stopped analysis
+          setBaselineFilters({ ...currentFilters });
+          
+          // Save collected games so far
+          setCollectedGames([...collectedGamesRef.current]);
+          
           toast.success(`Analysis stopped. ${stoppedCount} games analyzed.`);
         } else {
           toast.info("Analysis cancelled");
