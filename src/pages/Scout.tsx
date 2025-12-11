@@ -464,11 +464,15 @@ const Scout = () => {
       if (error.name === 'AbortError') {
         // Use synchronously-updated analysisRef (not throttled state ref)
         const analysisSnapshot = analysisRef.current;
-        if (analysisSnapshot && analysisSnapshot.totalGames > 0) {
-          // Use analysis.totalGames as authoritative count
-          const stoppedCount = analysisSnapshot.totalGames;
-          console.log(`[SCOUT] Analysis stopped. progressRef=${progressRef.current}, analysis.totalGames=${stoppedCount}`);
-          
+        const gamesAnalyzed = analysisSnapshot?.totalGames || 0;
+        const gamesProgress = progressRef.current || 0;
+        
+        // Use whichever count is higher (progress might be ahead of analysis)
+        const stoppedCount = Math.max(gamesAnalyzed, gamesProgress);
+        
+        console.log(`[SCOUT] Analysis stopped. progressRef=${gamesProgress}, analysis.totalGames=${gamesAnalyzed}, using=${stoppedCount}`);
+        
+        if (stoppedCount > 0 && analysisSnapshot) {
           // CRITICAL: Preserve the analysis data - update state before marking complete
           setCurrentAnalysis(analysisSnapshot);
           setFinalGameCount(stoppedCount);
@@ -481,8 +485,14 @@ const Scout = () => {
           setCollectedGames([...collectedGamesRef.current]);
           
           toast.success(`Analysis stopped. ${stoppedCount} games analyzed. View your partial report below.`);
+        } else if (stoppedCount > 0) {
+          // Have progress count but no analysis yet - create minimal analysis
+          setFinalGameCount(stoppedCount);
+          setIsAnalysisComplete(true);
+          toast.success(`Analysis stopped. ${stoppedCount} games fetched.`);
         } else {
-          toast.info("Analysis cancelled");
+          // No games at all
+          toast.info("Analysis stopped. No games were analyzed yet.");
         }
         return;
       }
