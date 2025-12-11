@@ -22,6 +22,7 @@ interface StoredGame {
   date?: string;
   url?: string;
   timeControl?: string;
+  opening?: string;
 }
 
 interface OpponentProfileProps {
@@ -62,6 +63,7 @@ export default function OpponentProfile({ games = [], username }: OpponentProfil
         black: g.black,
         winner: g.result === '1-0' ? 'white' : g.result === '0-1' ? 'black' : undefined,
         timeControl: g.timeControl,
+        opening: g.opening, // Pass opening for profiling
       }));
       
       const generated = generateOpponentProfile(gameData, username);

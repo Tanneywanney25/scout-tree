@@ -229,22 +229,43 @@ function analyzeGameLengths(games: GameData[], username: string): GameLengthStat
 }
 
 // Analyze opening patterns
-function analyzeOpeningStyle(games: GameData[]): OpeningStyleStats {
+function analyzeOpeningStyle(games: GameData[], username: string): OpeningStyleStats {
   const openings = new Set<string>();
   let gambits = 0;
   let solidOpenings = 0;
   let totalDeviationPly = 0;
   let gamesWithOpening = 0;
   
-  const gambitPatterns = ['gambit', 'sacrifice', 'danish', 'evans', 'king\'s'];
-  const solidPatterns = ['caro-kann', 'slav', 'berlin', 'petrov', 'london'];
+  const gambitPatterns = ['gambit', 'sacrifice', 'danish', 'evans', 'king\'s', 'benko', 'latvian', 'smith-morra'];
+  const solidPatterns = ['caro-kann', 'slav', 'berlin', 'petrov', 'london', 'french', 'qgd', 'symmetrical'];
   
   for (const game of games) {
+    let openingId: string | null = null;
+    let openingLower: string = '';
+    
+    // Try to get opening from game data first
     if (game.opening) {
-      openings.add(game.opening.split(':')[0]); // Get main opening name
+      openingId = game.opening.split(':')[0];
+      openingLower = game.opening.toLowerCase();
+    } else {
+      // Fallback: derive opening from first 6 moves of PGN
+      try {
+        const chess = new Chess();
+        chess.loadPgn(game.pgn);
+        const moves = chess.history();
+        if (moves.length >= 2) {
+          openingId = moves.slice(0, Math.min(6, moves.length)).join(' ');
+          openingLower = openingId.toLowerCase();
+        }
+      } catch {
+        continue;
+      }
+    }
+    
+    if (openingId) {
+      openings.add(openingId);
       gamesWithOpening++;
       
-      const openingLower = game.opening.toLowerCase();
       if (gambitPatterns.some(p => openingLower.includes(p))) {
         gambits++;
       }
@@ -376,7 +397,7 @@ export function generateOpponentProfile(
   const gameLength = analyzeGameLengths(games, username);
   
   // Analyze opening style
-  const openingStyle = analyzeOpeningStyle(games);
+  const openingStyle = analyzeOpeningStyle(games, username);
   
   // Analyze mental game
   const mentalGame = analyzeMentalGame(games, username);

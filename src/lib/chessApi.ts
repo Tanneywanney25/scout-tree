@@ -195,8 +195,9 @@ export async function fetchLichessGames(
     params.append('perfType', timeControls[0]);
   }
   
-  // Always include pgnInJson
+  // Always include pgnInJson and clocks for time management analysis
   params.append('pgnInJson', 'true');
+  params.append('clocks', 'true');
   
   // Date filtering - normalize to day boundaries for inclusive behavior
   if (dateFrom) {
