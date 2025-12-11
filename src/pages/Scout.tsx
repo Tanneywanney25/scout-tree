@@ -71,6 +71,7 @@ const Scout = () => {
   const progressRef = useRef<number>(0); // Track accurate game count imperatively
   const collectedGamesRef = useRef<GameData[]>([]); // Ref for collecting games during streaming
   const currentAnalysisRef = useRef<AnalysisResult | null>(null); // Ref to access current analysis in abort handler
+  const analysisRef = useRef<AnalysisResult | null>(null); // Synchronously updated ref for abort handler
   
   // Filter change detection state
   const [baselineFilters, setBaselineFilters] = useState<FilterSnapshot | null>(null);
@@ -332,6 +333,7 @@ const Scout = () => {
     try {
       const actualPlatform = platform === "auto" ? "lichess" : platform;
       let analysis = createEmptyAnalysis(color);
+      analysisRef.current = analysis; // Initialize synchronously
       
       const fetchOptions = {
         variant,
@@ -370,6 +372,7 @@ const Scout = () => {
             }
             
             analysis = await analyzeGamesIncremental(analysis, batch, username);
+            analysisRef.current = analysis; // Update synchronously for abort handler
             // Throttle state updates to max 5 per second
             const now = performance.now();
             if (now - lastAnalysisUpdate > 200) {
@@ -459,12 +462,15 @@ const Scout = () => {
       toast.dismiss();
       
       if (error.name === 'AbortError') {
-        // Use ref to get current analysis value (avoids stale closure)
-        const analysisSnapshot = currentAnalysisRef.current;
+        // Use synchronously-updated analysisRef (not throttled state ref)
+        const analysisSnapshot = analysisRef.current;
         if (analysisSnapshot && analysisSnapshot.totalGames > 0) {
           // Use analysis.totalGames as authoritative count
           const stoppedCount = analysisSnapshot.totalGames;
           console.log(`[SCOUT] Analysis stopped. progressRef=${progressRef.current}, analysis.totalGames=${stoppedCount}`);
+          
+          // CRITICAL: Preserve the analysis data - update state before marking complete
+          setCurrentAnalysis(analysisSnapshot);
           setFinalGameCount(stoppedCount);
           setIsAnalysisComplete(true);
           
@@ -474,7 +480,7 @@ const Scout = () => {
           // Save collected games so far
           setCollectedGames([...collectedGamesRef.current]);
           
-          toast.success(`Analysis stopped. ${stoppedCount} games analyzed.`);
+          toast.success(`Analysis stopped. ${stoppedCount} games analyzed. View your partial report below.`);
         } else {
           toast.info("Analysis cancelled");
         }
@@ -559,13 +565,14 @@ const Scout = () => {
   const handleViewFullReport = () => {
     if (!currentAnalysis) return;
     
-    // Convert collected games to storable format
+    // Convert collected games to storable format - include opening for profiling!
     const storedGames = collectedGamesRef.current.map(g => ({
       pgn: g.pgn,
       white: g.white,
       black: g.black,
       result: g.winner === 'white' ? '1-0' : g.winner === 'black' ? '0-1' : '1/2-1/2',
       timeControl: g.timeControl,
+      opening: g.opening, // Critical for opponent profiling!
       url: g.gameId ? `https://lichess.org/${g.gameId}` : undefined
     }));
     
