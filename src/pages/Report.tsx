@@ -152,7 +152,7 @@ const Report = () => {
 
             <TabsContent value="opening-tree">
               <div className="flex justify-center">
-                {analysis.openingTree && analysis.totalGames > 0 ? (
+                {analysis.openingTree && analysis.openingTree.count > 0 ? (
                   <ErrorBoundary fallback={
                     <div className="p-8 text-center border border-destructive/50 rounded-lg bg-destructive/10">
                       <p className="text-destructive font-semibold">Error rendering opening tree</p>
@@ -168,7 +168,12 @@ const Report = () => {
                   </ErrorBoundary>
                 ) : (
                   <div className="text-center py-8 text-muted-foreground">
-                    <p>No opening tree data available. No games were found or analysis incomplete.</p>
+                    <p>No opening tree data available.</p>
+                    {analysis.games && analysis.games.length > 0 && (
+                      <p className="mt-2 text-sm">
+                        {analysis.games.length} games were collected. Check the Opponent Profile tab for analysis.
+                      </p>
+                    )}
                   </div>
                 )}
               </div>

@@ -466,14 +466,20 @@ const Scout = () => {
         const analysisSnapshot = analysisRef.current;
         const gamesAnalyzed = analysisSnapshot?.totalGames || 0;
         const gamesProgress = progressRef.current || 0;
+        const collectedCount = collectedGamesRef.current.length;
         
-        // Use whichever count is higher (progress might be ahead of analysis)
-        const stoppedCount = Math.max(gamesAnalyzed, gamesProgress);
+        // Use the highest count available - analysis games, progress count, or collected games
+        const stoppedCount = Math.max(gamesAnalyzed, gamesProgress, collectedCount);
         
-        console.log(`[SCOUT] Analysis stopped. progressRef=${gamesProgress}, analysis.totalGames=${gamesAnalyzed}, using=${stoppedCount}`);
+        console.log(`[SCOUT] Analysis stopped. progressRef=${gamesProgress}, analysis.totalGames=${gamesAnalyzed}, collected=${collectedCount}, using=${stoppedCount}`);
+        console.log(`[SCOUT] Analysis openingTree count:`, analysisSnapshot?.openingTree?.count);
         
-        if (stoppedCount > 0 && analysisSnapshot) {
-          // CRITICAL: Preserve the analysis data - update state before marking complete
+        // Check if we have a valid opening tree (has at least some games processed)
+        const hasValidTree = analysisSnapshot && analysisSnapshot.openingTree && analysisSnapshot.openingTree.count > 0;
+        
+        if (hasValidTree) {
+          // We have a valid tree with games - use it
+          console.log(`[SCOUT] Using valid tree with ${analysisSnapshot.openingTree.count} games in root`);
           setCurrentAnalysis(analysisSnapshot);
           setFinalGameCount(stoppedCount);
           setIsAnalysisComplete(true);
@@ -485,11 +491,28 @@ const Scout = () => {
           setCollectedGames([...collectedGamesRef.current]);
           
           toast.success(`Analysis stopped. ${stoppedCount} games analyzed. View your partial report below.`);
+        } else if (collectedCount > 0 && analysisSnapshot) {
+          // We have collected games but tree wasn't fully built - try to rebuild from collected games
+          console.log(`[SCOUT] No valid tree but have ${collectedCount} collected games - using collected games`);
+          
+          // Update totalGames to reflect collected games even if tree is incomplete
+          const updatedAnalysis = {
+            ...analysisSnapshot,
+            totalGames: Math.max(analysisSnapshot.totalGames, collectedCount)
+          };
+          
+          setCurrentAnalysis(updatedAnalysis);
+          setFinalGameCount(stoppedCount);
+          setIsAnalysisComplete(true);
+          setBaselineFilters({ ...currentFilters });
+          setCollectedGames([...collectedGamesRef.current]);
+          
+          toast.success(`Analysis stopped. ${stoppedCount} games collected. View your partial report below.`);
         } else if (stoppedCount > 0) {
           // Have progress count but no analysis yet - create minimal analysis
           setFinalGameCount(stoppedCount);
           setIsAnalysisComplete(true);
-          toast.success(`Analysis stopped. ${stoppedCount} games fetched.`);
+          toast.info(`Analysis stopped. ${stoppedCount} games fetched but not yet analyzed.`);
         } else {
           // No games at all
           toast.info("Analysis stopped. No games were analyzed yet.");
@@ -901,7 +924,7 @@ const Scout = () => {
             </CardContent>
           </Card>
 
-          {currentAnalysis && (progress || 0) >= 1 && (
+          {currentAnalysis && currentAnalysis.openingTree && currentAnalysis.openingTree.count > 0 && (
             <Card className="mt-8">
               <CardHeader>
                 <CardTitle>Opening Tree Preview</CardTitle>
