@@ -57,15 +57,17 @@ export interface OpponentProfile {
 }
 
 // Parse clock data from PGN [%clk H:MM:SS] format
+// Matches both Lichess {[%clk 0:05:00]} and Chess.com [%clk 0:00:30.1] formats
 function parseClockFromPgn(pgn: string): number[] {
   const clocks: number[] = [];
-  const clockRegex = /\[%clk (\d+):(\d+):(\d+)\]/g;
+  // Updated regex to handle optional curly braces and decimal seconds
+  const clockRegex = /\[%clk\s*(\d+):(\d+):(\d+(?:\.\d+)?)\]/g;
   let match;
   
   while ((match = clockRegex.exec(pgn)) !== null) {
     const hours = parseInt(match[1]);
     const minutes = parseInt(match[2]);
-    const seconds = parseInt(match[3]);
+    const seconds = parseFloat(match[3]); // parseFloat for decimal seconds
     clocks.push(hours * 3600 + minutes * 60 + seconds);
   }
   
@@ -123,16 +125,19 @@ function classifyPlayingStyle(
   return { style, description, confidence };
 }
 
-// Calculate mental game statistics from game results and position swings
+// Calculate mental game statistics using capture-based heuristics
 function analyzeMentalGame(
   games: GameData[],
   username: string
 ): MentalGameStats {
-  let comebacks = 0;
-  let collapses = 0;
-  let drawHolds = 0;
-  let losingPositions = 0;
-  let winningPositions = 0;
+  let potentialComebacks = 0;
+  let actualComebacks = 0;
+  let potentialCollapses = 0;
+  let actualCollapses = 0;
+  let potentialDrawHolds = 0;
+  let actualDrawHolds = 0;
+  
+  console.log('[OPPONENT-PROFILE] analyzeMentalGame for', username, 'with', games.length, 'games');
   
   for (const game of games) {
     const isWhite = game.white.toLowerCase() === username.toLowerCase();
@@ -140,54 +145,78 @@ function analyzeMentalGame(
     const lost = (game.winner === 'black' && isWhite) || (game.winner === 'white' && !isWhite);
     const drew = !game.winner;
     
-    // Simple heuristic: use game length to infer position complexity
-    // Long games with wins = potential comebacks
-    // Short games with losses = potential collapses
     try {
       const chess = new Chess();
       chess.loadPgn(game.pgn);
-      const moveCount = chess.history().length;
+      const moves = chess.history({ verbose: true });
       
-      // Games where player was likely in trouble (simplistic - real would use eval)
-      if (moveCount > 60 && won) {
-        comebacks++;
-        losingPositions++;
-      } else if (moveCount < 30 && lost) {
-        collapses++;
-        winningPositions++;
-      } else if (moveCount > 40 && drew) {
-        // Long draw might indicate held worse position
-        drawHolds++;
-        losingPositions++;
+      // Count material swings via piece captures in early/mid game
+      let capturesByPlayer = 0;
+      let capturesByOpponent = 0;
+      const midGameEnd = Math.min(moves.length, 40); // First 40 ply
+      
+      for (let i = 0; i < midGameEnd; i++) {
+        const move = moves[i];
+        if (move.captured) {
+          const isPlayerMove = (isWhite && i % 2 === 0) || (!isWhite && i % 2 === 1);
+          if (isPlayerMove) capturesByPlayer++;
+          else capturesByOpponent++;
+        }
       }
       
-      // Track positions for rate calculation
-      if (lost && moveCount > 40) {
-        winningPositions++;
+      // Determine early advantage/disadvantage based on captures
+      const earlyDisadvantage = capturesByOpponent > capturesByPlayer + 1;
+      const earlyAdvantage = capturesByPlayer > capturesByOpponent + 1;
+      
+      if (earlyDisadvantage) {
+        potentialComebacks++;
+        if (won) actualComebacks++;
       }
+      
+      if (earlyAdvantage) {
+        potentialCollapses++;
+        if (lost) actualCollapses++;
+        if (drew) {
+          potentialDrawHolds++;
+          actualDrawHolds++;
+        }
+      }
+      
     } catch {
       continue;
     }
   }
   
-  const comebackRate = losingPositions > 0 ? comebacks / losingPositions : 0;
-  const collapseRate = winningPositions > 0 ? collapses / winningPositions : 0;
-  const drawHoldRate = losingPositions > 0 ? drawHolds / losingPositions : 0;
+  const comebackRate = potentialComebacks > 0 
+    ? Math.round((actualComebacks / potentialComebacks) * 100) 
+    : 0;
+  const collapseRate = potentialCollapses > 0 
+    ? Math.round((actualCollapses / potentialCollapses) * 100) 
+    : 0;
+  const drawHoldRate = potentialDrawHolds > 0 
+    ? Math.round((actualDrawHolds / potentialDrawHolds) * 100) 
+    : 0;
+  
+  console.log('[OPPONENT-PROFILE] Mental game stats:', {
+    potentialComebacks, actualComebacks, comebackRate,
+    potentialCollapses, actualCollapses, collapseRate,
+    potentialDrawHolds, actualDrawHolds, drawHoldRate
+  });
   
   // Classify mental strength
   let mentalStrength: MentalStrength;
-  if (comebackRate > 0.2 && collapseRate < 0.15) {
+  if (comebackRate > 30 && collapseRate < 20) {
     mentalStrength = 'resilient';
-  } else if (collapseRate > 0.25) {
+  } else if (collapseRate > 35) {
     mentalStrength = 'fragile';
   } else {
     mentalStrength = 'steady';
   }
   
   return {
-    comebackRate: Math.round(comebackRate * 100),
-    collapseRate: Math.round(collapseRate * 100),
-    drawHoldRate: Math.round(drawHoldRate * 100),
+    comebackRate,
+    collapseRate,
+    drawHoldRate,
     mentalStrength,
   };
 }
@@ -365,6 +394,9 @@ export function generateOpponentProfile(
   games: GameData[],
   username: string
 ): OpponentProfile {
+  console.log('[OPPONENT-PROFILE] Generating profile for:', username);
+  console.log('[OPPONENT-PROFILE] Total games received:', games.length);
+  
   // Analyze time management
   let timeTroubleGames = 0;
   let timeTroubleWins = 0;
@@ -384,6 +416,9 @@ export function generateOpponentProfile(
       }
     }
   }
+  
+  console.log('[OPPONENT-PROFILE] Games with clock data:', gamesWithClocks, '/', games.length);
+  console.log('[OPPONENT-PROFILE] Time trouble games:', timeTroubleGames);
   
   const timeManagement: TimeManagementStats = {
     timeTroubleGames,

@@ -176,6 +176,7 @@ const Report = () => {
 
             <TabsContent value="opponent-profile">
               <OpponentProfile 
+                key={`opponent-${id}-${analysis.totalGames}`}
                 games={analysis.games} 
                 username={id || ''} 
               />
