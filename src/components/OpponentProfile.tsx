@@ -55,6 +55,8 @@ export default function OpponentProfile({ games = [], username }: OpponentProfil
 
   // Generate profile when games change
   useEffect(() => {
+    console.log('[OPPONENT-PROFILE-UI] Received', games.length, 'games for', username);
+    
     if (games.length > 0) {
       // Map StoredGame to GameData format
       const gameData = games.map(g => ({
@@ -66,7 +68,10 @@ export default function OpponentProfile({ games = [], username }: OpponentProfil
         opening: g.opening, // Pass opening for profiling
       }));
       
+      console.log('[OPPONENT-PROFILE-UI] Mapped games with openings:', gameData.filter(g => g.opening).length);
+      
       const generated = generateOpponentProfile(gameData, username);
+      console.log('[OPPONENT-PROFILE-UI] Generated profile:', generated);
       setProfile(generated);
     }
   }, [games, username]);
