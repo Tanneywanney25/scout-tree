@@ -2,13 +2,42 @@ import { useState } from "react"
 import { Chess } from "chess.js"
 import Chessboard from "chessboardjsx"
 import OpeningManager from "../app/OpeningManager"
-import { serializeOpeningTree } from "../app/OpeningTreeSerializer"
 
 type Platform = "lichess" | "chesscom"
 type Color = "white" | "black"
 
 const LICHESS_TC = ["ultrabullet", "bullet", "blitz", "rapid", "classical", "correspondence"]
 const CHESSCOM_TC = ["bullet", "blitz", "rapid", "daily"]
+
+function buildTree(graph: any, playerColor: string) {
+  const chess = new Chess()
+  const rootFen = chess.fen()
+  
+  function buildNode(fen: string, depth: number): any {
+    if (depth > 15) return null
+    const moves = graph.getMovesForFen(fen)
+    if (!moves || moves.length === 0) return null
+    
+    const children = moves.map((m: any) => {
+      const c = new Chess(fen)
+      try {
+        c.move(m.san)
+        const childNode = buildNode(c.fen(), depth + 1)
+        return {
+          san: m.san,
+          count: m.details?.count || 1,
+          children: childNode?.children || []
+        }
+      } catch { return null }
+    }).filter(Boolean)
+    
+    return { children }
+  }
+  
+  const rootDetails = graph.getDetailsForFen(rootFen)
+  const result = buildNode(rootFen, 0)
+  return { san: "", count: rootDetails?.count || 0, children: result?.children || [] }
+}
 
 export default function Index() {
   const [username, setUsername] = useState("")
@@ -25,6 +54,7 @@ export default function Index() {
   const [gamesAnalyzed, setGamesAnalyzed] = useState(0)
   const [tree, setTree] = useState<any>(null)
   const [path, setPath] = useState<string[]>([])
+  const [manager] = useState(() => new OpeningManager())
 
   const tcOptions = platform === "lichess" ? LICHESS_TC : CHESSCOM_TC
 
@@ -38,8 +68,7 @@ export default function Index() {
     setGamesAnalyzed(0)
     setTree(null)
     setPath([])
-
-    const manager = new OpeningManager()
+    manager.clear()
     
     await manager.startDownload({
       playerName: username.trim(),
@@ -59,11 +88,11 @@ export default function Index() {
     }, {
       onProgress: ({ gamesProcessed }) => setGamesAnalyzed(gamesProcessed),
       onComplete: ({ graph }) => {
-        const serialized = serializeOpeningTree(graph.graph, color, 20)
+        const serialized = buildTree(graph, color)
         setTree(serialized)
         setLoading(false)
       },
-      onError: (err) => {
+      onError: (err: any) => {
         alert(err.message)
         setLoading(false)
       }
