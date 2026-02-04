@@ -78,7 +78,7 @@ export default class PGNReader {
           
           if (!this.continueProcessingGames) break
         }
-      } else if (site === Constants.SITE_CHESSCOM) {
+      } else if (site === Constants.SITE_CHESS_DOT_COM) {
         const iterator = new ChessComIterator(playerName, {
           variant: this.variant,
           ...advancedFilters
@@ -241,7 +241,7 @@ export default class PGNReader {
   gameResult(pgn, site) {
     let url = null
 
-    if (site === Constants.SITE_CHESSCOM) {
+    if (site === Constants.SITE_CHESS_DOT_COM) {
       url = pgn.headers.Link
     } else if (site === Constants.SITE_LICHESS) {
       url = pgn.headers.Site
