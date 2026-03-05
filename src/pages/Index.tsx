@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Chess } from "chess.js"
 import Chessboard from "chessboardjsx"
 
@@ -45,6 +45,35 @@ export default function Index() {
   const [totalGames, setTotalGames] = useState(0)
   const [analysis, setAnalysis] = useState("")
   const [analyzing, setAnalyzing] = useState(false)
+  const [fullPath, setFullPath] = useState<string[]>([])
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!tree) return
+      if (e.key === "ArrowLeft") {
+        setPath(prev => prev.length === 0 ? prev : prev.slice(0, -1))
+      } else if (e.key === "ArrowRight") {
+        setPath(prev => {
+          if (prev.length < fullPath.length && fullPath[prev.length]) {
+            return [...prev, fullPath[prev.length]]
+          }
+          let node = tree
+          for (const s of prev) node = node?.children?.find((c: any) => c.san === s)
+          if (!node?.children?.length) return prev
+          const best = [...node.children].sort((a: any, b: any) => b.count - a.count)[0]
+          return [...prev, best.san]
+        })
+      }
+    }
+    window.addEventListener("keydown", handler)
+    return () => window.removeEventListener("keydown", handler)
+  }, [tree, fullPath])
+
+  useEffect(() => {
+    if (path.length > fullPath.length || !path.every((m, i) => fullPath[i] === m)) {
+      setFullPath([...path])
+    }
+  }, [path])
 
   const fetchGames = async () => {
     if (!username) return
