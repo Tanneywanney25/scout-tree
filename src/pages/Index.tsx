@@ -248,11 +248,11 @@ export default function Index() {
               <Chessboard position={position} onDrop={onDrop} width={boardSize} orientation={color as any} />
               <svg width={boardSize} height={boardSize} style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none" }}>
                 <defs>
-                  <marker id="arrowGreen" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
-                    <polygon points="0 0, 10 3.5, 0 7" fill="rgba(0,0,0,0.8)" />
+                  <marker id="arrowGreen" markerWidth="4" markerHeight="4" refX="3" refY="2" orient="auto">
+                    <polygon points="0 0, 4 2, 0 4" fill="rgba(0,0,0,0.8)" />
                   </marker>
-                  <marker id="arrowRed" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
-                    <polygon points="0 0, 10 3.5, 0 7" fill="rgba(120,0,0,0.8)" />
+                  <marker id="arrowRed" markerWidth="4" markerHeight="4" refX="3" refY="2" orient="auto">
+                    <polygon points="0 0, 4 2, 0 4" fill="rgba(120,0,0,0.8)" />
                   </marker>
                 </defs>
                 {arrows.map((a, i) => {
