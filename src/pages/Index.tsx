@@ -54,13 +54,17 @@ export default function Index() {
 
     try {
       if (platform === "lichess") {
-        const res = await fetch(`https://lichess.org/api/games/user/${username}?color=${color}&max=200`, {
+        const res = await fetch(`https://lichess.org/api/games/user/${username}?color=${color}&max=200&opening=true`, {
           headers: { Accept: "application/x-ndjson" }
         })
         if (!res.ok) throw new Error("Lichess error")
         const text = await res.text()
         for (const line of text.split("\n")) {
-          try { const g = JSON.parse(line); if (g.pgn) pgns.push(g.pgn) } catch {}
+          try {
+            const g = JSON.parse(line)
+            // Lichess NDJSON returns 'moves' (space-separated SAN), not 'pgn'
+            if (g.moves) pgns.push(g.moves)
+          } catch {}
         }
       } else {
         const res = await fetch(`https://api.chess.com/pub/player/${username}/games/archives`)
@@ -82,7 +86,9 @@ export default function Index() {
       // build tree
       const root = { san: "", count: 0, children: [] as any[] }
       for (const pgn of pgns) {
-        const moves = pgn.replace(/\[.*?\]/g, "").replace(/\{[^}]*\}/g, "").trim().split(/\s+/)
+        // Lichess gives space-separated moves, Chess.com gives full PGN
+        const cleaned = pgn.replace(/\[.*?\]/g, "").replace(/\{[^}]*\}/g, "").trim()
+        const moves = cleaned.split(/\s+/)
           .filter((t: string) => t && !/^\d+\./.test(t) && !["1-0", "0-1", "1/2-1/2", "*"].includes(t))
           .map((t: string) => t.replace(/[?!]+$/, ""))
         let node = root
@@ -242,11 +248,11 @@ export default function Index() {
               <Chessboard position={position} onDrop={onDrop} width={boardSize} orientation={color as any} />
               <svg width={boardSize} height={boardSize} style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none" }}>
                 <defs>
-                  <marker id="arrowGreen" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
-                    <polygon points="0 0, 10 3.5, 0 7" fill="rgba(0,0,0,0.8)" />
+                  <marker id="arrowGreen" markerWidth="4" markerHeight="4" refX="3" refY="2" orient="auto">
+                    <polygon points="0 0, 4 2, 0 4" fill="rgba(0,0,0,0.8)" />
                   </marker>
-                  <marker id="arrowRed" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
-                    <polygon points="0 0, 10 3.5, 0 7" fill="rgba(120,0,0,0.8)" />
+                  <marker id="arrowRed" markerWidth="4" markerHeight="4" refX="3" refY="2" orient="auto">
+                    <polygon points="0 0, 4 2, 0 4" fill="rgba(120,0,0,0.8)" />
                   </marker>
                 </defs>
                 {arrows.map((a, i) => {
@@ -256,7 +262,7 @@ export default function Index() {
                   // shorten the line so arrowhead doesn't overshoot
                   const dx = to.x - from.x, dy = to.y - from.y
                   const len = Math.sqrt(dx * dx + dy * dy)
-                  const shorten = 12
+                  const shorten = 6
                   const toX = to.x - (dx / len) * shorten
                   const toY = to.y - (dy / len) * shorten
                   return (

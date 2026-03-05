@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.training-hint]
 verify_jwt = false
+
+[functions.analyze-player]
+verify_jwt = false
