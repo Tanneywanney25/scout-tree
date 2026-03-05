@@ -54,13 +54,17 @@ export default function Index() {
 
     try {
       if (platform === "lichess") {
-        const res = await fetch(`https://lichess.org/api/games/user/${username}?color=${color}&max=200`, {
+        const res = await fetch(`https://lichess.org/api/games/user/${username}?color=${color}&max=200&opening=true`, {
           headers: { Accept: "application/x-ndjson" }
         })
         if (!res.ok) throw new Error("Lichess error")
         const text = await res.text()
         for (const line of text.split("\n")) {
-          try { const g = JSON.parse(line); if (g.pgn) pgns.push(g.pgn) } catch {}
+          try {
+            const g = JSON.parse(line)
+            // Lichess NDJSON returns 'moves' (space-separated SAN), not 'pgn'
+            if (g.moves) pgns.push(g.moves)
+          } catch {}
         }
       } else {
         const res = await fetch(`https://api.chess.com/pub/player/${username}/games/archives`)
