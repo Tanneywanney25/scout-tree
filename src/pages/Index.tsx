@@ -262,7 +262,7 @@ export default function Index() {
                   // shorten the line so arrowhead doesn't overshoot
                   const dx = to.x - from.x, dy = to.y - from.y
                   const len = Math.sqrt(dx * dx + dy * dy)
-                  const shorten = 12
+                  const shorten = 6
                   const toX = to.x - (dx / len) * shorten
                   const toY = to.y - (dy / len) * shorten
                   return (
