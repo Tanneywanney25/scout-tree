@@ -86,7 +86,9 @@ export default function Index() {
       // build tree
       const root = { san: "", count: 0, children: [] as any[] }
       for (const pgn of pgns) {
-        const moves = pgn.replace(/\[.*?\]/g, "").replace(/\{[^}]*\}/g, "").trim().split(/\s+/)
+        // Lichess gives space-separated moves, Chess.com gives full PGN
+        const cleaned = pgn.replace(/\[.*?\]/g, "").replace(/\{[^}]*\}/g, "").trim()
+        const moves = cleaned.split(/\s+/)
           .filter((t: string) => t && !/^\d+\./.test(t) && !["1-0", "0-1", "1/2-1/2", "*"].includes(t))
           .map((t: string) => t.replace(/[?!]+$/, ""))
         let node = root
