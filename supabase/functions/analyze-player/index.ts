@@ -10,8 +10,8 @@ serve(async (req) => {
 
   try {
     const { username, platform, color, openingStats, totalGames } = await req.json();
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY not configured");
+    const apiKey = Deno.env.get("LOVABLE_API_KEY");
+    if (!apiKey) throw new Error("API key not configured");
 
     const prompt = `Analyze this chess player based on their opening repertoire data. Be concise and direct.
 
@@ -33,7 +33,7 @@ Keep it short and punchy. No fluff.`;
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
