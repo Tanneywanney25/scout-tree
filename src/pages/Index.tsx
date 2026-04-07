@@ -1,8 +1,7 @@
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect } from "react"
 import { Chess } from "chess.js"
 import Chessboard from "chessboardjsx"
 
-// simple opening book
 const OPENINGS: Record<string, string> = {
   "e4": "King's Pawn",
   "e4 e5": "Open Game",
@@ -91,7 +90,6 @@ export default function Index() {
         for (const line of text.split("\n")) {
           try {
             const g = JSON.parse(line)
-            // Lichess NDJSON returns 'moves' (space-separated SAN), not 'pgn'
             if (g.moves) pgns.push(g.moves)
           } catch {}
         }
@@ -112,10 +110,8 @@ export default function Index() {
         }
       }
 
-      // build tree
       const root = { san: "", count: 0, children: [] as any[] }
       for (const pgn of pgns) {
-        // Lichess gives space-separated moves, Chess.com gives full PGN
         const cleaned = pgn.replace(/\[.*?\]/g, "").replace(/\{[^}]*\}/g, "").trim()
         const moves = cleaned.split(/\s+/)
           .filter((t: string) => t && !/^\d+\./.test(t) && !["1-0", "0-1", "1/2-1/2", "*"].includes(t))
@@ -133,8 +129,6 @@ export default function Index() {
       setTree(root)
       setPath([])
       setTotalGames(pgns.length)
-
-      // get AI analysis
       runAnalysis(root, pgns.length)
     } catch (e: any) {
       alert(e.message)
@@ -145,7 +139,6 @@ export default function Index() {
   const runAnalysis = async (root: any, count: number) => {
     setAnalyzing(true)
     try {
-      // build opening stats from tree
       const topMoves = [...root.children].sort((a: any, b: any) => b.count - a.count).slice(0, 8)
       const stats = topMoves.map((m: any) => {
         const sub = [...(m.children || [])].sort((a: any, b: any) => b.count - a.count).slice(0, 3)
@@ -170,16 +163,13 @@ export default function Index() {
     setAnalyzing(false)
   }
 
-  // current position
   const chess = new Chess()
   for (const san of path) { try { chess.move(san) } catch { break } }
   const position = chess.fen()
 
-  // current node in tree
   let currentNode = tree
   for (const san of path) currentNode = currentNode?.children?.find((c: any) => c.san === san)
 
-  // build arrows with proper data
   const arrows: { from: string; to: string; opacity: number; isPlayer: boolean }[] = []
   if (currentNode?.children?.length) {
     const tempChess = new Chess(position)
@@ -202,7 +192,6 @@ export default function Index() {
     }
   }
 
-  // next candidate moves for clicking
   const candidates = currentNode?.children
     ? [...currentNode.children].sort((a: any, b: any) => b.count - a.count)
     : []
@@ -263,7 +252,6 @@ export default function Index() {
         </div>
       ) : (
         <div>
-          {/* controls */}
           <div style={{ marginBottom: 12, display: "flex", gap: 4 }}>
             <button onClick={() => setPath([])} style={btnStyle}>Reset</button>
             <button onClick={() => setPath(path.slice(0, -1))} disabled={!path.length} style={btnStyle}>Back</button>
@@ -272,7 +260,6 @@ export default function Index() {
           </div>
 
           <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
-            {/* board */}
             <div style={{ position: "relative", width: boardSize, height: boardSize, border: "1px solid black" }}>
               <Chessboard position={position} onDrop={onDrop} width={boardSize} orientation={color as any} />
               <svg width={boardSize} height={boardSize} style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none" }}>
@@ -288,7 +275,6 @@ export default function Index() {
                   const from = toXY(a.from, boardSize)
                   const to = toXY(a.to, boardSize)
                   const markerId = a.isPlayer ? "arrowGreen" : "arrowRed"
-                  // shorten the line so arrowhead doesn't overshoot
                   const dx = to.x - from.x, dy = to.y - from.y
                   const len = Math.sqrt(dx * dx + dy * dy)
                   const shorten = 6
@@ -310,15 +296,12 @@ export default function Index() {
               </svg>
             </div>
 
-            {/* side panel */}
             <div style={{ flex: 1, minWidth: 200 }}>
-              {/* opening */}
               <div style={{ border: "1px solid black", padding: 10, marginBottom: 10 }}>
                 <div style={{ fontSize: 11, textTransform: "uppercase", marginBottom: 4 }}>Opening</div>
                 <div style={{ fontWeight: "bold" }}>{opening}</div>
               </div>
 
-              {/* move list */}
               <div style={{ border: "1px solid black", padding: 10, marginBottom: 10 }}>
                 <div style={{ fontSize: 11, textTransform: "uppercase", marginBottom: 4 }}>Moves</div>
                 <div style={{ fontSize: 13 }}>
@@ -338,7 +321,6 @@ export default function Index() {
                 </div>
               </div>
 
-              {/* candidate moves */}
               <div style={{ border: "1px solid black", padding: 10, marginBottom: 10 }}>
                 <div style={{ fontSize: 11, textTransform: "uppercase", marginBottom: 4 }}>Next Moves</div>
                 {candidates.length === 0 ? (
@@ -357,7 +339,6 @@ export default function Index() {
                 )}
               </div>
 
-              {/* AI analysis */}
               <div style={{ border: "1px solid black", padding: 10 }}>
                 <div style={{ fontSize: 11, textTransform: "uppercase", marginBottom: 4 }}>AI Analysis</div>
                 {analyzing ? (
