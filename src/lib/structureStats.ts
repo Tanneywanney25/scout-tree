@@ -87,7 +87,9 @@ export function generateStructureStats(
       const { structures, positions } = analyzeGameStructures(game.pgn);
 
       for (const [type, count] of structures.entries()) {
-        if (count > 0) {
+        // Require the structure to persist across at least two sampled
+        // positions so a fleeting one-ply match doesn't tag the whole game.
+        if (count >= 2) {
           const stats = structureResults.get(type)!;
           
           if (playerWon) stats.wins++;
@@ -142,8 +144,11 @@ export function generateStructureStats(
   // Filter structures with at least 2 games for meaningful stats
   const meaningfulStats = stats.filter(s => s.gamesPlayed >= 2);
 
-  // Get weakest and strongest (excluding 'unknown')
-  const validStats = meaningfulStats.filter(s => s.type !== 'unknown');
+  // Get weakest and strongest, excluding generic/non-actionable formations
+  // (a complex/unknown shape, or open/closed/symmetrical centers) which are too
+  // broad to count as a trainable structural strength or weakness.
+  const GENERIC: PawnStructureType[] = ['unknown', 'open_center', 'closed_center', 'symmetrical'];
+  const validStats = meaningfulStats.filter(s => !GENERIC.includes(s.type));
   
   const weakestStructures = [...validStats]
     .sort((a, b) => a.winRate - b.winRate)

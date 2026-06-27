@@ -464,47 +464,88 @@ export function detectEndgameType(fen: string): EndgameType | null {
   }
 }
 
-// Analyze a game to find if/when it reaches an endgame
+// Total material difference (white - black), pawns included, from a FEN.
+const PIECE_VALUES: Record<string, number> = { q: 9, r: 5, b: 3, n: 3, p: 1 };
+export function materialDiff(fen: string): number {
+  let diff = 0;
+  const board = fen.split(' ')[0];
+  for (const ch of board) {
+    const lower = ch.toLowerCase();
+    const val = PIECE_VALUES[lower];
+    if (!val) continue;
+    diff += ch === ch.toUpperCase() ? val : -val;
+  }
+  return diff;
+}
+
+// Analyze a game to find if/when it reaches an endgame.
+//
+// In addition to the first endgame position, we scan the whole endgame phase
+// and report the largest material edge each side held. This lets the caller
+// measure conversion correctly: a player who was clearly ahead in material at
+// some point during the ending either converted the win or didn't. (The old
+// code only checked material at the single moment the endgame began, where the
+// material is usually still level, so it almost always reported 0% conversion.)
 export function analyzeGameEndgame(pgn: string): {
   reachedEndgame: boolean;
   endgameType: EndgameType | null;
   endgameFen: string | null;
   moveNumber: number | null;
+  maxWhiteAdvantage: number; // best white material edge during the endgame
+  maxBlackAdvantage: number; // best black material edge during the endgame
 } {
+  const empty = {
+    reachedEndgame: false,
+    endgameType: null as EndgameType | null,
+    endgameFen: null as string | null,
+    moveNumber: null as number | null,
+    maxWhiteAdvantage: 0,
+    maxBlackAdvantage: 0,
+  };
+
   try {
     const chess = new Chess();
     chess.loadPgn(pgn);
     const history = chess.history({ verbose: true });
-    
+
     chess.reset();
-    
+
+    let firstType: EndgameType | null = null;
+    let firstFen: string | null = null;
+    let firstMoveNumber: number | null = null;
+    let maxWhiteAdvantage = 0;
+    let maxBlackAdvantage = 0;
+
     for (let i = 0; i < history.length; i++) {
       chess.move(history[i].san);
-      const endgameType = detectEndgameType(chess.fen());
-      
+      const fen = chess.fen();
+      const endgameType = detectEndgameType(fen);
+
       if (endgameType) {
-        return {
-          reachedEndgame: true,
-          endgameType,
-          endgameFen: chess.fen(),
-          moveNumber: Math.floor(i / 2) + 1
-        };
+        if (!firstType) {
+          firstType = endgameType;
+          firstFen = fen;
+          firstMoveNumber = Math.floor(i / 2) + 1;
+        }
+        // Track the largest edge either side held across the endgame phase.
+        const diff = materialDiff(fen);
+        if (diff > maxWhiteAdvantage) maxWhiteAdvantage = diff;
+        if (-diff > maxBlackAdvantage) maxBlackAdvantage = -diff;
       }
     }
-    
+
+    if (!firstType) return empty;
+
     return {
-      reachedEndgame: false,
-      endgameType: null,
-      endgameFen: null,
-      moveNumber: null
+      reachedEndgame: true,
+      endgameType: firstType,
+      endgameFen: firstFen,
+      moveNumber: firstMoveNumber,
+      maxWhiteAdvantage,
+      maxBlackAdvantage,
     };
   } catch (e) {
     console.error('Error analyzing game endgame:', e);
-    return {
-      reachedEndgame: false,
-      endgameType: null,
-      endgameFen: null,
-      moveNumber: null
-    };
+    return empty;
   }
 }

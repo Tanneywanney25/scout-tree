@@ -379,14 +379,17 @@ function hasDoubledPawns(pawns: string[]): string | null {
   return null;
 }
 
-// Check for hanging pawns (c+d pawns without a/b/e support)
-function hasHangingPawns(pawns: string[]): boolean {
-  const hasCPawn = pawns.some(p => p[0] === 'c');
-  const hasDPawn = pawns.some(p => p[0] === 'd');
+// Check for hanging pawns: advanced, side-by-side c+d pawns (c4+d4 for white,
+// c5+d5 for black) with no friendly pawns on the b- or e-files to support them.
+// Requiring the specific advanced squares avoids matching the starting c2/d2.
+function hasHangingPawns(pawns: string[], isWhite: boolean): boolean {
+  const c = isWhite ? 'c4' : 'c5';
+  const d = isWhite ? 'd4' : 'd5';
+  const hasPair = pawns.includes(c) && pawns.includes(d);
+  if (!hasPair) return false;
   const hasBPawn = pawns.some(p => p[0] === 'b');
   const hasEPawn = pawns.some(p => p[0] === 'e');
-  
-  return hasCPawn && hasDPawn && !hasBPawn && !hasEPawn;
+  return !hasBPawn && !hasEPawn;
 }
 
 // Check for hedgehog structure
@@ -477,14 +480,14 @@ export function detectPawnStructure(fen: string): StructureDetection[] {
   }
   
   // Check for hanging pawns
-  if (hasHangingPawns(white)) {
+  if (hasHangingPawns(white, true)) {
     detections.push({
       structure: PAWN_STRUCTURES.hanging_pawns,
       confidence: 0.85,
       forWhite: true
     });
   }
-  if (hasHangingPawns(black)) {
+  if (hasHangingPawns(black, false)) {
     detections.push({
       structure: PAWN_STRUCTURES.hanging_pawns,
       confidence: 0.85,

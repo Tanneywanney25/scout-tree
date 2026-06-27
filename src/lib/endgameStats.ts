@@ -48,28 +48,6 @@ function parseResult(result: string): { whiteWon: boolean; blackWon: boolean; dr
   return { whiteWon: false, blackWon: false, draw: true };
 }
 
-// Simple evaluation based on material (rough estimate)
-function evaluateMaterial(fen: string, playerIsWhite: boolean): number {
-  const pieceValues: Record<string, number> = { 'q': 9, 'r': 5, 'b': 3, 'n': 3, 'p': 1 };
-  let whiteScore = 0;
-  let blackScore = 0;
-  
-  const position = fen.split(' ')[0];
-  for (const char of position) {
-    const lowerChar = char.toLowerCase();
-    if (pieceValues[lowerChar]) {
-      if (char === char.toUpperCase()) {
-        whiteScore += pieceValues[lowerChar];
-      } else {
-        blackScore += pieceValues[lowerChar];
-      }
-    }
-  }
-  
-  const diff = whiteScore - blackScore;
-  return playerIsWhite ? diff : -diff;
-}
-
 export function generateEndgameStats(
   games: StoredGame[],
   targetUsername: string,
@@ -116,33 +94,34 @@ export function generateEndgameStats(
 
     try {
       const endgameAnalysis = analyzeGameEndgame(game.pgn);
-      
+
       if (endgameAnalysis.reachedEndgame && endgameAnalysis.endgameType) {
         totalEndgames++;
         const stats = endgameResults.get(endgameAnalysis.endgameType)!;
-        
+
         if (playerWon) stats.wins++;
         else if (playerLost) stats.losses++;
         else if (draw) stats.draws++;
 
-        // Check if player was winning when entering endgame
-        if (endgameAnalysis.endgameFen) {
-          const materialAdvantage = evaluateMaterial(endgameAnalysis.endgameFen, isWhite);
-          const wasWinning = materialAdvantage >= 2; // At least 2 pawns up
-          
-          if (wasWinning) {
-            stats.winningPositions++;
-            totalWinningPositions++;
-            if (playerWon) {
-              stats.converted++;
-              totalConverted++;
-            }
-          }
+        // "Winning position" = the player held a clear material edge (>= 2) at
+        // some point during the endgame, not just at the instant it began.
+        const playerMaxAdvantage = isWhite
+          ? endgameAnalysis.maxWhiteAdvantage
+          : endgameAnalysis.maxBlackAdvantage;
+        const wasWinning = playerMaxAdvantage >= 2;
 
-          // Store example position
-          if (stats.positions.length < 3) {
-            stats.positions.push(endgameAnalysis.endgameFen);
+        if (wasWinning) {
+          stats.winningPositions++;
+          totalWinningPositions++;
+          if (playerWon) {
+            stats.converted++;
+            totalConverted++;
           }
+        }
+
+        // Store example position
+        if (endgameAnalysis.endgameFen && stats.positions.length < 3) {
+          stats.positions.push(endgameAnalysis.endgameFen);
         }
       }
     } catch (e) {
