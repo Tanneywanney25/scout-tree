@@ -8,6 +8,17 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { Crown } from "lucide-react";
+import { fetchProfile } from "@/lib/profile";
+
+// Send the user to onboarding the first time, otherwise to the scout page.
+async function routeAfterAuth(userId: string, navigate: (path: string) => void) {
+  try {
+    const profile = await fetchProfile(userId);
+    navigate(profile?.onboarded ? "/scout" : "/onboarding");
+  } catch {
+    navigate("/scout");
+  }
+}
 
 const Auth = () => {
   const [email, setEmail] = useState("");
@@ -20,14 +31,14 @@ const Auth = () => {
     // Check if user is already logged in
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session) {
-        navigate("/scout");
+        routeAfterAuth(session.user.id, navigate);
       }
     });
 
     // Listen for auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === "SIGNED_IN" && session) {
-        navigate("/scout");
+        routeAfterAuth(session.user.id, navigate);
       }
     });
 

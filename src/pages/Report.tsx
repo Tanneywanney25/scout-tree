@@ -15,6 +15,11 @@ import { StructureWeaknesses } from "@/components/StructureWeaknesses";
 import { EndgameProfile } from "@/components/EndgameProfile";
 import { CircularProgress } from "@/components/CircularProgress";
 import { runAdvancedAnalysis, type AdvancedAnalysisResult } from "@/lib/advancedAnalysis";
+import { GamePlanCard } from "@/components/GamePlanCard";
+import { useAuth } from "@/hooks/useAuth";
+import { useProfile } from "@/hooks/useProfile";
+import { saveScout } from "@/lib/savedScouts";
+import { Bookmark } from "lucide-react";
 
 type AdvancedStatus = "idle" | "running" | "done";
 
@@ -33,6 +38,33 @@ const Report = () => {
   const [advResult, setAdvResult] = useState<AdvancedAnalysisResult | null>(null);
   const advStartedRef = useRef(false);
   const advAbortRef = useRef<{ aborted: boolean }>({ aborted: false });
+  const [saving, setSaving] = useState(false);
+
+  const { user } = useAuth();
+  const { profile } = useProfile();
+
+  const handleSaveScout = async () => {
+    if (!user) {
+      toast.error("Sign in to save scouts.");
+      return;
+    }
+    setSaving(true);
+    const summary = {
+      playingStyle: advResult?.profile?.playingStyle,
+      exploitableWeaknesses: advResult?.profile?.exploitableWeaknesses,
+      recommendations: advResult?.profile?.keyInsights?.slice(0, 3),
+    };
+    const { error } = await saveScout({
+      opponent_username: id || "",
+      platform: "lichess",
+      player_color: analysis?.playerColor ?? null,
+      total_games: analysis?.totalGames ?? 0,
+      summary,
+    });
+    setSaving(false);
+    if (error) toast.error(`Could not save: ${error}`);
+    else toast.success("Scout saved to your account.");
+  };
 
   // Abort any in-flight advanced run when leaving the page.
   useEffect(() => {
@@ -176,10 +208,18 @@ const Report = () => {
                 )}
               </p>
             </div>
-            <Button onClick={handleDownload} variant="outline">
-              <Download className="mr-2 w-4 h-4" />
-              Download JSON
-            </Button>
+            <div className="flex gap-2">
+              {user && (
+                <Button onClick={handleSaveScout} variant="outline" disabled={saving}>
+                  <Bookmark className="mr-2 w-4 h-4" />
+                  {saving ? "Saving..." : "Save scout"}
+                </Button>
+              )}
+              <Button onClick={handleDownload} variant="outline">
+                <Download className="mr-2 w-4 h-4" />
+                Download JSON
+              </Button>
+            </div>
           </div>
 
           {/* Opening Tree + grouped Advanced analyses */}
@@ -260,6 +300,17 @@ const Report = () => {
                     <p className="text-sm text-muted-foreground">
                       Advanced analysis of {advResult.gamesAnalyzed} games.
                     </p>
+
+                    <GamePlanCard
+                      openingTree={analysis.openingTree as any}
+                      profile={advResult.profile}
+                      structureReport={advResult.structureReport}
+                      endgameReport={advResult.endgameReport}
+                      opponentName={id || "your opponent"}
+                      userRating={profile?.rating ?? null}
+                      signedIn={!!user}
+                    />
+
                     <Tabs defaultValue="profile" className="w-full">
                       <TabsList className="mb-4 flex-wrap">
                         <TabsTrigger value="profile">Opponent Profile</TabsTrigger>

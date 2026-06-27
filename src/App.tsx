@@ -9,6 +9,9 @@ import Report from "./pages/Report";
 import OpeningTree from "./pages/OpeningTree";
 import Auth from "./pages/Auth";
 import Training from "./pages/Training";
+import Onboarding from "./pages/Onboarding";
+import Settings from "./pages/Settings";
+import MyScouts from "./pages/MyScouts";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -27,6 +30,9 @@ const App = () => (
           <Route path="/pricing" element={<Landing />} />
           <Route path="/opening-tree" element={<OpeningTree />} />
           <Route path="/auth" element={<Auth />} />
+          <Route path="/onboarding" element={<Onboarding />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="/scouts" element={<MyScouts />} />
           <Route path="/training" element={<Training />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />

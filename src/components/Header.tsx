@@ -32,6 +32,19 @@ const Header = () => {
           <Link to="/scout" className="text-sm font-medium text-muted-foreground hover:text-foreground">
             Scout
           </Link>
+          {user && (
+            <>
+              <Link to="/scouts" className="text-sm font-medium text-muted-foreground hover:text-foreground">
+                My Scouts
+              </Link>
+              <Link to="/training" className="text-sm font-medium text-muted-foreground hover:text-foreground">
+                Training
+              </Link>
+              <Link to="/settings" className="text-sm font-medium text-muted-foreground hover:text-foreground">
+                Settings
+              </Link>
+            </>
+          )}
           <Link to="/pricing" className="text-sm font-medium text-muted-foreground hover:text-foreground">
             Pricing
           </Link>
