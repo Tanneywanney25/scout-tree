@@ -11,6 +11,11 @@ function Calendar({ className, classNames, showOutsideDays = true, ...props }: C
   return (
     <DayPicker
       showOutsideDays={showOutsideDays}
+      // Always render 6 week-rows so the calendar keeps a constant height across
+      // months. Without this, months that span 4/5/6 weeks change the popover's
+      // size and make it appear to "jump" up/down when navigating. Callers can
+      // still override via props.
+      fixedWeeks
       className={cn("p-3", className)}
       classNames={{
         months: "flex flex-col sm:flex-row space-y-4 sm:space-x-4 sm:space-y-0",

@@ -52,6 +52,17 @@ const Report = () => {
     }
   }, []);
 
+  // Friendly fallback so a crash inside one analysis tab can't take down the
+  // whole report — the other tabs keep working.
+  const tabErrorFallback = (feature: string) => (
+    <div className="p-8 text-center border border-destructive/40 rounded-lg bg-destructive/5">
+      <p className="text-destructive font-semibold">Couldn't render {feature}</p>
+      <p className="text-sm text-muted-foreground mt-2">
+        Something went wrong analyzing this data. Try the other tabs or generate a new report.
+      </p>
+    </div>
+  );
+
   const handleDownload = () => {
     if (!analysis) return;
     
@@ -180,39 +191,49 @@ const Report = () => {
             </TabsContent>
 
             <TabsContent value="opponent-profile">
-              <OpponentProfile 
-                key={`opponent-${id}-${analysis.totalGames}`}
-                games={analysis.games} 
-                username={id || ''} 
-              />
+              <ErrorBoundary fallback={tabErrorFallback('the opponent profile')}>
+                <OpponentProfile
+                  key={`opponent-${id}-${analysis.totalGames}`}
+                  games={analysis.games}
+                  username={id || ''}
+                />
+              </ErrorBoundary>
             </TabsContent>
 
             <TabsContent value="deep-analysis">
-              <DeepAnalysisTab 
-                games={analysis.games} 
-                username={id || ''} 
-              />
+              <ErrorBoundary fallback={tabErrorFallback('deep analysis')}>
+                <DeepAnalysisTab
+                  games={analysis.games}
+                  username={id || ''}
+                />
+              </ErrorBoundary>
             </TabsContent>
 
             <TabsContent value="weakness-analysis">
-              <WeaknessDashboard 
-                games={analysis.games} 
-                username={id || ''} 
-              />
+              <ErrorBoundary fallback={tabErrorFallback('weakness analysis')}>
+                <WeaknessDashboard
+                  games={analysis.games}
+                  username={id || ''}
+                />
+              </ErrorBoundary>
             </TabsContent>
 
             <TabsContent value="pawn-structures">
-              <StructureWeaknesses 
-                games={analysis.games} 
-                username={id || ''} 
-              />
+              <ErrorBoundary fallback={tabErrorFallback('pawn structures')}>
+                <StructureWeaknesses
+                  games={analysis.games}
+                  username={id || ''}
+                />
+              </ErrorBoundary>
             </TabsContent>
 
             <TabsContent value="endgames">
-              <EndgameProfile 
-                games={analysis.games} 
-                username={id || ''} 
-              />
+              <ErrorBoundary fallback={tabErrorFallback('endgames')}>
+                <EndgameProfile
+                  games={analysis.games}
+                  username={id || ''}
+                />
+              </ErrorBoundary>
             </TabsContent>
           </Tabs>
         </div>

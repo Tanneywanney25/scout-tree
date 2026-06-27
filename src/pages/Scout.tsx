@@ -618,8 +618,42 @@ const Scout = () => {
       initialSelectedPath: currentBoardPath,
       games: storedGames // Include games for deep analysis
     };
-    
-    sessionStorage.setItem('scoutAnalysis', JSON.stringify(serializedAnalysis));
+
+    // sessionStorage has a ~5MB quota. A large opening tree plus 50 full PGNs
+    // can exceed it; if so, progressively trim the game list (which powers the
+    // analysis tabs) so the report still loads instead of failing entirely.
+    const tryStore = (payload: typeof serializedAnalysis): boolean => {
+      try {
+        sessionStorage.setItem('scoutAnalysis', JSON.stringify(payload));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    let stored = tryStore(serializedAnalysis);
+    if (!stored) {
+      for (const limit of [25, 10, 0]) {
+        const trimmed = { ...serializedAnalysis, games: storedGames.slice(0, limit) };
+        if (tryStore(trimmed)) {
+          stored = true;
+          if (limit < storedGames.length) {
+            toast.warning(
+              limit > 0
+                ? `Report is large — limited deep-analysis to ${limit} games.`
+                : 'Report is large — deep-analysis tabs are unavailable for this scout.'
+            );
+          }
+          break;
+        }
+      }
+    }
+
+    if (!stored) {
+      toast.error('Could not prepare the report (data too large). Try narrowing your filters.');
+      return;
+    }
+
     navigate(`/report/${username}`);
   };
 

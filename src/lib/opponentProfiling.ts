@@ -460,7 +460,7 @@ export function generateOpponentProfile(
     gamesAnalyzed: games.length,
     playingStyle: style,
     styleDescription: description,
-    styleConfidence: confidence,
+    styleConfidence: Math.round(confidence),
     timeManagement,
     ratingsByTimeControl: {}, // Would need API data
     mentalGame,

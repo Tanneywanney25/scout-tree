@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Chess } from 'chess.js';
 import Chessboard from 'chessboardjsx';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -68,6 +68,16 @@ export function StructureWeaknesses({ games = [], username }: StructureWeaknesse
   useEffect(() => {
     setExampleIndex(0);
   }, [selectedStructure]);
+
+  // Auto-run once when the tab is opened so the user sees results immediately.
+  const autoRan = useRef(false);
+  useEffect(() => {
+    if (!autoRan.current && games.length > 0) {
+      autoRan.current = true;
+      runAnalysis();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [games]);
 
   if (games.length === 0) {
     return (

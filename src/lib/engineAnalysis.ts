@@ -86,54 +86,79 @@ export function uciToSan(chess: Chess, uciMove: string): string {
 export class StockfishEngine {
   private worker: Worker | null = null;
   private ready: boolean = false;
-  private currentResolve: ((value: string) => void) | null = null;
-  private outputBuffer: string[] = [];
+  // A single dispatch point for engine output. Each operation (init / analyze)
+  // installs its own line handler while it runs and clears it when done, so
+  // listeners can never accumulate across positions.
+  private lineHandler: ((line: string) => void) | null = null;
+
+  // CDN sources tried in order. The first is a single-file asm.js build that
+  // runs as a standalone Web Worker (no sibling .wasm needed).
+  private static readonly ENGINE_URLS = [
+    'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js',
+    'https://unpkg.com/stockfish.js@10.0.2/stockfish.js',
+  ];
 
   async init(): Promise<void> {
-    return new Promise(async (resolve, reject) => {
+    if (this.ready && this.worker) return;
+
+    // Fetch the engine and run it from a blob URL to bypass cross-origin
+    // worker restrictions. Try each CDN until one succeeds.
+    let blobUrl: string | null = null;
+    let lastError: unknown = null;
+    for (const url of StockfishEngine.ENGINE_URLS) {
       try {
-        // Fetch the Stockfish script and create a blob URL to bypass CORS
-        const stockfishUrl = 'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js';
-        const response = await fetch(stockfishUrl);
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const blob = await response.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        
-        this.worker = new Worker(blobUrl);
-        
-        this.worker.onmessage = (e) => {
-          const message = e.data;
-          
-          if (message === 'uciok') {
-            this.ready = true;
-            resolve();
-          }
-          
-          if (message === 'readyok' && this.currentResolve) {
-            this.currentResolve(this.outputBuffer.join('\n'));
-            this.outputBuffer = [];
-            this.currentResolve = null;
-          }
-          
-          // Collect output lines
-          if (typeof message === 'string') {
-            this.outputBuffer.push(message);
-          }
-        };
-
-        this.worker.onerror = (error) => {
-          console.error('Stockfish worker error:', error);
-          reject(error);
-        };
-
-        // Initialize UCI
-        this.worker.postMessage('uci');
+        blobUrl = URL.createObjectURL(blob);
+        break;
       } catch (error) {
-        reject(error);
+        console.warn('[ENGINE] Failed to load from', url, error);
+        lastError = error;
       }
+    }
+    if (!blobUrl) {
+      throw new Error(
+        'Could not load the chess engine. Check your network connection and try again.'
+      );
+    }
+
+    this.worker = new Worker(blobUrl);
+
+    // Route every worker message to the currently-active line handler.
+    this.worker.onmessage = (e: MessageEvent) => {
+      const line = typeof e.data === 'string' ? e.data : (e.data?.data ?? '');
+      if (line && this.lineHandler) this.lineHandler(line);
+    };
+
+    // Wait for the UCI handshake (uciok) with a guard timeout.
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.lineHandler = null;
+        reject(new Error('Chess engine timed out while starting up.'));
+      }, 20000);
+
+      this.worker!.onerror = (error) => {
+        clearTimeout(timer);
+        this.lineHandler = null;
+        console.error('Stockfish worker error:', error);
+        reject(new Error('The chess engine failed to start in this browser.'));
+      };
+
+      this.lineHandler = (line: string) => {
+        if (line.startsWith('uciok')) {
+          clearTimeout(timer);
+          this.ready = true;
+          this.lineHandler = null;
+          resolve();
+        }
+      };
+
+      this.worker!.postMessage('uci');
     });
   }
 
-  async analyzePosition(fen: string, depth: number = 18): Promise<PositionAnalysis> {
+  async analyzePosition(fen: string, depth: number = 12): Promise<PositionAnalysis> {
     if (!this.worker || !this.ready) {
       throw new Error('Engine not initialized');
     }
@@ -157,50 +182,37 @@ export class StockfishEngine {
       // Continue with analysis if FEN parsing fails
     }
 
-    // Stop any pending analysis first
-    this.worker.postMessage('stop');
+    return new Promise<PositionAnalysis>((resolve) => {
+      const lines: string[] = [];
+      let settled = false;
 
-    // Create analysis promise with timeout
-    const analysisPromise = new Promise<PositionAnalysis>((resolve) => {
-      this.outputBuffer = [];
-      
-      // Set up position
-      this.worker!.postMessage(`position fen ${fen}`);
-      this.worker!.postMessage(`go depth ${depth}`);
-      
-      // Listen for bestmove
-      const handler = (e: MessageEvent) => {
-        const message = e.data;
-        this.outputBuffer.push(message);
-        
-        if (typeof message === 'string' && message.startsWith('bestmove')) {
-          this.worker!.removeEventListener('message', handler);
-          
-          // Parse the output
-          const result = this.parseAnalysisOutput(this.outputBuffer, fen);
-          this.outputBuffer = [];
-          resolve(result);
+      const finish = (result: PositionAnalysis) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.lineHandler = null;
+        resolve(result);
+      };
+
+      // Fall back to the best partial result we've collected if the engine
+      // takes too long, instead of discarding the position (eval 0).
+      const timer = setTimeout(() => {
+        this.worker?.postMessage('stop');
+        finish(this.parseAnalysisOutput(lines, fen));
+      }, 8000);
+
+      this.lineHandler = (line: string) => {
+        lines.push(line);
+        if (line.startsWith('bestmove')) {
+          finish(this.parseAnalysisOutput(lines, fen));
         }
       };
-      
-      this.worker!.addEventListener('message', handler);
-    });
 
-    // Wrap with 10 second timeout
-    const timeoutPromise = new Promise<PositionAnalysis>((resolve) => {
-      setTimeout(() => {
-        this.worker?.postMessage('stop');
-        resolve({
-          evaluation: 0,
-          bestMove: '',
-          bestMoveSan: '',
-          principalVariation: [],
-          depth: 0
-        });
-      }, 10000);
+      // Stop anything pending, then search this position.
+      this.worker!.postMessage('stop');
+      this.worker!.postMessage(`position fen ${fen}`);
+      this.worker!.postMessage(`go depth ${depth}`);
     });
-
-    return Promise.race([analysisPromise, timeoutPromise]);
   }
 
   private parseAnalysisOutput(lines: string[], fen: string): PositionAnalysis {
@@ -261,7 +273,7 @@ export class StockfishEngine {
 
   async analyzeGame(
     pgn: string,
-    depth: number = 18,
+    depth: number = 12,
     onProgress?: (current: number, total: number, analysis: MoveAnalysis) => void
   ): Promise<GameAnalysis> {
     const chess = new Chess();

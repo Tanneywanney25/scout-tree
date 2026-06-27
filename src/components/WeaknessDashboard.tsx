@@ -136,9 +136,17 @@ export default function WeaknessDashboard({ games = [], username }: WeaknessDash
       // Initialize engine if needed
       if (!engineRef.current) {
         toast.loading('Loading chess engine...', { id: 'engine-load' });
-        engineRef.current = new StockfishEngine();
-        await engineRef.current.init();
-        toast.dismiss('engine-load');
+        try {
+          const engine = new StockfishEngine();
+          await engine.init();
+          engineRef.current = engine;
+        } catch (initError) {
+          // Don't keep a half-initialized engine around or retries will fail.
+          engineRef.current = null;
+          throw initError;
+        } finally {
+          toast.dismiss('engine-load');
+        }
       }
 
       const gameAnalyses: { analysis: GameAnalysis; gameIndex: number }[] = [];
@@ -156,7 +164,7 @@ export default function WeaknessDashboard({ games = [], username }: WeaknessDash
         try {
           const analysis = await engineRef.current.analyzeGame(
             game.pgn,
-            14, // Lower depth for faster batch analysis
+            12, // Lower depth for faster batch analysis across many games
             () => {} // No per-move progress for batch
           );
           gameAnalyses.push({ analysis, gameIndex: i });
@@ -181,7 +189,8 @@ export default function WeaknessDashboard({ games = [], username }: WeaknessDash
       toast.success(`Analyzed ${gameAnalyses.length} games. Found ${weaknessReport.weaknesses.length} weakness patterns.`);
     } catch (error) {
       console.error('Analysis error:', error);
-      toast.error('Failed to complete analysis');
+      const message = error instanceof Error ? error.message : '';
+      toast.error(message || 'Failed to complete analysis');
     } finally {
       setAnalyzing(false);
     }

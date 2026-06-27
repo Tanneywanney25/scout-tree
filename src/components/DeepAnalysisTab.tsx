@@ -105,9 +105,17 @@ export default function DeepAnalysisTab({ games = [], username }: DeepAnalysisTa
       // Initialize engine if needed
       if (!engineRef.current) {
         toast.loading('Loading chess engine...', { id: 'engine-load' });
-        engineRef.current = new StockfishEngine();
-        await engineRef.current.init();
-        toast.dismiss('engine-load');
+        try {
+          const engine = new StockfishEngine();
+          await engine.init();
+          engineRef.current = engine;
+        } catch (initError) {
+          // Don't keep a half-initialized engine around or retries will fail.
+          engineRef.current = null;
+          throw initError;
+        } finally {
+          toast.dismiss('engine-load');
+        }
       }
 
       const game = games[selectedGameIndex];
@@ -121,7 +129,7 @@ export default function DeepAnalysisTab({ games = [], username }: DeepAnalysisTa
       // Analyze with progress
       const result = await engineRef.current.analyzeGame(
         game.pgn,
-        16, // depth 16 for reasonable speed
+        14, // depth 14 balances accuracy and speed for a single game
         (current, total, moveAnalysis) => {
           setAnalysisProgress({ current, total });
         }
@@ -136,7 +144,8 @@ export default function DeepAnalysisTab({ games = [], username }: DeepAnalysisTa
       toast.success(`Analysis complete: ${result.blunders} blunders, ${result.mistakes} mistakes`);
     } catch (error) {
       console.error('Analysis error:', error);
-      toast.error('Failed to analyze game. Engine may not be supported in this browser.');
+      const message = error instanceof Error ? error.message : '';
+      toast.error(message || 'Failed to analyze game. The engine may not be supported in this browser.');
     } finally {
       setAnalyzing(false);
     }
