@@ -365,9 +365,10 @@ const Scout = () => {
         while (batchQueue.length > 0) {
           const batch = batchQueue.shift()!;
           try {
-            // Collect games for deep analysis (max 50)
-            if (collectedGamesRef.current.length < 50) {
-              const remaining = 50 - collectedGamesRef.current.length;
+            // Collect games for the advanced analyses (profile / structures /
+            // endgames analyze as many as possible, capped for performance).
+            if (collectedGamesRef.current.length < 300) {
+              const remaining = 300 - collectedGamesRef.current.length;
               collectedGamesRef.current.push(...batch.slice(0, remaining));
             }
             
@@ -633,7 +634,7 @@ const Scout = () => {
 
     let stored = tryStore(serializedAnalysis);
     if (!stored) {
-      for (const limit of [25, 10, 0]) {
+      for (const limit of [200, 100, 50, 25, 0]) {
         const trimmed = { ...serializedAnalysis, games: storedGames.slice(0, limit) };
         if (tryStore(trimmed)) {
           stored = true;

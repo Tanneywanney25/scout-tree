@@ -28,6 +28,8 @@ interface StoredGame {
 interface OpponentProfileProps {
   games?: StoredGame[];
   username: string;
+  /** When provided, render this profile directly instead of computing one. */
+  precomputedProfile?: OpponentProfileType | null;
 }
 
 const styleIcons = {
@@ -50,13 +52,18 @@ const mentalLabels = {
   fragile: 'Fragile',
 };
 
-export default function OpponentProfile({ games = [], username }: OpponentProfileProps) {
-  const [profile, setProfile] = useState<OpponentProfileType | null>(null);
+export default function OpponentProfile({ games = [], username, precomputedProfile }: OpponentProfileProps) {
+  const [profile, setProfile] = useState<OpponentProfileType | null>(precomputedProfile ?? null);
 
-  // Generate profile when games change
+  // Generate profile when games change (unless a precomputed one was supplied)
   useEffect(() => {
+    if (precomputedProfile !== undefined && precomputedProfile !== null) {
+      setProfile(precomputedProfile);
+      return;
+    }
+
     console.log('[OPPONENT-PROFILE-UI] Received', games.length, 'games for', username);
-    
+
     if (games.length > 0) {
       // Map StoredGame to GameData format
       const gameData = games.map(g => ({
@@ -74,9 +81,9 @@ export default function OpponentProfile({ games = [], username }: OpponentProfil
       console.log('[OPPONENT-PROFILE-UI] Generated profile:', generated);
       setProfile(generated);
     }
-  }, [games, username]);
+  }, [games, username, precomputedProfile]);
 
-  if (games.length === 0) {
+  if (games.length === 0 && !precomputedProfile) {
     return (
       <Card className="border-border/50">
         <CardContent className="py-12 text-center">

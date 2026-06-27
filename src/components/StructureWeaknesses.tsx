@@ -28,12 +28,16 @@ interface StoredGame {
 interface StructureWeaknessesProps {
   games?: StoredGame[];
   username: string;
+  /** When provided, render this report directly instead of computing one. */
+  precomputedReport?: StructureReport | null;
+  /** Hide the standalone "Analyze N games" control (used inside Advanced). */
+  hideControls?: boolean;
 }
 
-export function StructureWeaknesses({ games = [], username }: StructureWeaknessesProps) {
+export function StructureWeaknesses({ games = [], username, precomputedReport, hideControls }: StructureWeaknessesProps) {
   const [analyzing, setAnalyzing] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
-  const [report, setReport] = useState<StructureReport | null>(null);
+  const [report, setReport] = useState<StructureReport | null>(precomputedReport ?? null);
   const [selectedStructure, setSelectedStructure] = useState<StructureStats | null>(null);
   const [exampleIndex, setExampleIndex] = useState(0);
   const [boardOrientation, setBoardOrientation] = useState<'white' | 'black'>('white');
@@ -69,17 +73,29 @@ export function StructureWeaknesses({ games = [], username }: StructureWeaknesse
     setExampleIndex(0);
   }, [selectedStructure]);
 
-  // Auto-run once when the tab is opened so the user sees results immediately.
+  // Sync a precomputed report (from the Advanced batch) into local state.
+  useEffect(() => {
+    if (precomputedReport) {
+      setReport(precomputedReport);
+      if (precomputedReport.weakestStructures.length > 0) {
+        setSelectedStructure(precomputedReport.weakestStructures[0]);
+      }
+    }
+  }, [precomputedReport]);
+
+  // Auto-run once when the tab is opened so the user sees results immediately
+  // (only when not driven by a precomputed report).
   const autoRan = useRef(false);
   useEffect(() => {
+    if (precomputedReport) return;
     if (!autoRan.current && games.length > 0) {
       autoRan.current = true;
       runAnalysis();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [games]);
+  }, [games, precomputedReport]);
 
-  if (games.length === 0) {
+  if (games.length === 0 && !precomputedReport) {
     return (
       <Card>
         <CardContent className="py-12 text-center">
@@ -103,6 +119,7 @@ export function StructureWeaknesses({ games = [], username }: StructureWeaknesse
   return (
     <div className="space-y-6">
       {/* Analysis Control */}
+      {!hideControls && (
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -114,8 +131,8 @@ export function StructureWeaknesses({ games = [], username }: StructureWeaknesse
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Button 
-            onClick={runAnalysis} 
+          <Button
+            onClick={runAnalysis}
             disabled={analyzing}
           >
             {analyzing ? (
@@ -138,6 +155,7 @@ export function StructureWeaknesses({ games = [], username }: StructureWeaknesse
           )}
         </CardContent>
       </Card>
+      )}
 
       {report && (
         <div className="grid lg:grid-cols-2 gap-6">
