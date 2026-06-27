@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { Search, Upload, Loader2, ChevronDown, StopCircle, ArrowRight, RefreshCw, History } from "lucide-react";
+import { Search, Upload, Loader2, ChevronDown, StopCircle, ArrowRight, RefreshCw, History, Plus, X } from "lucide-react";
 
 // Filter snapshot interface for tracking filter changes
 interface FilterSnapshot {
@@ -43,6 +43,10 @@ const Scout = () => {
   const { user } = useAuth();
   const [username, setUsername] = useState("");
   const [platform, setPlatform] = useState("lichess");
+  // Optional second account on the OTHER platform (same person, possibly a
+  // different username) whose games get merged into one report.
+  const [secondEnabled, setSecondEnabled] = useState(false);
+  const [secondUsername, setSecondUsername] = useState("");
   const [color, setColor] = useState<"white" | "black">("white");
   const [variant, setVariant] = useState("standard");
   
@@ -84,6 +88,10 @@ const Scout = () => {
   
   // Get available time controls based on platform
   const availableTimeControls = platform === "chesscom" ? chesscomTimeControls : lichessTimeControls;
+
+  // The second account always uses the platform the primary one isn't using.
+  const secondPlatform = platform === "chesscom" ? "lichess" : "chesscom";
+  const platformLabel = (p: string) => (p === "chesscom" ? "Chess.com" : "Lichess");
 
   // Current filters as a snapshot for comparison
   const currentFilters: FilterSnapshot = useMemo(() => ({
@@ -387,54 +395,66 @@ const Scout = () => {
         processingBatches = false;
       };
       
-      if (actualPlatform === "lichess") {
-        await fetchLichessGames(
-          username,
-          fetchOptions,
-          (count) => {
-            progressRef.current = count;
-            setProgress(count);
-            toast.loading(`Analyzing ${count} games...`, { id: progressToast, duration: Infinity });
-            if (count > 2000 && !warning) {
-              setWarning("Large dataset - processing all games...");
-            }
-          },
-          (gameBatch) => {
-            // Queue batch for processing - don't block stream
-            batchQueue.push(gameBatch);
-            processBatches(); // Fire and forget - no await
-          },
-          abortControllerRef.current?.signal
-        );
-        // Wait for any remaining batches to finish
-        while (batchQueue.length > 0 || processingBatches) {
-          await new Promise(resolve => setTimeout(resolve, 50));
-        }
-        setCurrentAnalysis(analysis);
-        toast.dismiss(progressToast);
-      } else {
-        await fetchChessComGames(
-          username,
-          fetchOptions,
-          (count) => {
-            progressRef.current = count;
-            setProgress(count);
-            toast.loading(`Analyzing ${count} games...`, { id: progressToast, duration: Infinity });
-          },
-          (gameBatch) => {
-            // Queue batch for processing - don't block stream
-            batchQueue.push(gameBatch);
-            processBatches(); // Fire and forget - no await
-          },
-          abortControllerRef.current?.signal
-        );
-        // Wait for any remaining batches to finish
-        while (batchQueue.length > 0 || processingBatches) {
-          await new Promise(resolve => setTimeout(resolve, 50));
-        }
-        setCurrentAnalysis(analysis);
-        toast.dismiss(progressToast);
+      // Build the list of sources to fetch: the primary account plus an optional
+      // second account on the other platform (merged into one report).
+      const sources: { platform: string; user: string }[] = [
+        { platform: actualPlatform, user: username },
+      ];
+      if (secondEnabled && secondUsername.trim()) {
+        sources.push({ platform: secondPlatform, user: secondUsername.trim() });
       }
+
+      // Rewrite a second account's games so the scouted player's name matches the
+      // primary username — keeps the single-username analysis valid when the two
+      // accounts have different usernames.
+      const normalizeBatch = (gameBatch: GameData[], srcUser: string): GameData[] => {
+        if (srcUser.toLowerCase() === username.toLowerCase()) return gameBatch;
+        return gameBatch.map((g) => {
+          if (g.white?.toLowerCase() === srcUser.toLowerCase()) return { ...g, white: username };
+          if (g.black?.toLowerCase() === srcUser.toLowerCase()) return { ...g, black: username };
+          return g;
+        });
+      };
+
+      let baseCount = 0;
+      for (let si = 0; si < sources.length; si++) {
+        const src = sources[si];
+        const fetchFn = src.platform === "lichess" ? fetchLichessGames : fetchChessComGames;
+        let srcCount = 0;
+        try {
+          await fetchFn(
+            src.user,
+            fetchOptions,
+            (count) => {
+              srcCount = count;
+              progressRef.current = baseCount + count;
+              setProgress(baseCount + count);
+              toast.loading(`Analyzing ${baseCount + count} games...`, { id: progressToast, duration: Infinity });
+              if (baseCount + count > 2000 && !warning) {
+                setWarning("Large dataset - processing all games...");
+              }
+            },
+            (gameBatch) => {
+              batchQueue.push(normalizeBatch(gameBatch, src.user));
+              processBatches(); // Fire and forget - no await
+            },
+            abortControllerRef.current?.signal
+          );
+        } catch (srcError: any) {
+          if (srcError?.name === "AbortError") throw srcError; // propagate stops
+          if (si === 0) throw srcError; // primary account failure is fatal
+          // A failed secondary account shouldn't sink the whole report.
+          console.warn("[SCOUT] Secondary source failed:", srcError?.message);
+          toast.message(`Couldn't fetch ${platformLabel(src.platform)} games for "${src.user}".`);
+        }
+        // Drain this source's batches before moving to the next account.
+        while (batchQueue.length > 0 || processingBatches) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        baseCount += srcCount;
+      }
+      setCurrentAnalysis(analysis);
+      toast.dismiss(progressToast);
 
       if (analysis.totalGames === 0) {
         toast.error("No games found for this user");
@@ -552,6 +572,8 @@ const Scout = () => {
     setProgress(null);
     setWarning(null);
     setUsername("");
+    setSecondEnabled(false);
+    setSecondUsername("");
     setColor("white");
     setTimeControls(platform === "chesscom" ? chesscomTimeControls : lichessTimeControls);
     setVariant("standard");
@@ -704,6 +726,45 @@ const Scout = () => {
                       <SelectItem value="chesscom">Chess.com (may hit CORS)</SelectItem>
                     </SelectContent>
                   </Select>
+
+                  {/* Optional: scout the same player across both platforms */}
+                  {!secondEnabled ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="mt-1"
+                      onClick={() => setSecondEnabled(true)}
+                    >
+                      <Plus className="w-4 h-4 mr-2" />
+                      Add {platformLabel(secondPlatform)} account
+                    </Button>
+                  ) : (
+                    <div className="space-y-2 rounded-md border border-border p-3 mt-1">
+                      <div className="flex items-center justify-between">
+                        <Label htmlFor="second-username">{platformLabel(secondPlatform)} username</Label>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6"
+                          onClick={() => { setSecondEnabled(false); setSecondUsername(""); }}
+                        >
+                          <X className="w-4 h-4" />
+                        </Button>
+                      </div>
+                      <Input
+                        id="second-username"
+                        placeholder={`Their ${platformLabel(secondPlatform)} username`}
+                        value={secondUsername}
+                        onChange={(e) => setSecondUsername(e.target.value)}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Same player, other platform — usernames can differ. We'll merge both
+                        accounts into one report.
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="space-y-2">
