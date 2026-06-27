@@ -122,9 +122,12 @@ export class StockfishEngine {
   // listeners can never accumulate across positions.
   private lineHandler: ((line: string) => void) | null = null;
 
-  // CDN sources tried in order. The first is a single-file asm.js build that
-  // runs as a standalone Web Worker (no sibling .wasm needed).
+  // Engine sources, tried in order. The first is a same-origin copy bundled in
+  // /public so it works without any external network access; the CDNs are
+  // fallbacks. All are the single-file asm.js build that runs as a standalone
+  // Web Worker (no sibling .wasm needed).
   private static readonly ENGINE_URLS = [
+    '/stockfish.js',
     'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js',
     'https://unpkg.com/stockfish.js@10.0.2/stockfish.js',
   ];
@@ -132,29 +135,30 @@ export class StockfishEngine {
   async init(): Promise<void> {
     if (this.ready && this.worker) return;
 
-    // Fetch the engine and run it from a blob URL to bypass cross-origin
-    // worker restrictions. Try each CDN until one succeeds.
-    let blobUrl: string | null = null;
-    let lastError: unknown = null;
-    for (const url of StockfishEngine.ENGINE_URLS) {
-      try {
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const blob = await response.blob();
-        blobUrl = URL.createObjectURL(blob);
-        break;
-      } catch (error) {
-        console.warn('[ENGINE] Failed to load from', url, error);
-        lastError = error;
+    // Try to run the local copy directly as a worker first (fastest, no fetch).
+    // Fall back to fetching from a CDN and running via a blob URL.
+    try {
+      this.worker = new Worker('/stockfish.js');
+    } catch {
+      let blobUrl: string | null = null;
+      for (const url of StockfishEngine.ENGINE_URLS) {
+        try {
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const blob = await response.blob();
+          blobUrl = URL.createObjectURL(blob);
+          break;
+        } catch (error) {
+          console.warn('[ENGINE] Failed to load from', url, error);
+        }
       }
+      if (!blobUrl) {
+        throw new Error(
+          'Could not load the chess engine. Check your network connection and try again.'
+        );
+      }
+      this.worker = new Worker(blobUrl);
     }
-    if (!blobUrl) {
-      throw new Error(
-        'Could not load the chess engine. Check your network connection and try again.'
-      );
-    }
-
-    this.worker = new Worker(blobUrl);
 
     // Route every worker message to the currently-active line handler.
     this.worker.onmessage = (e: MessageEvent) => {
