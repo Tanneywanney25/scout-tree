@@ -38,12 +38,43 @@ export interface GameAnalysis {
 // Classify move based on evaluation loss
 export function classifyMove(evalLoss: number, isPlayerTurn: boolean): MoveClassification {
   const loss = Math.abs(evalLoss);
-  
+
   if (loss <= 10) return 'excellent';
   if (loss <= 25) return 'good';
   if (loss <= 100) return 'inaccuracy';
   if (loss <= 300) return 'mistake';
   return 'blunder';
+}
+
+// Compute how much a move lost, plus a white-relative eval for display.
+//
+// Stockfish reports `score cp` from the perspective of the side TO MOVE. So the
+// eval of the position *before* the move is already from the mover's POV, and
+// the eval *after* the move is from the opponent's POV. The mover's eval after
+// the move is therefore the negation of the after-eval.
+//
+//   evalLoss = bestEval(beforeMove, mover POV) - actualEval(afterMove, mover POV)
+//            = evalBeforeStm - ( -evalAfterStm )
+//            = evalBeforeStm + evalAfterStm
+//
+// Evals are clamped so mate scores (±10000) don't make every move a "blunder".
+export function computeMoveQuality(
+  isWhite: boolean,
+  evalBeforeStm: number,
+  evalAfterStm: number
+): { evalLoss: number; whitePovEval: number; classification: MoveClassification } {
+  const CAP = 1500; // ~15 pawns; beyond this the position is already decided
+  const before = Math.max(-CAP, Math.min(CAP, evalBeforeStm));
+  const after = Math.max(-CAP, Math.min(CAP, evalAfterStm));
+
+  // Floor at 0 — a "negative loss" just means the move kept/gained the eval.
+  const evalLoss = Math.max(0, before + after);
+
+  // After the move it's the opponent to move, so evalAfterStm is from the
+  // opponent's POV. Convert to white's POV for display.
+  const whitePovEval = isWhite ? -evalAfterStm : evalAfterStm;
+
+  return { evalLoss, whitePovEval, classification: classifyMove(evalLoss, true) };
 }
 
 // Get game phase based on material and move number
@@ -308,20 +339,15 @@ export class StockfishEngine {
       
       // Analyze position after move
       const positionAnalysis = await this.analyzePosition(fenAfter, depth);
-      
-      // Calculate eval loss (from the perspective of the player who moved)
+
+      // Eval loss + display eval, handling Stockfish's side-to-move convention.
       const isWhite = move.color === 'w';
-      const evalAfterForPlayer = isWhite ? -positionAnalysis.evaluation : positionAnalysis.evaluation;
-      const evalBeforeForPlayer = isWhite ? evalBefore : -evalBefore;
-      
-      // Get best move evaluation
-      const bestMoveEval = isWhite ? -prevEval.evaluation : prevEval.evaluation;
-      
-      // Eval loss = how much worse than the best move
-      const evalLoss = bestMoveEval - evalAfterForPlayer;
-      
-      const classification = classifyMove(evalLoss, true);
-      
+      const { evalLoss, whitePovEval, classification } = computeMoveQuality(
+        isWhite,
+        prevEval.evaluation,      // before the move: mover's POV
+        positionAnalysis.evaluation // after the move: opponent's POV
+      );
+
       if (classification === 'blunder') blunders++;
       else if (classification === 'mistake') mistakes++;
       else if (classification === 'inaccuracy') inaccuracies++;
@@ -330,6 +356,9 @@ export class StockfishEngine {
       const accuracy = Math.max(0, 100 - Math.abs(evalLoss) / 3);
       totalAccuracy += accuracy;
 
+      // White-relative eval of the position before the move, for display.
+      const whitePovEvalBefore = isWhite ? evalBefore : -evalBefore;
+
       const moveAnalysis: MoveAnalysis = {
         moveNumber: Math.floor(i / 2) + 1,
         color: isWhite ? 'white' : 'black',
@@ -337,8 +366,8 @@ export class StockfishEngine {
         moveUci: `${move.from}${move.to}${move.promotion || ''}`,
         fen: fenAfter,
         fenBefore,
-        evaluation: positionAnalysis.evaluation,
-        evalBefore,
+        evaluation: whitePovEval,
+        evalBefore: whitePovEvalBefore,
         bestMove: prevEval.bestMoveSan,
         bestMoveUci: prevEval.bestMove,
         bestMoveEval: prevEval.evaluation,

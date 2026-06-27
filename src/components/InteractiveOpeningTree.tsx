@@ -34,13 +34,32 @@ interface InteractiveOpeningTreeProps {
   onPathChange?: (path: string[]) => void;
 }
 
-export const InteractiveOpeningTree = ({ 
-  node, 
-  maxDepth = 10, 
+export const InteractiveOpeningTree = ({
+  node,
+  maxDepth = 10,
   playerColor,
   initialSelectedPath = [],
   onPathChange
 }: InteractiveOpeningTreeProps) => {
+  // Size the board from the actual container width (not the viewport) so it can
+  // never overflow the card it's placed in. The moves list always sits below
+  // the board, so the layout looks identical whether the window is half or full
+  // width.
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [boardWidth, setBoardWidth] = useState(400);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const compute = () => {
+      const available = el.clientWidth - 8; // small breathing room
+      setBoardWidth(Math.max(280, Math.min(560, available)));
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const [selectedPath, setSelectedPathInternal] = useState<string[]>(initialSelectedPath);
   const [boardOrientation, setBoardOrientation] = useState<"white" | "black">("white");
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
@@ -617,9 +636,9 @@ export const InteractiveOpeningTree = ({
   };
 
   return (
-    <div className="flex flex-col lg:flex-row gap-4 lg:gap-8 items-center lg:items-start justify-center min-h-[calc(100vh-12rem)] max-w-7xl mx-auto px-2 sm:px-4 pb-4">
+    <div ref={containerRef} className="flex flex-col gap-4 items-center justify-start w-full max-w-3xl mx-auto px-2 sm:px-4 pb-4">
       {/* Main board area */}
-      <div className="flex flex-col items-center gap-3 sm:gap-4 w-full lg:w-auto">
+      <div className="flex flex-col items-center gap-3 sm:gap-4 w-full">
         {/* Controls above board */}
         <div className="flex gap-2">
           <Button
@@ -747,13 +766,7 @@ export const InteractiveOpeningTree = ({
               onSquareClick={onSquareClick}
               onSquareRightClick={handleSquareRightClick}
               squareStyles={squareStyles}
-              calcWidth={({ screenWidth }) => {
-                // Calculate board width - larger sizes for better visibility
-                if (screenWidth < 640) return Math.min(340, screenWidth - 24);
-                if (screenWidth < 768) return Math.min(480, screenWidth - 24);
-                if (screenWidth < 1024) return Math.min(560, screenWidth - 24);
-                return Math.min(640, screenWidth - 280);
-              }}
+              width={boardWidth}
               boardStyle={{
                 borderRadius: '0.5rem',
               }}
@@ -955,8 +968,11 @@ export const InteractiveOpeningTree = ({
         </div>
       </div>
 
-      {/* Move list on the side */}
-      <div className="w-full lg:w-48 bg-card border border-border rounded-lg p-3 sm:p-4 max-h-[200px] lg:max-h-[600px] overflow-y-auto">
+      {/* Move list below the board (full width, capped to the board width) */}
+      <div
+        className="w-full bg-card border border-border rounded-lg p-3 sm:p-4 max-h-[240px] overflow-y-auto"
+        style={{ maxWidth: boardWidth }}
+      >
         <h3 className="text-xs sm:text-sm font-semibold mb-2 sm:mb-3 border-b border-border pb-2">Moves</h3>
         <div className="space-y-1 text-xs sm:text-sm">
           {selectedPath.length === 0 ? (
