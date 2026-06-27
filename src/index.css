@@ -1,18 +1,132 @@
-* {
-  box-sizing: border-box;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 220 13% 13%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 13% 13%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 13% 13%;
+
+    /* Chess green theme */
+    --primary: 142 76% 36%;
+    --primary-foreground: 0 0% 100%;
+    
+    --primary-light: 142 76% 46%;
+    --primary-dark: 142 76% 26%;
+
+    --secondary: 220 13% 95%;
+    --secondary-foreground: 220 13% 13%;
+
+    --muted: 220 13% 95%;
+    --muted-foreground: 220 9% 46%;
+
+    --accent: 142 76% 36%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 142 76% 36%;
+
+    --radius: 0.5rem;
+
+    /* Chess-specific colors */
+    --chess-board-light: 46 68% 84%;
+    --chess-board-dark: 142 25% 45%;
+    
+    /* Confidence badges */
+    --confidence-high: 142 76% 36%;
+    --confidence-medium: 45 93% 47%;
+    --confidence-low: 0 84% 60%;
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 220 13% 13%;
+    --sidebar-primary: 142 76% 36%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 13% 95%;
+    --sidebar-accent-foreground: 220 13% 13%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 142 76% 36%;
+  }
+
+  .dark {
+    --background: 220 13% 9%;
+    --foreground: 0 0% 98%;
+
+    --card: 220 13% 12%;
+    --card-foreground: 0 0% 98%;
+
+    --popover: 220 13% 12%;
+    --popover-foreground: 0 0% 98%;
+
+    --primary: 142 76% 46%;
+    --primary-foreground: 220 13% 9%;
+    
+    --primary-light: 142 76% 56%;
+    --primary-dark: 142 76% 36%;
+
+    --secondary: 220 13% 15%;
+    --secondary-foreground: 0 0% 98%;
+
+    --muted: 220 13% 15%;
+    --muted-foreground: 220 9% 65%;
+
+    --accent: 142 76% 46%;
+    --accent-foreground: 220 13% 9%;
+
+    --destructive: 0 62% 50%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 220 13% 20%;
+    --input: 220 13% 20%;
+    --ring: 142 76% 46%;
+
+    --chess-board-light: 46 68% 74%;
+    --chess-board-dark: 142 25% 35%;
+    
+    --confidence-high: 142 76% 46%;
+    --confidence-medium: 45 93% 57%;
+    --confidence-low: 0 84% 60%;
+
+    --sidebar-background: 220 13% 12%;
+    --sidebar-foreground: 0 0% 98%;
+    --sidebar-primary: 142 76% 46%;
+    --sidebar-primary-foreground: 220 13% 9%;
+    --sidebar-accent: 220 13% 15%;
+    --sidebar-accent-foreground: 0 0% 98%;
+    --sidebar-border: 220 13% 20%;
+    --sidebar-ring: 142 76% 46%;
+  }
 }
-body {
-  margin: 0;
-  padding: 0;
-  background: white;
-  color: black;
-}
-input, select, button {
-  font-family: monospace;
-  font-size: 14px;
-  padding: 4px 8px;
-  margin: 2px;
-}
-button:disabled {
-  opacity: 0.5;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+  
+  /* Chess notation styling */
+  .chess-notation {
+    @apply font-mono text-sm;
+  }
+  
+  /* Smooth transitions */
+  * {
+    @apply transition-colors duration-200;
+  }
 }
