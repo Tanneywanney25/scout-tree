@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
 import { extractTrainingPositions, saveTrainingPositions } from "@/lib/trainingGeneration";
 import { useAuth } from "@/hooks/useAuth";
+import { useProfile } from "@/hooks/useProfile";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from "recharts";
 import {
   StockfishEngine,
@@ -71,6 +72,7 @@ export default function WeaknessDashboard({ games = [], username }: WeaknessDash
   const abortRef = useRef(false);
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { profile } = useProfile();
   
   // Collect all mistakes for training generation
   const allMistakes = report?.weaknesses.flatMap(w => w.examples) || [];
@@ -89,7 +91,10 @@ export default function WeaknessDashboard({ games = [], username }: WeaknessDash
 
     setGeneratingTraining(true);
     try {
-      const positions = extractTrainingPositions(allMistakes, 20);
+      const positions = extractTrainingPositions(allMistakes, {
+        maxPositions: 20,
+        userRating: profile?.rating ?? null,
+      });
       const { saved, errors } = await saveTrainingPositions(positions);
       
       if (saved > 0) {

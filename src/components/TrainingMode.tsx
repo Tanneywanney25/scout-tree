@@ -421,7 +421,7 @@ export function TrainingMode({ positions, onComplete, onPositionComplete }: Trai
           {/* Result display */}
           {result && (
             <Card className={result === 'correct' ? 'border-green-500 bg-green-500/10' : 'border-red-500 bg-red-500/10'}>
-              <CardContent className="pt-4">
+              <CardContent className="pt-4 space-y-2">
                 <div className="flex items-center gap-2">
                   {result === 'correct' ? (
                     <CheckCircle2 className="h-5 w-5 text-green-500" />
@@ -429,11 +429,14 @@ export function TrainingMode({ positions, onComplete, onPositionComplete }: Trai
                     <XCircle className="h-5 w-5 text-red-500" />
                   )}
                   <span className="font-medium">
-                    {result === 'correct' 
-                      ? 'Correct!' 
-                      : `The correct move was ${currentPosition?.move_to_find}`}
+                    {result === 'correct'
+                      ? `Correct — ${currentPosition?.move_to_find} was best.`
+                      : `The best move was ${currentPosition?.move_to_find}.`}
                   </span>
                 </div>
+                {currentPosition?.explanation && (
+                  <p className="text-sm text-muted-foreground">{currentPosition.explanation}</p>
+                )}
               </CardContent>
             </Card>
           )}

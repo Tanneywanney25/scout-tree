@@ -161,37 +161,114 @@ export function calculateMasteryLevel(timesCorrect: number, timesAttempted: numb
   return 0;
 }
 
-// Extract training positions from categorized mistakes
+// Minimum eval-loss (centipawns) to qualify as a drill, tuned to the user's
+// rating. Lower-rated players train on clear, punishing mistakes; stronger
+// players also get subtler ones (so drills aren't "too easy").
+function minEvalLossForRating(rating?: number | null): number {
+  if (!rating) return 120;
+  if (rating < 1200) return 250;
+  if (rating < 1600) return 180;
+  if (rating < 2000) return 120;
+  if (rating < 2400) return 80;
+  return 60;
+}
+
+// A short, spoiler-free prompt shown before solving.
+function buildContext(m: CategorizedMistake): string {
+  const sideToMove = m.move.color === 'white' ? 'White' : 'Black';
+  const cat = m.category.replace(/_/g, ' ');
+  return `${sideToMove} to move (move ${m.move.moveNumber}). In the real game this turned into ${cat}. Find the strongest move.`;
+}
+
+// An insight revealed after the attempt.
+function buildExplanation(m: CategorizedMistake): string {
+  const loss = Math.abs(m.move.evalLoss);
+  const sev = loss >= 300 ? 'a blunder' : loss >= 150 ? 'a mistake' : 'an inaccuracy';
+  const cat = m.category.replace(/_/g, ' ');
+  const lostPawns = (loss / 100).toFixed(1);
+  return `The move actually played was ${sev} (${cat}) that gave up about ${lostPawns} pawns. ${m.description}`;
+}
+
+interface ExtractOptions {
+  maxPositions?: number;
+  maxPerGame?: number;
+  /** Minimum gap (in full moves) between two drills taken from the same game. */
+  minMoveGap?: number;
+  userRating?: number | null;
+}
+
+// Extract training positions from categorized mistakes, diversified across
+// games so drills aren't all consecutive plies from a single game.
 export function extractTrainingPositions(
   mistakes: CategorizedMistake[],
-  maxPositions: number = 20
+  optionsOrMax: ExtractOptions | number = {}
 ): Omit<TrainingPosition, 'id' | 'user_id' | 'created_at' | 'updated_at'>[] {
-  // Filter for significant mistakes only (eval loss > 50cp) and those with required data
-  const significantMistakes = mistakes.filter(m => {
+  // Back-compat: allow a bare number for maxPositions.
+  const options: ExtractOptions = typeof optionsOrMax === 'number' ? { maxPositions: optionsOrMax } : optionsOrMax;
+  const { maxPositions = 20, maxPerGame = 3, minMoveGap = 6, userRating } = options;
+
+  const minLoss = minEvalLossForRating(userRating);
+
+  // Keep only significant, well-formed mistakes.
+  const significant = mistakes.filter((m) => {
     const evalLoss = Math.abs(m.move.evalLoss);
-    return evalLoss > 50 && m.move.fenBefore && m.move.bestMove;
+    return evalLoss >= minLoss && m.move.fenBefore && m.move.bestMove && isMoveLegal(m.move.fenBefore, m.move.bestMove);
   });
-  
-  // Sort by eval loss (worst first) to prioritize biggest mistakes
-  const sorted = significantMistakes.sort((a, b) => 
-    Math.abs(b.move.evalLoss) - Math.abs(a.move.evalLoss)
+
+  // Group by game and pick the most instructive, well-spaced positions per game.
+  const byGame = new Map<number, CategorizedMistake[]>();
+  for (const m of significant) {
+    const arr = byGame.get(m.gameIndex) || [];
+    arr.push(m);
+    byGame.set(m.gameIndex, arr);
+  }
+
+  const perGamePicks = new Map<number, CategorizedMistake[]>();
+  for (const [game, arr] of byGame.entries()) {
+    const sorted = [...arr].sort((a, b) => Math.abs(b.move.evalLoss) - Math.abs(a.move.evalLoss));
+    const picks: CategorizedMistake[] = [];
+    const usedFens = new Set<string>();
+    for (const m of sorted) {
+      if (picks.length >= maxPerGame) break;
+      if (usedFens.has(m.move.fenBefore)) continue;
+      // Enforce a move-number gap so we don't grab the position right after.
+      const tooClose = picks.some((p) => Math.abs(p.move.moveNumber - m.move.moveNumber) < minMoveGap);
+      if (tooClose) continue;
+      picks.push(m);
+      usedFens.add(m.move.fenBefore);
+    }
+    perGamePicks.set(game, picks);
+  }
+
+  // Round-robin across games so the session draws from many games, hardest first.
+  const queues = [...perGamePicks.values()].map((arr) =>
+    arr.sort((a, b) => Math.abs(b.move.evalLoss) - Math.abs(a.move.evalLoss))
   );
-  
-  // Take top N positions
-  const selected = sorted.slice(0, maxPositions);
-  
-  return selected.map(mistake => {
+  const selected: CategorizedMistake[] = [];
+  const globalFens = new Set<string>();
+  let round = 0;
+  while (selected.length < maxPositions) {
+    let added = false;
+    for (const q of queues) {
+      if (round < q.length) {
+        const m = q[round];
+        if (!globalFens.has(m.move.fenBefore)) {
+          selected.push(m);
+          globalFens.add(m.move.fenBefore);
+          added = true;
+          if (selected.length >= maxPositions) break;
+        }
+      }
+    }
+    if (!added) break;
+    round++;
+  }
+
+  return selected.map((mistake) => {
     const fen = mistake.move.fenBefore;
     const sanMove = mistake.move.bestMove;
-    
-    // Convert SAN to UCI for reliable move validation
     const uciMove = sanToUci(fen, sanMove) || sanMove;
-    
-    // Validate the move is legal
-    if (!isMoveLegal(fen, sanMove)) {
-      console.warn(`Invalid move ${sanMove} for position ${fen}`);
-    }
-    
+
     return {
       fen,
       move_to_find: sanMove,
@@ -199,7 +276,8 @@ export function extractTrainingPositions(
       weakness_category: mistake.category,
       difficulty: calculateDifficulty(Math.abs(mistake.move.evalLoss)),
       eval_loss: Math.round(Math.abs(mistake.move.evalLoss)),
-      game_context: `Move ${mistake.move.moveNumber}: ${mistake.description}`,
+      game_context: buildContext(mistake),
+      explanation: buildExplanation(mistake),
       times_attempted: 0,
       times_correct: 0,
       mastery_level: 0,
