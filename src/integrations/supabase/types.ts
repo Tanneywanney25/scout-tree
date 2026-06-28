@@ -38,69 +38,18 @@ export type Database = {
           email: string | null
           id: string
           updated_at: string | null
-          lichess_username: string | null
-          chesscom_username: string | null
-          rating: number | null
-          preferred_platform: string | null
-          goals: string[]
-          onboarded: boolean
         }
         Insert: {
           created_at?: string | null
           email?: string | null
           id: string
           updated_at?: string | null
-          lichess_username?: string | null
-          chesscom_username?: string | null
-          rating?: number | null
-          preferred_platform?: string | null
-          goals?: string[]
-          onboarded?: boolean
         }
         Update: {
           created_at?: string | null
           email?: string | null
           id?: string
           updated_at?: string | null
-          lichess_username?: string | null
-          chesscom_username?: string | null
-          rating?: number | null
-          preferred_platform?: string | null
-          goals?: string[]
-          onboarded?: boolean
-        }
-        Relationships: []
-      }
-      saved_scouts: {
-        Row: {
-          id: string
-          user_id: string
-          opponent_username: string
-          platform: string
-          player_color: string | null
-          total_games: number
-          summary: Json | null
-          created_at: string
-        }
-        Insert: {
-          id?: string
-          user_id: string
-          opponent_username: string
-          platform: string
-          player_color?: string | null
-          total_games?: number
-          summary?: Json | null
-          created_at?: string
-        }
-        Update: {
-          id?: string
-          user_id?: string
-          opponent_username?: string
-          platform?: string
-          player_color?: string | null
-          total_games?: number
-          summary?: Json | null
-          created_at?: string
         }
         Relationships: []
       }
