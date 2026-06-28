@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { callAI } from "../_shared/ai.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -56,11 +57,6 @@ serve(async (req) => {
 
   try {
     const { fen, bestMove, weaknessCategory, hintLevel } = await req.json();
-    
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) {
-      throw new Error("LOVABLE_API_KEY is not configured");
-    }
 
     const materialDesc = describeMaterial(fen);
     const piece = getPieceFromMove(bestMove);
@@ -94,54 +90,29 @@ Explain why this move works and what the student should learn. Be educational. 2
 
     console.log(`[training-hint] Generating hint level ${hintLevel} for position`);
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { 
-            role: "system", 
-            content: "You are a chess coach giving hints to help students find the best move. Be encouraging but don't give away the answer unless asked. Use chess terminology appropriately." 
-          },
-          { role: "user", content: userPrompt }
-        ],
-        max_tokens: 150,
-      }),
-    });
+    const ai = await callAI(
+      "You are a chess coach giving hints to help students find the best move. Be encouraging but don't give away the answer unless asked. Use chess terminology appropriately.",
+      userPrompt,
+      150
+    );
 
-    if (!response.ok) {
-      if (response.status === 429) {
-        console.error('[training-hint] Rate limit exceeded');
-        return new Response(JSON.stringify({ 
-          error: "Rate limit exceeded, please try again later.",
-          hint: `Look for a ${categoryReadable} pattern in this position.`
-        }), {
-          status: 429,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      if (response.status === 402) {
-        console.error('[training-hint] Payment required');
-        return new Response(JSON.stringify({ 
-          error: "Payment required",
-          hint: hintLevel >= 3 ? `The correct move is ${bestMove}.` : `Try moving the ${piece}.`
-        }), {
-          status: 402,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      const errorText = await response.text();
-      console.error("[training-hint] AI gateway error:", response.status, errorText);
-      throw new Error(`AI gateway error: ${response.status}`);
+    if (!ai.ok) {
+      console.error('[training-hint] AI error:', ai.status, ai.error);
+      // Provide a useful non-AI fallback hint so training still works.
+      const fallback =
+        hintLevel >= 3
+          ? `The best move is ${bestMove}.`
+          : hintLevel === 2
+            ? `Try moving the ${piece}.`
+            : `Look for a ${categoryReadable} pattern in this position.`;
+      const status = ai.status === 429 ? 429 : ai.status === 402 ? 402 : 200;
+      return new Response(JSON.stringify({ error: ai.error, hint: fallback }), {
+        status,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
-    const data = await response.json();
-    const hint = data.choices?.[0]?.message?.content || "Think about the position carefully.";
-
+    const hint = ai.text || "Think about the position carefully.";
     console.log(`[training-hint] Generated hint: ${hint.substring(0, 50)}...`);
 
     return new Response(JSON.stringify({ hint }), {

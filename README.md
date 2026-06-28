@@ -1,73 +1,71 @@
-# Welcome to your Lovable project
+# ScoutTree
 
-## Project info
+AI-powered chess opponent scouting. Enter a Lichess or Chess.com username and get
+an opening tree, opponent profile, weakness/structure/endgame analysis, a tailored
+game plan, and spaced-repetition training drills.
 
-**URL**: https://lovable.dev/projects/e83db642-61e0-4055-be00-c9dd5f0d9830
+## Tech stack
 
-## How can I edit this code?
+- Vite + React + TypeScript
+- Tailwind CSS + shadcn/ui
+- Supabase (auth + Postgres)
+- Stockfish (bundled in `public/stockfish.js`, runs in a Web Worker)
+- Lichess & Chess.com public APIs (no key required)
 
-There are several ways of editing your application.
-
-**Use Lovable**
-
-Simply visit the [Lovable Project](https://lovable.dev/projects/e83db642-61e0-4055-be00-c9dd5f0d9830) and start prompting.
-
-Changes made via Lovable will be committed automatically to this repo.
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
+## Local development
 
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+npm install
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+### Environment variables
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+Create a `.env` (see `.env.example`). These are frontend, publishable values
+(safe to expose):
 
-**Use GitHub Codespaces**
+| Variable | Value |
+| --- | --- |
+| `VITE_SUPABASE_URL` | `https://xqyszdjczchlgyisvtvo.supabase.co` |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_BH3AoBttItAuh4mpSvgFTw_oKmPpKBU` |
+| `VITE_SUPABASE_PROJECT_ID` | `xqyszdjczchlgyisvtvo` |
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+When deploying (e.g. Vercel), set the same variables in the host's environment.
+The Supabase client also has these as built-in fallbacks, so the app works even
+if the env vars aren't set.
 
-## What technologies are used for this project?
+## Database
 
-This project is built with:
+The full schema lives in `supabase/migrations/` as a single initial migration.
+Apply it to your Supabase project either by connecting the repo to Supabase
+(GitHub integration auto-applies migrations) or manually:
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+```sh
+supabase link --project-ref xqyszdjczchlgyisvtvo
+supabase db push
+```
 
-## How can I deploy this project?
+Or paste `supabase/migrations/20260628000000_init_schema.sql` into the Supabase
+SQL editor. It creates `profiles`, `scout_usage`, `anonymous_scout_usage`,
+`training_positions`, and `saved_scouts`, with row-level security so each user
+can only access their own rows, plus a trigger that creates a profile row on
+signup.
 
-Simply open [Lovable](https://lovable.dev/projects/e83db642-61e0-4055-be00-c9dd5f0d9830) and click on Share -> Publish.
+## Optional: AI explanations
 
-## Can I connect a custom domain to my Lovable project?
+The `explain-move` and `training-hint` edge functions add natural-language move
+explanations and training hints. They are optional — the app works without them.
+To enable, deploy the functions and set an `ANTHROPIC_API_KEY` secret (optionally
+`AI_MODEL`) in your Supabase project:
 
-Yes, you can!
+```sh
+supabase functions deploy explain-move
+supabase functions deploy training-hint
+supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
+```
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+## Build
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+```sh
+npm run build
+```

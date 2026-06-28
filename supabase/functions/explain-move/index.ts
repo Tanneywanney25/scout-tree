@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { callAI } from "../_shared/ai.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -60,11 +61,6 @@ serve(async (req) => {
     const { fen, movePlayed, bestMove, evalDiff, classification, gamePhase, playerColor } = body;
     
     console.log('[explain-move] Request:', { movePlayed, bestMove, evalDiff, classification, gamePhase });
-    
-    const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
-    if (!LOVABLE_API_KEY) {
-      throw new Error('LOVABLE_API_KEY is not configured');
-    }
 
     const boardDescription = describeBoardFromFen(fen);
     const evalLossPawns = Math.abs(evalDiff / 100).toFixed(1);
@@ -86,58 +82,28 @@ TASK: In 2-3 clear sentences, explain:
 
 Be concrete and educational. Reference specific squares, pieces, or threats when relevant. Do not be vague.`;
 
-    const response = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${LOVABLE_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a chess coach helping students understand their mistakes. Give specific, actionable explanations using chess terminology. Always reference concrete squares and pieces.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        max_tokens: 250,
-        temperature: 0.7
-      }),
-    });
+    const ai = await callAI(
+      'You are a chess coach helping students understand their mistakes. Give specific, actionable explanations using chess terminology. Always reference concrete squares and pieces.',
+      prompt,
+      250
+    );
 
-    if (!response.ok) {
-      if (response.status === 429) {
-        console.error('[explain-move] Rate limit exceeded');
-        return new Response(JSON.stringify({ 
-          error: 'Rate limit exceeded, please try again later.',
-          explanation: 'AI explanation temporarily unavailable due to rate limits.'
-        }), {
-          status: 429,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
-      if (response.status === 402) {
-        console.error('[explain-move] Payment required');
-        return new Response(JSON.stringify({ 
-          error: 'AI credits exhausted. Please add credits to continue.',
-          explanation: 'AI explanation unavailable - credits needed.'
-        }), {
-          status: 402,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
-      const errorText = await response.text();
-      console.error('[explain-move] AI gateway error:', response.status, errorText);
-      throw new Error(`AI gateway error: ${response.status}`);
+    if (!ai.ok) {
+      console.error('[explain-move] AI error:', ai.status, ai.error);
+      const status = ai.status === 429 ? 429 : ai.status === 402 ? 402 : 200;
+      return new Response(JSON.stringify({
+        error: ai.error,
+        explanation:
+          ai.status === 429
+            ? 'AI explanation temporarily unavailable due to rate limits.'
+            : 'AI explanation is unavailable. Add an ANTHROPIC_API_KEY secret to enable it.',
+      }), {
+        status,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
     }
 
-    const data = await response.json();
-    const explanation = data.choices?.[0]?.message?.content || 'Unable to generate explanation.';
-    
+    const explanation = ai.text || 'Unable to generate explanation.';
     console.log('[explain-move] Generated explanation:', explanation.substring(0, 100) + '...');
 
     return new Response(JSON.stringify({ explanation }), {
