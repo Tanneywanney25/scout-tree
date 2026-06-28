@@ -86,7 +86,11 @@ const Report = () => {
     setAdvProgress({ percent: 0, processed: 0, total: Math.min(games.length, 300) });
     runAdvancedAnalysis(games, id || "", {
       signal: advAbortRef.current,
+      engine: true,
       onProgress: (percent, processed, total) => setAdvProgress({ percent, processed, total }),
+      onPartial: (partial) => {
+        if (!advAbortRef.current.aborted) setAdvResult({ ...partial });
+      },
     })
       .then((result) => {
         if (advAbortRef.current.aborted) return;
@@ -245,9 +249,6 @@ const Report = () => {
                   </span>
                 )}
               </TabsTrigger>
-              <TabsTrigger value="weakness-analysis">
-                Weakness Analysis
-              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="opening-tree">
@@ -281,7 +282,8 @@ const Report = () => {
 
             <TabsContent value="advanced">
               <ErrorBoundary fallback={tabErrorFallback('the advanced analysis')}>
-                {advStatus === "running" && (
+                {/* Big ring until the fast client-side phase produces results. */}
+                {!advResult?.profile && advStatus === "running" && (
                   <div className="flex flex-col items-center justify-center py-16 gap-4">
                     <CircularProgress
                       value={advProgress.percent}
@@ -295,11 +297,22 @@ const Report = () => {
                   </div>
                 )}
 
-                {advStatus === "done" && advResult && advResult.gamesAnalyzed > 0 && (
+                {advResult?.profile && (
                   <div className="space-y-4">
-                    <p className="text-sm text-muted-foreground">
-                      Advanced analysis of {advResult.gamesAnalyzed} games.
-                    </p>
+                    {/* Deep engine pass keeps running after phase 1 — show a slim banner. */}
+                    {advStatus === "running" ? (
+                      <div className="flex items-center gap-3 rounded-md border border-border bg-muted/30 px-4 py-2">
+                        <CircularProgress value={advProgress.percent} size={40} strokeWidth={5} />
+                        <span className="text-sm text-muted-foreground">
+                          Running deep engine analysis ({Math.round(advProgress.percent)}%) — results below update live, and browsing the Opening Tree won't cancel it.
+                        </span>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Advanced analysis of {advResult.gamesAnalyzed} games
+                        {advResult.engineGamesAnalyzed > 0 && ` (engine reviewed ${advResult.engineGamesAnalyzed})`}.
+                      </p>
+                    )}
 
                     <GamePlanCard
                       openingTree={analysis.openingTree as any}
@@ -316,6 +329,7 @@ const Report = () => {
                         <TabsTrigger value="profile">Opponent Profile</TabsTrigger>
                         <TabsTrigger value="pawn-structures">Pawn Structures</TabsTrigger>
                         <TabsTrigger value="endgames">Endgames</TabsTrigger>
+                        <TabsTrigger value="weaknesses">Weaknesses</TabsTrigger>
                       </TabsList>
                       <TabsContent value="profile">
                         <OpponentProfile
@@ -339,11 +353,24 @@ const Report = () => {
                           hideControls
                         />
                       </TabsContent>
+                      <TabsContent value="weaknesses">
+                        <WeaknessDashboard
+                          username={id || ''}
+                          games={analysis.games}
+                          precomputedReport={advResult.weaknessReport}
+                          hideControls
+                        />
+                        {advStatus === "done" && advResult.engineGamesAnalyzed === 0 && (
+                          <p className="text-sm text-muted-foreground mt-2">
+                            The engine couldn't analyze games in this session{advResult.engineError ? ` (${advResult.engineError})` : ""}. You can still review a single game in the Deep Analysis tab.
+                          </p>
+                        )}
+                      </TabsContent>
                     </Tabs>
                   </div>
                 )}
 
-                {advStatus === "done" && (!advResult || advResult.gamesAnalyzed === 0) && (
+                {advStatus === "done" && !advResult?.profile && (
                   <div className="text-center py-12 text-muted-foreground">
                     No games available for advanced analysis.
                   </div>
@@ -354,15 +381,6 @@ const Report = () => {
             <TabsContent value="deep-analysis">
               <ErrorBoundary fallback={tabErrorFallback('deep analysis')}>
                 <DeepAnalysisTab
-                  games={analysis.games}
-                  username={id || ''}
-                />
-              </ErrorBoundary>
-            </TabsContent>
-
-            <TabsContent value="weakness-analysis">
-              <ErrorBoundary fallback={tabErrorFallback('weakness analysis')}>
-                <WeaknessDashboard
                   games={analysis.games}
                   username={id || ''}
                 />

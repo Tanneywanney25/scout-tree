@@ -38,6 +38,10 @@ interface StoredGame {
 interface WeaknessDashboardProps {
   games?: StoredGame[];
   username: string;
+  /** When provided, render this report directly instead of running the engine. */
+  precomputedReport?: WeaknessReport | null;
+  /** Hide the standalone "Analyze N games" control (used inside Advanced). */
+  hideControls?: boolean;
 }
 
 // Colors for pie chart
@@ -59,10 +63,10 @@ const severityLabels = {
   low: 'Low Priority',
 };
 
-export default function WeaknessDashboard({ games = [], username }: WeaknessDashboardProps) {
+export default function WeaknessDashboard({ games = [], username, precomputedReport, hideControls }: WeaknessDashboardProps) {
   const [analyzing, setAnalyzing] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0, currentGame: '' });
-  const [report, setReport] = useState<WeaknessReport | null>(null);
+  const [report, setReport] = useState<WeaknessReport | null>(precomputedReport ?? null);
   const [selectedWeakness, setSelectedWeakness] = useState<WeaknessSummary | null>(null);
   const [selectedExample, setSelectedExample] = useState<CategorizedMistake | null>(null);
   const [boardOrientation, setBoardOrientation] = useState<'white' | 'black'>('white');
@@ -111,6 +115,11 @@ export default function WeaknessDashboard({ games = [], username }: WeaknessDash
       setGeneratingTraining(false);
     }
   };
+
+  // Keep local state in sync with a precomputed report streamed from Advanced.
+  useEffect(() => {
+    if (precomputedReport) setReport(precomputedReport);
+  }, [precomputedReport]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -213,7 +222,7 @@ export default function WeaknessDashboard({ games = [], username }: WeaknessDash
     color: CHART_COLORS[i % CHART_COLORS.length],
   })) || [];
 
-  if (games.length === 0) {
+  if (games.length === 0 && !precomputedReport) {
     return (
       <Card className="border-border/50">
         <CardContent className="py-12 text-center">
@@ -231,7 +240,18 @@ export default function WeaknessDashboard({ games = [], username }: WeaknessDash
 
   return (
     <div className="space-y-6">
+      {/* When driven by the Advanced batch, show only the results. */}
+      {hideControls && !report && (
+        <Card className="border-border/50">
+          <CardContent className="py-12 text-center text-muted-foreground">
+            <BarChart3 className="w-10 h-10 mx-auto mb-3" />
+            Weakness analysis runs as part of the advanced engine pass — results appear here as games are analyzed.
+          </CardContent>
+        </Card>
+      )}
+
       {/* Analysis Controls */}
+      {!hideControls && (
       <Card className="border-border/50">
         <CardHeader className="pb-4">
           <CardTitle className="text-lg flex items-center gap-2">
@@ -281,6 +301,7 @@ export default function WeaknessDashboard({ games = [], username }: WeaknessDash
           )}
         </CardContent>
       </Card>
+      )}
 
       {/* Results */}
       {report && (
