@@ -24,18 +24,19 @@ const Hero = () => {
           
           {/* Subheadline */}
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
-            Enter a username. Get a complete opponent profile, opening prep plan, and pregame checklist in under 60 seconds.
+            You don't even need their username. Tell us a name — our AI detective finds the player, verifies their online
+            accounts, and builds a complete scouting report.
           </p>
-          
+
           {/* CTA Buttons */}
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
             <Button asChild size="lg" className="bg-primary hover:bg-primary-dark text-primary-foreground">
-              <Link to="/scout">
-                Scout an Opponent <ArrowRight className="ml-2 w-4 h-4" />
+              <Link to="/find-player">
+                Find Your Opponent <ArrowRight className="ml-2 w-4 h-4" />
               </Link>
             </Button>
             <Button variant="outline" size="lg" asChild>
-              <Link to="/demo">View Demo Report</Link>
+              <Link to="/scout">Scout by username</Link>
             </Button>
           </div>
           

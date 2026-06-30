@@ -37,6 +37,7 @@ import { getBrowserFingerprint } from "@/lib/fingerprint";
 import { AlertDialog, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { InteractiveOpeningTree } from "@/components/InteractiveOpeningTree";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { readHandoff, clearHandoff, type ScoutIdentity } from "@/lib/identity";
 
 const Scout = () => {
   const navigate = useNavigate();
@@ -76,7 +77,14 @@ const Scout = () => {
   const collectedGamesRef = useRef<GameData[]>([]); // Ref for collecting games during streaming
   const currentAnalysisRef = useRef<AnalysisResult | null>(null); // Ref to access current analysis in abort handler
   const analysisRef = useRef<AnalysisResult | null>(null); // Synchronously updated ref for abort handler
-  
+
+  // Identity handoff from /find-player — when the user confirmed a discovered
+  // identity, we land here pre-filled and auto-run, then carry the resolved
+  // identity into the report header.
+  const identityRef = useRef<ScoutIdentity | null>(null);
+  const handoffUsernameRef = useRef<string | null>(null);
+  const [autoSubmitArmed, setAutoSubmitArmed] = useState(false);
+
   // Filter change detection state
   const [baselineFilters, setBaselineFilters] = useState<FilterSnapshot | null>(null);
   
@@ -213,6 +221,35 @@ const Scout = () => {
       }
     }
   }, [user, loading]);
+
+  // Identity handoff from /find-player: prefill the form and arm an auto-run.
+  useEffect(() => {
+    const handoff = readHandoff();
+    if (!handoff) return;
+    setPlatform(handoff.platform);
+    setUsername(handoff.username);
+    if (handoff.secondUsername) {
+      setSecondEnabled(true);
+      setSecondUsername(handoff.secondUsername);
+    }
+    setColor(handoff.color);
+    identityRef.current = handoff.identity;
+    handoffUsernameRef.current = handoff.username;
+    clearHandoff();
+    setAutoSubmitArmed(true);
+  }, []);
+
+  // Fire the auto-run once form state actually reflects the handoff.
+  useEffect(() => {
+    if (!autoSubmitArmed || loading) return;
+    if (username !== handoffUsernameRef.current) return;
+    setAutoSubmitArmed(false);
+    const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
+    const t = setTimeout(() => handleSubmit(fakeEvent, false), 60);
+    return () => clearTimeout(t);
+    // handleSubmit intentionally omitted — it's stable enough for this one-shot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSubmitArmed, username, platform, loading]);
 
   const checkUsageLimit = async (): Promise<boolean> => {
     // If user is logged in, allow unlimited scouts
@@ -632,6 +669,13 @@ const Scout = () => {
       url: g.gameId ? `https://lichess.org/${g.gameId}` : undefined
     }));
     
+    // Carry the resolved identity into the report only when it matches the
+    // opponent actually being reported on (guards against a stale handoff).
+    const identity =
+      identityRef.current && identityRef.current.username.toLowerCase() === username.toLowerCase()
+        ? identityRef.current
+        : undefined;
+
     const serializedAnalysis = {
       playerColor: currentAnalysis.playerColor,
       totalGames: currentAnalysis.totalGames,
@@ -639,7 +683,8 @@ const Scout = () => {
       weakestLines: currentAnalysis.weakestLines,
       strongestLines: currentAnalysis.strongestLines,
       initialSelectedPath: currentBoardPath,
-      games: storedGames // Include games for deep analysis
+      games: storedGames, // Include games for deep analysis
+      identity, // Identity Resolution header (from /find-player), if any
     };
 
     // sessionStorage has a ~5MB quota. A large opening tree plus 50 full PGNs

@@ -29,6 +29,9 @@ const Header = () => {
           <Link to="/" className="text-sm font-medium text-muted-foreground hover:text-foreground">
             Home
           </Link>
+          <Link to="/find-player" className="text-sm font-medium text-muted-foreground hover:text-foreground">
+            Find Player
+          </Link>
           <Link to="/scout" className="text-sm font-medium text-muted-foreground hover:text-foreground">
             Scout
           </Link>

@@ -64,6 +64,37 @@ supabase functions deploy training-hint
 supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+## Find Player — AI opponent discovery
+
+`/find-player` lets you scout an opponent without knowing any username. You give
+whatever you know (a name, plus optional rating, federation, state, tournament,
+USCF/FIDE ID, a username hint, free-text details) and the **Identity Resolution
+Engine** (`src/lib/identity/`) discovers the person and their online accounts,
+scoring every clue as evidence toward a transparent confidence number.
+
+Each data source is a `Provider`:
+
+- **Lichess** and **Chess.com** resolve directly in the browser against their
+  public, key-less APIs (autocomplete + profile verification, real ratings and
+  last-seen).
+- **US Chess**, **FIDE**, **web/AI reasoning** and **tournament/chess-results**
+  run server-side in the optional `resolve-identity` edge function, which does a
+  best-effort USCF lookup plus an AI reasoning pass that proposes the usernames
+  most worth verifying. The browser then verifies those handles against the real
+  Lichess/Chess.com APIs before trusting them.
+
+The engine **degrades gracefully**: with no edge function or `ANTHROPIC_API_KEY`,
+Find Player still works from the direct Lichess/Chess.com providers. Deploy the
+function (same `ANTHROPIC_API_KEY` secret as above) to unlock the AI detective:
+
+```sh
+supabase functions deploy resolve-identity
+```
+
+Confirming an identity hands off into the existing scout pipeline and generates a
+report whose header shows the identity confidence, evidence sources and verified
+accounts.
+
 ## Build
 
 ```sh

@@ -20,12 +20,15 @@ import { useAuth } from "@/hooks/useAuth";
 import { useProfile } from "@/hooks/useProfile";
 import { saveScout } from "@/lib/savedScouts";
 import { Bookmark } from "lucide-react";
+import { ScoutIdentityHeader } from "@/components/ScoutIdentityHeader";
+import type { ScoutIdentity } from "@/lib/identity";
 
 type AdvancedStatus = "idle" | "running" | "done";
 
 const Report = () => {
   const { id } = useParams();
   const [analysis, setAnalysis] = useState<SerializedAnalysisResult | null>(null);
+  const [identity, setIdentity] = useState<ScoutIdentity | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [initialPath, setInitialPath] = useState<string[]>([]);
   const [tab, setTab] = useState("opening-tree");
@@ -119,7 +122,12 @@ const Report = () => {
           console.log('[REPORT] Games available for deep analysis:', parsed.games.length);
         }
         setAnalysis(parsed);
-        
+
+        // Identity Resolution header (present when launched from /find-player).
+        if (parsed.identity && typeof parsed.identity === "object") {
+          setIdentity(parsed.identity as ScoutIdentity);
+        }
+
         // Preserve the navigation state if it was passed
         if (parsed.initialSelectedPath && Array.isArray(parsed.initialSelectedPath)) {
           setInitialPath(parsed.initialSelectedPath);
@@ -200,10 +208,12 @@ const Report = () => {
       
       <main className="flex-1 py-8">
         <div className="container mx-auto px-4 max-w-6xl">
+          {identity && <ScoutIdentityHeader identity={identity} />}
+
           <div className="flex items-center justify-between mb-6">
             <div>
               <h1 className="text-3xl font-bold text-foreground mb-2">
-                Scout Report: {id}
+                Scout Report: {identity?.name || id}
               </h1>
               <p className="text-muted-foreground">
                 {analysis.totalGames} total games analyzed • Playing as {analysis.playerColor}

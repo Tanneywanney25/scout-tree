@@ -40,3 +40,6 @@ verify_jwt = false
 
 [functions.training-hint]
 verify_jwt = false
+
+[functions.resolve-identity]
+verify_jwt = false

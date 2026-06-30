@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { AuthProvider } from "@/hooks/useAuth";
 import Landing from "./pages/Landing";
 import Scout from "./pages/Scout";
+import FindPlayer from "./pages/FindPlayer";
 import Report from "./pages/Report";
 import OpeningTree from "./pages/OpeningTree";
 import Auth from "./pages/Auth";
@@ -27,6 +28,7 @@ const App = () => (
         <AuthProvider>
           <Routes>
             <Route path="/" element={<Landing />} />
+            <Route path="/find-player" element={<FindPlayer />} />
             <Route path="/scout" element={<Scout />} />
             <Route path="/report/:id" element={<Report />} />
             <Route path="/demo" element={<Report />} />
