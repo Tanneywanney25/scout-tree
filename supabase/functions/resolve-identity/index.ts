@@ -246,6 +246,17 @@ function extractJsonArray(text: string): EdgeIdentityCandidate[] {
   }
 }
 
+// Normalise a model-supplied platform string to a fetchable platform, or drop
+// it. Gemini commonly returns "Chess.com" / "lichess.org" / "Twitch"; we only
+// keep handles we can actually pull games from.
+function normalizePlatform(p: unknown): Platform | undefined {
+  if (typeof p !== "string") return undefined;
+  const s = p.toLowerCase().replace(/[^a-z]/g, "");
+  if (s.includes("lichess")) return "lichess";
+  if (s.includes("chesscom") || s === "chess") return "chesscom";
+  return undefined;
+}
+
 function sanitizeCandidate(c: Record<string, unknown>): EdgeIdentityCandidate {
   const allowedSources = ["uscf", "fide", "ai", "chessresults"];
   const source = (typeof c.source === "string" && allowedSources.includes(c.source) ? c.source : "ai") as EdgeIdentityCandidate["source"];
@@ -253,9 +264,9 @@ function sanitizeCandidate(c: Record<string, unknown>): EdgeIdentityCandidate {
     ? (c.suggestedUsernames as unknown[])
         .map((u) => {
           const o = u as Record<string, unknown>;
-          const platform = o.platform === "lichess" || o.platform === "chesscom" ? o.platform : undefined;
-          const username = typeof o.username === "string" ? o.username.trim() : "";
-          return platform && username ? { platform: platform as Platform, username } : null;
+          const platform = normalizePlatform(o.platform);
+          const username = typeof o.username === "string" ? o.username.trim().replace(/^@/, "") : "";
+          return platform && username ? { platform, username } : null;
         })
         .filter((x): x is { platform: Platform; username: string } => !!x)
         .slice(0, 10)
@@ -313,7 +324,7 @@ serve(async (req) => {
     const ai = await callAI(
       "You are an expert chess identity-resolution analyst. You convert sparse clues about a tournament opponent into structured, well-calibrated candidate identities and the online usernames most worth verifying. You never invent federation IDs you are not confident about. You output only strict JSON.",
       buildAiPrompt(query, uscfCandidates),
-      1600
+      2048
     );
 
     let aiCandidates: EdgeIdentityCandidate[] = [];

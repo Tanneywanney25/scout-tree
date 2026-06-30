@@ -83,13 +83,22 @@ Each data source is a `Provider`:
   most worth verifying. The browser then verifies those handles against the real
   Lichess/Chess.com APIs before trusting them.
 
-The engine **degrades gracefully**: with no edge function or `ANTHROPIC_API_KEY`,
-Find Player still works from the direct Lichess/Chess.com providers. Deploy the
-function (same `ANTHROPIC_API_KEY` secret as above) to unlock the AI detective:
+The engine **degrades gracefully**: with no edge function or AI key, Find Player
+still works from the direct Lichess/Chess.com providers. Deploy the function and
+set an AI key to unlock the AI detective. The shared AI helper supports **Google
+Gemini** (preferred when `GEMINI_API_KEY` is set, default model
+`gemini-2.5-flash`) or Anthropic (`ANTHROPIC_API_KEY`):
 
 ```sh
 supabase functions deploy resolve-identity
+# Gemini (recommended):
+supabase secrets set GEMINI_API_KEY=...        # optional: GEMINI_MODEL=gemini-2.5-flash
+# …or Anthropic instead:
+# supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+`explain-move` and `training-hint` use the same helper, so the same key powers
+every AI feature.
 
 Confirming an identity hands off into the existing scout pipeline and generates a
 report whose header shows the identity confidence, evidence sources and verified
