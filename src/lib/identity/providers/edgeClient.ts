@@ -65,7 +65,16 @@ export function fetchEdgeIdentity(query: PlayerQuery, signal?: AbortSignal): Pro
       const { data, error } = await supabase.functions.invoke("resolve-identity", {
         body: { query },
       });
-      if (error || !data) return EMPTY;
+      if (error || !data) {
+        // Most common cause: the edge function isn't deployed yet (or has no AI
+        // key). The detective degrades to Lichess/Chess.com — surface why.
+        console.warn(
+          "[identity] resolve-identity edge function unavailable — AI/USCF/FIDE sources are off. " +
+            "Deploy it (`supabase functions deploy resolve-identity`) and set GEMINI_API_KEY. Detail:",
+          error?.message || "no data returned"
+        );
+        return EMPTY;
+      }
       const candidates = Array.isArray(data.candidates) ? (data.candidates as EdgeIdentityCandidate[]) : [];
       return {
         available: data.available !== false,
