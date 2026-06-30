@@ -17,7 +17,9 @@ const SUPABASE_PUBLISHABLE_KEY =
 export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: {
     storage: localStorage,
-    persistSession: true,
-    autoRefreshToken: true,
+    persistSession: true,        // keep the session across refreshes/restarts
+    autoRefreshToken: true,      // silently refresh access tokens
+    detectSessionInUrl: true,    // complete the OAuth redirect automatically
+    flowType: 'pkce',            // secure OAuth/code flow (Supabase best practice)
   }
 });
