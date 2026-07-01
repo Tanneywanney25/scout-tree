@@ -14,8 +14,8 @@ const SOURCE_NODES: { key: string; label: string; match: (p?: string) => boolean
   { key: "fide", label: "FIDE", match: (p) => p === "fide" },
   { key: "lichess", label: "Lichess", match: (p) => p === "lichess" },
   { key: "chesscom", label: "Chess.com", match: (p) => p === "chesscom" },
-  { key: "web", label: "Web + AI", match: (p) => p === "ai-web" },
-  { key: "events", label: "Tournaments", match: (p) => p === "chessresults" },
+  { key: "web", label: "Web + AI", match: (p) => p === "google" },
+  { key: "graph", label: "Opponent trace", match: (p) => p === "uscf-graph" },
 ];
 
 // Ambient flavour lines that keep the headline alive between real events.
@@ -27,22 +27,30 @@ const AMBIENT_LINES = [
   "Cross-referencing the open web…",
   "Finding tournament history…",
   "Looking for online-rated events…",
-  "Matching player identities…",
+  "Reading tournament crosstables…",
+  "Tracing opponents' online accounts…",
+  "Matching games by date and colour…",
+  "Following the tournament graph…",
   "Comparing ratings…",
-  "Checking tournament pairings…",
-  "Searching archived events…",
   "Verifying online accounts…",
   "Building confidence graph…",
-  "Almost done…",
 ];
 
 export function SearchExperience({ query, events }: SearchExperienceProps) {
   const [ambientIdx, setAmbientIdx] = useState(0);
   const feedRef = useRef<HTMLDivElement>(null);
+  const startRef = useRef(Date.now());
+  const [now, setNow] = useState(Date.now());
 
   // Cycle ambient headline lines for a continuous "thinking" feel.
   useEffect(() => {
-    const t = setInterval(() => setAmbientIdx((i) => (i + 1) % AMBIENT_LINES.length), 1500);
+    const t = setInterval(() => setAmbientIdx((i) => (i + 1) % AMBIENT_LINES.length), 1800);
+    return () => clearInterval(t);
+  }, []);
+
+  // A ticking clock so the progress bar fills smoothly over the (long) search.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 400);
     return () => clearInterval(t);
   }, []);
 
@@ -66,11 +74,25 @@ export function SearchExperience({ query, events }: SearchExperienceProps) {
     for (const [p, s] of providerStatus) if (n.match(p) && s === "done") return true;
     return false;
   }).length;
-  const progress = Math.min(96, 12 + (doneCount / SOURCE_NODES.length) * 84);
+
+  // The tournament-graph traversal is the long pole (60–180s), so drive progress
+  // primarily off elapsed time — an eased curve that fills slowly and never
+  // jumps to 100% — with a small floor from completed sources for early feedback.
+  const graphActive = events.some((e) => e.provider === "uscf-graph");
+  const matched = events.some((e) => /✔ Match/.test(e.message));
+  const elapsed = now - startRef.current;
+  const timeFill = 96 * (1 - Math.exp(-elapsed / 55_000));
+  const milestoneFloor = Math.min(32, (doneCount / SOURCE_NODES.length) * 32);
+  const progress = matched ? 99 : Math.min(97, Math.max(milestoneFloor, timeFill));
 
   const latestRunning = [...events].reverse().find((e) => e.status === "running");
   const headline = latestRunning?.message || AMBIENT_LINES[ambientIdx];
-  const recent = events.slice(-7);
+  const recent = events.slice(-8);
+  const phaseLabel = matched
+    ? "Match found — assembling the profile"
+    : graphActive
+      ? "Tracing tournament opponents"
+      : "Investigating";
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-center overflow-hidden bg-background/95 backdrop-blur-xl">
@@ -149,7 +171,7 @@ export function SearchExperience({ query, events }: SearchExperienceProps) {
 
         {/* --- Headline --- */}
         <p className="text-xs uppercase tracking-widest text-primary/80 font-semibold mb-2">
-          ScoutTree is investigating
+          ScoutTree · {phaseLabel}
         </p>
         <h2 className="text-2xl sm:text-3xl font-bold text-foreground min-h-[2.5rem] transition-all">
           {headline}
@@ -169,7 +191,7 @@ export function SearchExperience({ query, events }: SearchExperienceProps) {
         {/* --- Live reasoning feed --- */}
         <div
           ref={feedRef}
-          className="mt-6 h-36 overflow-hidden rounded-xl border border-border bg-background/60 p-3 text-left backdrop-blur"
+          className="mt-6 h-44 overflow-hidden rounded-xl border border-border bg-background/60 p-3 text-left backdrop-blur"
         >
           <div className="space-y-1.5">
             {recent.map((e) => (

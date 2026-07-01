@@ -26,7 +26,9 @@ import type {
   SearchEvent,
   ProviderResult,
 } from "./types";
-import { PROVIDERS, DEEP_PROVIDERS } from "./providers";
+import { PROVIDERS } from "./providers";
+import { getTournamentGraph } from "./providers/edgeClient";
+import { runGraphTraversal } from "./providers/uscfGraph";
 import {
   scoreFromEvidence,
   nameSimilarity,
@@ -108,6 +110,19 @@ function fragmentsMatch(a: { name: string; uscfId?: string; fideId?: string }, b
 }
 
 let eventCounter = 0;
+
+/** The target's best USCF rating to corroborate online accounts with — prefer
+ *  the Online Regular rating (closest system to online play) when we have it. */
+function pickTargetRating(fragments: PartialIdentity[], query: PlayerQuery): number | undefined {
+  const uscf = fragments.find((f) => f.source === "uscf");
+  if (uscf?.ratings) {
+    const key =
+      Object.keys(uscf.ratings).find((k) => /online regular/i.test(k)) ||
+      Object.keys(uscf.ratings).find((k) => /online/i.test(k));
+    if (key) return uscf.ratings[key];
+  }
+  return uscf?.estimatedRating ?? query.approxRating;
+}
 
 export async function resolveIdentity(
   query: PlayerQuery,
@@ -240,44 +255,54 @@ export async function resolveIdentity(
     }
   }
 
-  // --- 2b. Deep phase: tournament-graph traversal, only when the fast phase
-  // didn't confidently find a matching online account. Keeps easy searches
-  // quick and reserves the expensive opponent-traversal for the hard cases.
+  // --- 2b. PRIMARY discovery: tournament-graph traversal. For any player with
+  // online USCF history this is the main event — a multi-agent detective that
+  // traces the player's real online usernames through their tournament
+  // opponents' games. Name-based matches from the fast phase become a fallback.
+  // A trivially-strong direct match (exact-looking handle) lets us skip the long
+  // trace; otherwise we run the full traversal even if a weak direct guess exists.
   const strongDirect = pool.some(
     (pa) =>
       (pa.account.platform === "lichess" || pa.account.platform === "chesscom") &&
-      pa.account.confidence >= 0.72 &&
-      nameSimilarity(query.name, pa.account.displayName || pa.account.username) >= 0.6
+      pa.account.confidence >= 0.85 &&
+      nameSimilarity(query.name, pa.account.displayName || pa.account.username) >= 0.82
   );
   if (!strongDirect && !signal?.aborted) {
-    const deep = DEEP_PROVIDERS.filter((p) => p.enabled(query));
-    const deepSettled = await Promise.allSettled(
-      deep.map((p) =>
-        p
-          .run({ query, signal, log: (m) => emit(m, "running", p.name) })
-          .then((r) => {
-            if (!r.unavailable) emit(`${p.label} done.`, "done", p.name);
-            return r;
-          })
-      )
-    );
-    for (let i = 0; i < deepSettled.length; i++) {
-      const s = deepSettled[i];
-      const p = deep[i];
-      if (s.status === "fulfilled") {
-        results.push(s.value);
-        providerStatus.push({ name: p.name, label: p.label, available: !s.value.unavailable, notes: s.value.notes });
-        fragments.push(...s.value.identities);
-        for (const acc of s.value.accounts) {
-          const key = poolKey(acc.platform, acc.username);
-          if (!inPool.has(key)) {
-            inPool.add(key);
-            pool.push({ account: acc });
-          }
-        }
-      } else {
-        providerStatus.push({ name: p.name, label: p.label, available: false, notes: ["Provider error."] });
+    const graph = await getTournamentGraph(query, signal).catch(() => null);
+    if (graph && graph.graphTraversalReady && graph.onlineEvents.length) {
+      emit("Tracing tournament opponents to uncover online usernames…", "running", "uscf-graph");
+      const targetRating = pickTargetRating(fragments, query);
+      let traversal;
+      try {
+        traversal = await runGraphTraversal(graph, {
+          targetName: graph.rootName || query.name,
+          targetRating,
+          signal,
+          log: (m) => emit(m, "running", "uscf-graph"),
+        });
+      } catch {
+        traversal = { accounts: [], notes: ["Tournament-graph traversal failed."], found: false };
       }
+      providerStatus.push({ name: "uscf-graph", label: "Tournament graph", available: true, notes: traversal.notes });
+
+      const strongGraph = traversal.accounts.filter((a) => a.confidence > 0.5);
+      if (strongGraph.length) {
+        emit(`Traced ${strongGraph.length} online account(s) through tournament opponents.`, "done", "uscf-graph");
+      } else if (traversal.accounts.length) {
+        emit("Tournament trace found weak leads — falling back to name-based matches.", "info", "uscf-graph");
+      } else {
+        emit("No online username from the tournament graph — using name-based matches as a fallback.", "info", "uscf-graph");
+      }
+      // Attach graph accounts to the real-world (USCF) identity by the root name.
+      for (const acc of traversal.accounts) {
+        const key = poolKey(acc.platform, acc.username);
+        if (!inPool.has(key)) {
+          inPool.add(key);
+          pool.push({ account: acc, attachName: graph.rootName });
+        }
+      }
+    } else if (!graph || !graph.graphTraversalReady) {
+      emit("No online tournament history to trace — using name-based matches.", "info", "uscf-graph");
     }
   }
 

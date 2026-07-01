@@ -3,32 +3,35 @@ import { callAI } from "../_shared/ai.ts";
 import {
   searchUscfByName,
   fetchUscfMember,
-  fetchUscfTournaments,
-  fetchCrosstableOpponents,
-  mapLimit,
+  buildOnlineGraphForMember,
   type UscfMember,
   type UscfSearchRow,
+  type OnlineSection,
 } from "./uscf.ts";
 
 // ============================================================================
 // Edge function: resolve-identity
 //
 // The server-side half of ScoutTree's Identity Resolution Engine. The browser
-// can talk to Lichess/Chess.com directly (CORS-friendly), but USCF/FIDE pages
-// and any real "reasoning over the open web" need a server. This function:
+// can talk to Lichess/Chess.com directly (CORS-friendly), but the US Chess
+// ratings API (MUIR, ratings-api.uschess.org) sends no CORS headers and any
+// "reasoning over the open web" needs a server. This function:
 //
-//   1. makes a best-effort, never-fatal attempt at the public US Chess member
-//      search (and a direct MSA lookup when a USCF ID is supplied), and
-//   2. runs an AI reasoning pass (Anthropic via _shared/ai.ts) that turns the
-//      user's loose clues into structured candidate identities + the online
-//      usernames most worth verifying.
+//   1. resolves the player against the US Chess member database (by ID or by a
+//      fuzzy name search), reading real ratings incl. the Online systems, and
+//   2. builds the **tournament graph** — every online-rated section the player
+//      appeared in, with the full crosstable (each opponent's USCF ID, colour
+//      and round). This is the mesh the client traverses to discover the
+//      player's online usernames.
+//   3. runs an AI reasoning pass that turns loose clues into candidate
+//      identities + the online usernames most worth verifying (a fast fallback).
 //
-// It always returns 200 with a structured body; the client treats an empty
-// candidate list (or `available: false`) as "this source contributed nothing"
-// and still produces results from the direct Lichess/Chess.com providers.
+// It always returns 200 with a structured body. Response shape (consumed by
+// src/lib/identity/providers/edgeClient.ts):
+//   { available, sources[], candidates[], notes[], tournamentGraph, graphTraversalReady }
 //
-// Response shape (consumed by src/lib/identity/providers/edgeClient.ts):
-//   { available: boolean, sources: string[], candidates: EdgeIdentityCandidate[], notes: string[] }
+// An "expand" call — { expandMemberId: "<uscfId>" } — returns just the graph for
+// that member, letting the client recurse into an opponent's own online history.
 // ============================================================================
 
 const corsHeaders = {
@@ -76,29 +79,44 @@ interface EdgeIdentityCandidate {
 }
 
 // ---------------------------------------------------------------------------
-// USCF deep search: name → member detail (all ratings incl. online) →
-// tournament history → online-event crosstables → opponents. Builds the
-// tournament graph the client traverses. All wrapped so failure degrades to
-// "no USCF data" rather than breaking the search.
+// Tournament graph (shared shape with the client). Each online event carries
+// the full section roster; every player carries their round-by-round games so
+// the client can walk the mesh (target → opponents → their online games).
 // ---------------------------------------------------------------------------
 
-interface GraphOpponent {
+interface GraphGame {
+  round: number;
+  color: "white" | "black" | "unknown";
+  outcome: string;
+  opponentUscfId: string;
+  opponentName: string;
+}
+interface GraphPlayer {
   uscfId: string;
   name: string;
   rating?: number;
+  isTarget?: boolean;
+  games: GraphGame[];
 }
 interface GraphEvent {
   eventId: string;
   name: string;
-  date?: string;
+  sectionName?: string;
+  startDate?: string;
+  endDate?: string;
+  ratingSystem: string;
+  timeControl?: string;
+  roundCount?: number;
+  isBlitz?: boolean;
   platformGuess?: string;
-  opponents: GraphOpponent[];
+  players: GraphPlayer[];
 }
 interface TournamentGraph {
   rootUscfId: string;
   rootName: string;
   rootState?: string;
   onlineEvents: GraphEvent[];
+  graphTraversalReady: boolean;
 }
 
 const RATING_KEY_LABEL: Record<string, string> = {
@@ -108,22 +126,25 @@ const RATING_KEY_LABEL: Record<string, string> = {
   onlineRegular: "USCF Online Regular",
   onlineQuick: "USCF Online Quick",
   onlineBlitz: "USCF Online Blitz",
-  correspondence: "USCF Correspondence",
 };
 
-/** Rank raw search rows against the query (name similarity + rating + state). */
-function rankRows(rows: UscfSearchRow[], query: PlayerQuery): UscfSearchRow[] {
-  const qName = query.name.toLowerCase().replace(/[^a-z ]/g, "").trim();
+// ---------------------------------------------------------------------------
+// Member ranking + candidate mapping
+// ---------------------------------------------------------------------------
+
+/** Rank member rows against the query (name tokens + state + online + rating). */
+function rankMembers(rows: UscfSearchRow[], query: PlayerQuery): UscfSearchRow[] {
+  const qName = query.name.toLowerCase().replace(/[^a-z ]/g, " ").trim();
+  const qTokens = qName.split(/\s+/).filter(Boolean);
   const score = (r: UscfSearchRow): number => {
     let s = 0;
     const rn = r.name.toLowerCase();
-    const qTokens = qName.split(/\s+/).filter(Boolean);
     for (const t of qTokens) if (rn.includes(t)) s += 2;
-    if (query.approxRating && r.rating) s += Math.max(0, 2 - Math.abs(query.approxRating - r.rating) / 200);
     if (query.state && r.state && query.state.toUpperCase() === r.state.toUpperCase()) s += 2;
-    if (r.rating) s += 0.2; // prefer rated members over unrated homonyms
-    if (r.canonical) s += 5; // a "See <id>" pointer is the real active record
-    if (r.isDuplicate) s -= 4; // retired/merged placeholder
+    if (query.approxRating && r.rating) s += Math.max(0, 2 - Math.abs(query.approxRating - r.rating) / 200);
+    if (r.hasOnline) s += 1.5; // players with online history are what we can traverse
+    if (r.rating) s += 0.3; // prefer rated members over unrated homonyms
+    if (r.status && /expired|inactive/i.test(r.status)) s -= 0.5;
     return s;
   };
   return [...rows].sort((a, b) => score(b) - score(a));
@@ -137,7 +158,7 @@ function memberToCandidate(m: UscfMember, query: PlayerQuery): EdgeIdentityCandi
   const estimatedRating =
     m.ratings.regular ?? m.ratings.onlineRegular ?? m.ratings.quick ?? m.ratings.blitz ?? m.ratings.onlineBlitz;
   const onlineNote = m.hasOnline
-    ? ` Has online USCF ratings (played online-rated events)${m.ratings.onlineRegular ? ` — Online Regular ${m.ratings.onlineRegular}` : ""}.`
+    ? ` Has online US Chess ratings${m.ratings.onlineRegular ? ` (Online Regular ${m.ratings.onlineRegular})` : ""} — traversable online tournament history.`
     : "";
   return {
     source: "uscf",
@@ -149,17 +170,15 @@ function memberToCandidate(m: UscfMember, query: PlayerQuery): EdgeIdentityCandi
     fideId: m.fideId,
     estimatedRating,
     ratings: Object.keys(ratings).length ? ratings : undefined,
+    title: m.title,
     reasoning: `US Chess member #${m.id} (${m.name})${estimatedRating ? `, ~${estimatedRating} USCF` : ""}.${onlineNote}`,
   };
 }
 
-async function deepUscfSearch(
-  query: PlayerQuery,
-  wantGraph: boolean
-): Promise<{ candidates: EdgeIdentityCandidate[]; graph: TournamentGraph | null; debug: Record<string, unknown> }> {
+/** Resolve the query to member records (by ID, else fuzzy name search). */
+async function resolveMembers(query: PlayerQuery): Promise<{ members: UscfMember[]; debug: Record<string, unknown> }> {
   const debug: Record<string, unknown> = {};
   let members: UscfMember[] = [];
-
   try {
     if (query.uscfId && /\d{6,}/.test(query.uscfId)) {
       const mem = await fetchUscfMember(query.uscfId.replace(/\D/g, ""));
@@ -168,83 +187,49 @@ async function deepUscfSearch(
     } else {
       const rows = await searchUscfByName(query.name, query.state);
       debug.searchCount = rows.length;
-      debug.searchRows = rows.slice(0, 6);
-      const top = rankRows(rows, query).slice(0, 4);
-      const fetched = (await mapLimit(top, 4, (r) => fetchUscfMember(r.id))).filter((x): x is UscfMember => !!x);
-      // Prefer members that actually carry ratings (the real active record) and
-      // drop empty "Duplicate" placeholders when a rated record exists.
-      const rated = fetched.filter((m) => Object.keys(m.ratings).length > 0 && !/duplicate/i.test(m.name));
-      members = (rated.length ? rated : fetched).sort((a, b) => {
-        const rank = (m: UscfMember) => (m.hasOnline ? 2 : 0) + (Object.keys(m.ratings).length ? 1 : 0);
-        return rank(b) - rank(a);
-      });
+      debug.searchRows = rows.slice(0, 6).map((r) => ({ id: r.id, name: r.name, state: r.state, rating: r.rating, hasOnline: r.hasOnline }));
+      // Search rows already carry full member data (ratings/state/online), so no
+      // per-row detail fetch is needed — just rank and keep the top few.
+      members = rankMembers(rows, query).slice(0, 4);
     }
   } catch (e) {
     debug.error = String(e);
   }
+  return { members, debug };
+}
 
-  // Follow "(See <id>)" duplicate pointers that appear on member-detail pages
-  // themselves — famous players accrue several placeholder records that point at
-  // one canonical, rated record (the one with real ratings + online events).
-  try {
-    const seeIds = new Set<string>();
-    for (const m of members) {
-      const mm = m.name.match(/See\s+(\d{6,})/i);
-      if (mm) seeIds.add(mm[1]);
-    }
-    for (const cid of seeIds) {
-      if (!members.some((m) => m.id === cid)) {
-        const canon = await fetchUscfMember(cid);
-        if (canon) members.unshift(canon);
-      }
-    }
-    // Prefer real, rated records over empty "Duplicate" placeholders.
-    const real = members.filter((m) => !/duplicate/i.test(m.name) && Object.keys(m.ratings).length > 0);
-    if (real.length) members = [...real, ...members.filter((m) => !real.includes(m))];
-    debug.followedSee = Array.from(seeIds);
-  } catch (e) {
-    debug.seeError = String(e);
-  }
-
-  debug.members = members.map((m) => ({ id: m.id, name: m.name, state: m.state, ratings: m.ratings, hasOnline: m.hasOnline }));
-  const candidates = members.map((m) => memberToCandidate(m, query));
-
-  // Tournament graph for the strongest match (only when the caller wants it).
-  let graph: TournamentGraph | null = null;
-  if (wantGraph && members.length) {
-    try {
-      const best = members[0];
-      const events = await fetchUscfTournaments(best.id);
-      debug.eventCount = events.length;
-      const online = events.filter((e) => e.online).slice(0, 4);
-      debug.onlineEventCount = online.length;
-      const withOpponents = await mapLimit(online, 3, async (e) => ({
-        event: e,
-        opponents: await fetchCrosstableOpponents(e.eventId, best.id),
-      }));
-      graph = {
-        rootUscfId: best.id,
-        rootName: best.name,
-        rootState: best.state,
-        onlineEvents: withOpponents.map(({ event, opponents }) => ({
-          eventId: event.eventId,
-          name: event.name,
-          date: event.date,
-          platformGuess: event.platformGuess,
-          opponents: opponents.slice(0, 20),
-        })),
-      };
-      debug.graphOpponents = graph.onlineEvents.reduce((n, e) => n + e.opponents.length, 0);
-    } catch (e) {
-      debug.graphError = String(e);
-    }
-  }
-
-  return { candidates, graph, debug };
+function sectionsToGraph(member: UscfMember, sections: OnlineSection[]): TournamentGraph {
+  const onlineEvents: GraphEvent[] = sections.map((s) => ({
+    eventId: s.eventId,
+    name: s.name,
+    sectionName: s.sectionName,
+    startDate: s.startDate,
+    endDate: s.endDate,
+    ratingSystem: s.ratingSystem,
+    timeControl: s.timeControl,
+    roundCount: s.roundCount,
+    isBlitz: s.isBlitz,
+    platformGuess: s.platformGuess,
+    players: s.players.map((p) => ({
+      uscfId: p.uscfId,
+      name: p.name,
+      rating: p.rating,
+      isTarget: p.isTarget,
+      games: p.games,
+    })),
+  }));
+  return {
+    rootUscfId: member.id,
+    rootName: member.name,
+    rootState: member.state,
+    onlineEvents,
+    graphTraversalReady: onlineEvents.length > 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
 // AI reasoning pass — the "detective". Turns clues into structured candidates.
+// (Unchanged fast fallback: used when the tournament graph doesn't find a match.)
 // ---------------------------------------------------------------------------
 
 function buildAiPrompt(query: PlayerQuery, priorCandidates: EdgeIdentityCandidate[]): string {
@@ -309,7 +294,6 @@ Rules:
 function extractJsonArray(text: string): EdgeIdentityCandidate[] {
   if (!text) return [];
   let s = text.trim();
-  // Strip markdown fences if present.
   s = s.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
   const start = s.indexOf("[");
   const end = s.lastIndexOf("]");
@@ -326,9 +310,6 @@ function extractJsonArray(text: string): EdgeIdentityCandidate[] {
   }
 }
 
-// Normalise a model-supplied platform string to a fetchable platform, or drop
-// it. Gemini commonly returns "Chess.com" / "lichess.org" / "Twitch"; we only
-// keep handles we can actually pull games from.
 function normalizePlatform(p: unknown): Platform | undefined {
   if (typeof p !== "string") return undefined;
   const s = p.toLowerCase().replace(/[^a-z]/g, "");
@@ -373,6 +354,27 @@ function sanitizeCandidate(c: Record<string, unknown>): EdgeIdentityCandidate {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+function json(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+/** Expand: build just the tournament graph for a specific USCF member ID. */
+async function handleExpand(memberId: string): Promise<Response> {
+  const clean = memberId.replace(/\D/g, "");
+  const member = clean ? await fetchUscfMember(clean) : null;
+  if (!member) return json({ available: false, tournamentGraph: null, graphTraversalReady: false });
+  const sections = await buildOnlineGraphForMember(member);
+  const graph = sectionsToGraph(member, sections);
+  return json({ available: true, tournamentGraph: graph, graphTraversalReady: graph.graphTraversalReady });
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -380,17 +382,17 @@ serve(async (req) => {
 
   try {
     const body = await req.json().catch(() => ({}));
+
+    // --- Expand mode (client recursion into an opponent's online history) ----
+    if (typeof body?.expandMemberId === "string" && body.expandMemberId.trim()) {
+      return await handleExpand(body.expandMemberId);
+    }
+
     const query: PlayerQuery = body?.query || {};
     const debugMode = body?.debug === true;
-    // Only chase the (slower) tournament graph when it's plausibly a US player.
-    const wantGraph =
-      body?.graph !== false &&
-      (query.federation === "USCF" || !!query.uscfId || !!query.state || !query.federation);
+    const wantGraph = body?.graph !== false;
     if (!query.name || !query.name.trim()) {
-      return new Response(JSON.stringify({ available: false, candidates: [], sources: [], notes: ["Missing name."] }), {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return json({ available: false, candidates: [], sources: [], notes: ["Missing name."], graphTraversalReady: false });
     }
 
     console.log("[resolve-identity] query:", JSON.stringify({ name: query.name, fed: query.federation, state: query.state }));
@@ -398,18 +400,40 @@ serve(async (req) => {
     const sources: string[] = [];
     const notes: string[] = [];
 
-    // 1. Server-side USCF deep search + tournament graph (never fatal).
-    const { candidates: uscfCandidates, graph, debug } = await deepUscfSearch(query, wantGraph);
+    // 1. Resolve US Chess member(s) + build the tournament graph for the best
+    //    online-capable candidate. Never fatal.
+    const { members, debug } = await resolveMembers(query);
+    const uscfCandidates = members.map((m) => memberToCandidate(m, query));
     if (uscfCandidates.length) {
       sources.push("uscf");
       notes.push(`US Chess: ${uscfCandidates.length} member match(es).`);
     }
-    if (graph && graph.onlineEvents.length) {
-      const opps = graph.onlineEvents.reduce((n, e) => n + e.opponents.length, 0);
-      notes.push(`Tournament graph: ${graph.onlineEvents.length} online event(s), ${opps} opponents to traverse.`);
-    }
 
-    // 2. AI reasoning pass — refines USCF hits and proposes usernames.
+    let graph: TournamentGraph | null = null;
+    if (wantGraph && members.length) {
+      // Prefer the highest-ranked member that actually has online ratings.
+      const target = members.find((m) => m.hasOnline) || members[0];
+      try {
+        const sections = await buildOnlineGraphForMember(target);
+        graph = sectionsToGraph(target, sections);
+        debug.onlineSectionCount = sections.length;
+        debug.graphOpponents = graph.onlineEvents.reduce((n, e) => n + e.players.length, 0);
+        if (graph.onlineEvents.length) {
+          const games = graph.onlineEvents.reduce(
+            (n, e) => n + (e.players.find((p) => p.isTarget)?.games.length || 0),
+            0
+          );
+          notes.push(
+            `Tournament graph: ${graph.onlineEvents.length} online section(s), ${games} of the player's online games to trace.`
+          );
+        }
+      } catch (e) {
+        debug.graphError = String(e);
+      }
+    }
+    const graphTraversalReady = !!graph?.graphTraversalReady;
+
+    // 2. AI reasoning pass — refines USCF hits and proposes usernames (fallback).
     const ai = await callAI(
       "You are an expert chess identity-resolution analyst. You convert sparse clues about a tournament opponent into structured, well-calibrated candidate identities and the online usernames most worth verifying. You never invent federation IDs you are not confident about. You output only strict JSON.",
       buildAiPrompt(query, uscfCandidates),
@@ -428,23 +452,17 @@ serve(async (req) => {
       console.warn("[resolve-identity] AI error:", ai.status, ai.error);
     }
 
-    // Merge: prefer real USCF records first (they carry verified IDs/ratings),
-    // then AI candidates the USCF pass didn't already cover (dedupe by ID/name).
+    // Merge: prefer real USCF records first, then AI candidates the USCF pass
+    // didn't already cover (dedupe by ID/name).
     const candidates: EdgeIdentityCandidate[] = [...uscfCandidates];
     for (const a of aiCandidates) {
-      const dup = candidates.some(
+      const target = candidates.find(
         (c) =>
           (c.uscfId && a.uscfId && c.uscfId.replace(/\D/g, "") === a.uscfId.replace(/\D/g, "")) ||
           c.name.toLowerCase() === a.name.toLowerCase()
       );
-      if (dup) {
-        // Fold the AI's suggested usernames onto the matching USCF record.
-        const target = candidates.find(
-          (c) =>
-            (c.uscfId && a.uscfId && c.uscfId.replace(/\D/g, "") === a.uscfId.replace(/\D/g, "")) ||
-            c.name.toLowerCase() === a.name.toLowerCase()
-        );
-        if (target && a.suggestedUsernames?.length) {
+      if (target) {
+        if (a.suggestedUsernames?.length) {
           target.suggestedUsernames = [...(target.suggestedUsernames || []), ...a.suggestedUsernames].slice(0, 10);
         }
       } else {
@@ -453,17 +471,18 @@ serve(async (req) => {
     }
 
     const available = candidates.length > 0;
-    const payload: Record<string, unknown> = { available, sources, candidates, notes, tournamentGraph: graph };
+    const payload: Record<string, unknown> = {
+      available,
+      sources,
+      candidates,
+      notes,
+      tournamentGraph: graph,
+      graphTraversalReady,
+    };
     if (debugMode) payload.debug = debug;
-    return new Response(JSON.stringify(payload), {
-      status: 200,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return json(payload);
   } catch (error) {
     console.error("[resolve-identity] Error:", error);
-    return new Response(
-      JSON.stringify({ available: false, candidates: [], sources: [], notes: ["Server error."] }),
-      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return json({ available: false, candidates: [], sources: [], notes: ["Server error."], graphTraversalReady: false });
   }
 });

@@ -38,24 +38,42 @@ export interface EdgeIdentityCandidate {
   tournaments?: string[];
 }
 
-/** One opponent (USCF member) the scouted player faced in an online event. */
-export interface GraphOpponent {
+/** One game a section player played (colour is "unknown" for most online events). */
+export interface GraphGame {
+  round: number;
+  color: "white" | "black" | "unknown";
+  outcome: string;
+  opponentUscfId: string;
+  opponentName: string;
+}
+/** A player in an online section, with their round-by-round games. */
+export interface GraphPlayer {
   uscfId: string;
   name: string;
   rating?: number;
+  isTarget?: boolean;
+  games: GraphGame[];
 }
+/** One online-rated section the scouted player appeared in (a full crosstable). */
 export interface GraphEvent {
   eventId: string;
   name: string;
-  date?: string; // YYYY-MM-DD
+  sectionName?: string;
+  startDate?: string; // YYYY-MM-DD
+  endDate?: string;
+  ratingSystem: string; // OR / OQ / OB
+  timeControl?: string;
+  roundCount?: number;
+  isBlitz?: boolean;
   platformGuess?: string;
-  opponents: GraphOpponent[];
+  players: GraphPlayer[];
 }
 export interface TournamentGraph {
   rootUscfId: string;
   rootName: string;
   rootState?: string;
   onlineEvents: GraphEvent[];
+  graphTraversalReady: boolean;
 }
 
 export interface EdgeResponse {
@@ -64,11 +82,20 @@ export interface EdgeResponse {
   /** Which server sources actually returned something. */
   sources: string[];
   notes?: string[];
-  /** USCF tournament graph for the "secret" opponent-traversal feature. */
+  /** USCF tournament graph for the opponent-traversal engine. */
   tournamentGraph?: TournamentGraph | null;
+  /** True when the graph has at least one online section worth traversing. */
+  graphTraversalReady?: boolean;
 }
 
-const EMPTY: EdgeResponse = { available: false, candidates: [], sources: [], notes: [], tournamentGraph: null };
+const EMPTY: EdgeResponse = {
+  available: false,
+  candidates: [],
+  sources: [],
+  notes: [],
+  tournamentGraph: null,
+  graphTraversalReady: false,
+};
 
 // Memoize per query so the four server providers share one invocation.
 const cache = new Map<string, Promise<EdgeResponse>>();
@@ -98,12 +125,14 @@ export function fetchEdgeIdentity(query: PlayerQuery, signal?: AbortSignal): Pro
         return EMPTY;
       }
       const candidates = Array.isArray(data.candidates) ? (data.candidates as EdgeIdentityCandidate[]) : [];
+      const tournamentGraph = (data.tournamentGraph as TournamentGraph | null) ?? null;
       return {
         available: data.available !== false,
         candidates,
         sources: Array.isArray(data.sources) ? data.sources : [],
         notes: Array.isArray(data.notes) ? data.notes : [],
-        tournamentGraph: (data.tournamentGraph as TournamentGraph | null) ?? null,
+        tournamentGraph,
+        graphTraversalReady: data.graphTraversalReady === true || !!tournamentGraph?.graphTraversalReady,
       };
     } catch {
       // Function not deployed / network blocked / aborted — degrade silently.
@@ -121,6 +150,39 @@ export function fetchEdgeIdentity(query: PlayerQuery, signal?: AbortSignal): Pro
 export async function getTournamentGraph(query: PlayerQuery, signal?: AbortSignal): Promise<TournamentGraph | null> {
   const res = await fetchEdgeIdentity(query, signal);
   return res.tournamentGraph ?? null;
+}
+
+// Memoize expand-by-member calls so recursion into the same opponent (reached
+// via several section-mates) hits the server only once.
+const expandCache = new Map<string, Promise<TournamentGraph | null>>();
+
+/**
+ * Fetch just the online tournament graph for a specific USCF member ID. Lets the
+ * client recurse into an opponent's *own* online history (depth-2) when the
+ * root player's direct opponents don't yield a match. The US Chess API is not
+ * CORS-accessible, so this necessarily round-trips through the edge function.
+ */
+export function expandMemberGraph(memberId: string, signal?: AbortSignal): Promise<TournamentGraph | null> {
+  const id = memberId.replace(/\D/g, "");
+  if (!id) return Promise.resolve(null);
+  const existing = expandCache.get(id);
+  if (existing) return existing;
+
+  const promise = (async (): Promise<TournamentGraph | null> => {
+    try {
+      const { data, error } = await supabase.functions.invoke("resolve-identity", {
+        body: { expandMemberId: id },
+      });
+      if (error || !data) return null;
+      return (data.tournamentGraph as TournamentGraph | null) ?? null;
+    } catch {
+      return null;
+    }
+  })();
+
+  expandCache.set(id, promise);
+  promise.finally(() => setTimeout(() => expandCache.delete(id), 120_000));
+  return promise;
 }
 
 /** Convert a server candidate into a scored PartialIdentity for the resolver. */

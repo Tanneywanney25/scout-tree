@@ -143,6 +143,39 @@ export function ratingMatchWeight(approx: number, candidate: number): number {
   return -0.6;
 }
 
+/**
+ * Rating proximity for an account discovered through the tournament-graph
+ * engine, compared against a US Chess rating. Online play (Chess.com / Lichess)
+ * and the target's USCF number are different systems — a player's online rating
+ * typically sits a few hundred points below their OTB USCF rating — so this is
+ * deliberately forgiving: proximity corroborates, but distance never sinks a
+ * match that is already anchored by a date-matched game against a known
+ * opponent. Only a wild (>1200pt) gap counts mildly against it.
+ */
+export function onlineRatingMatchWeight(uscfRating: number, onlineRating: number): number {
+  const diff = Math.abs(uscfRating - onlineRating);
+  if (diff <= 200) return 1.0;
+  if (diff <= 400) return 0.6;
+  if (diff <= 600) return 0.35; // classic OTB↔online offset — still corroborating
+  if (diff <= 900) return 0.1;
+  if (diff <= 1200) return 0.0;
+  return -0.3;
+}
+
+/**
+ * Evidence weight for a username found by tracing a *known* USCF opponent's
+ * online games during the exact tournament window. This is the engine's
+ * strongest signal short of an exact federation-ID match: we are looking at the
+ * other side of a game a confirmed opponent really played. A date-matched game
+ * (played inside the event window) is worth more than a loose one, and each
+ * additional corroborating opponent compounds the certainty.
+ */
+export function graphDiscoveryWeight(dateMatched: boolean, corroboratingOpponents = 1): number {
+  const base = dateMatched ? 2.0 : 1.2;
+  const bonus = Math.min(1.2, Math.max(0, corroboratingOpponents - 1) * 0.6);
+  return base + bonus;
+}
+
 /** ISO-2 / loose country comparison. */
 export function countryMatches(a?: string, b?: string): boolean {
   if (!a || !b) return false;

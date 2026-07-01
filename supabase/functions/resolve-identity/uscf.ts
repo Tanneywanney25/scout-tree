@@ -1,26 +1,38 @@
 // ============================================================================
-// US Chess (USCF) scraper — runs server-side inside the resolve-identity edge
-// function (the MSA pages are server-rendered HTML and not CORS-accessible from
-// the browser).
+// US Chess (USCF) data layer — MUIR JSON API
 //
-// Confirmed endpoints & structure (reconnaissance against live MSA):
-//   • Name search: /datapage/player-search.php?name=<Last, First>&rating=R&mode=Find
-//       → rows link to  msa/MbrDtlMain.php?<memberId>
-//       (the rating=R param is REQUIRED — without it MSA throws a SQL error.)
-//   • Member detail: /msa/MbrDtlMain.php?<id>
-//       ratings rows: <td valign=top> <Label> Rating </td><td><b> VALUE </b>
-//       labels: Regular / Quick / Blitz / Online-Regular / Online-Quick /
-//               Online-Blitz / Correspondence; plus State, FIDE ID, Expiration.
-//   • Tournament history: /msa/MbrDtlTnmtHst.php?<id>  → events link XtblMain.php?<eventId>
-//   • Crosstable: /msa/XtblMain.php?<eventId>  → players link MbrDtlMain.php?<id>
+// In mid-2026 US Chess retired the old server-rendered MSA pages
+// (www.uschess.org/msa/*, HTML scraping) and moved ratings to **MUIR**, a
+// modern SPA backed by a clean JSON API at ratings-api.uschess.org. This module
+// talks to that API. It still runs server-side inside the resolve-identity edge
+// function because the MUIR API does not send CORS headers (a browser can't call
+// it directly).
 //
-// All parsing is defensive: any failure yields empty/undefined rather than
-// throwing, so the caller degrades gracefully.
+// Endpoints used (all public GET, no auth):
+//   • Search:      /api/v1/members?Fuzzy=<First Last>&StateRep=XX&Size=N
+//   • Member:      /api/v1/members/{memberId}
+//   • History:     /api/v1/members/{memberId}/events?Offset=0&Size=N
+//   • Event:       /api/v1/rated-events/{eventId}                 → sections[]
+//   • Section:     /api/v1/rated-events/{eventId}/sections/{n}    → isOnline, TC…
+//   • Crosstable:  /api/v1/rated-events/{eventId}/sections/{n}/standings
+//        → per player: memberId, name, score, ratings[], and roundOutcomes[]
+//          carrying { roundNumber, color, outcome, opponentMemberId, name }.
+//
+// Rating systems: R=Regular, Q=Quick, B=Blitz, OR/OQ/OB = the Online systems
+// introduced in the 2020 online-play era. A member "hasOnline" when any OR/OQ/OB
+// carries a real (non-null) rating — those are the players whose tournament
+// graph is worth traversing for online usernames.
+//
+// Everything is defensive: any failure yields empty/undefined, never throws, so
+// the caller degrades to "no USCF data" instead of breaking the search.
 // ============================================================================
 
-const MSA = "https://www.uschess.org/msa";
-const DATAPAGE = "https://www.uschess.org/datapage";
-const UA = "Mozilla/5.0 (compatible; ScoutTree/1.0)";
+const API = "https://ratings-api.uschess.org/api/v1";
+const UA = "Mozilla/5.0 (compatible; ScoutTree/1.0; +https://chess-scout.vercel.app)";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 export interface UscfRatings {
   regular?: number;
@@ -29,232 +41,414 @@ export interface UscfRatings {
   onlineRegular?: number;
   onlineQuick?: number;
   onlineBlitz?: number;
-  correspondence?: number;
 }
 
 export interface UscfMember {
   id: string;
-  name: string; // "First Last"
+  name: string; // "First Last", title-cased for display
   state?: string;
   fideId?: string;
+  fideCountry?: string;
+  title?: string; // FIDE title letter mapped to GM/IM/… when present
   expiration?: string;
   ratings: UscfRatings;
   hasOnline: boolean;
+  status?: string;
 }
 
-export interface UscfSearchRow {
-  id: string;
-  name: string; // "First Last"
+export interface UscfSearchRow extends UscfMember {
+  /** Best single rating for ranking (regular, else online-regular, else quick). */
   rating?: number;
-  state?: string;
-  isDuplicate?: boolean; // MSA "(Duplicate ...)" placeholder record
-  canonical?: boolean; // synthesised from a "See <id>" pointer
 }
 
-export interface UscfEvent {
-  eventId: string; // token after XtblMain.php?
+export interface UscfEventRef {
+  eventId: string;
   name: string;
-  date?: string; // YYYY-MM-DD
-  online: boolean;
-  platformGuess?: string;
+  startDate?: string; // YYYY-MM-DD
+  endDate?: string;
+  sectionCount?: number;
+  playerCount?: number;
+  state?: string;
 }
 
-export interface UscfOpponent {
+export type GameColor = "white" | "black" | "unknown";
+
+/** One game the target (or any roster player) played in a section. */
+export interface UscfGame {
+  round: number;
+  color: GameColor;
+  outcome: string; // Win / Loss / Draw / WinForfeit / …
+  opponentUscfId: string;
+  opponentName: string;
+}
+
+/** A player in an online section, with their round-by-round games. */
+export interface UscfSectionPlayer {
   uscfId: string;
-  name: string; // "First Last"
-  rating?: number;
+  name: string;
+  rating?: number; // pre-event rating in this section's system
+  isTarget?: boolean;
+  games: UscfGame[];
 }
 
-async function fetchText(url: string, timeoutMs = 12000): Promise<string> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "text/html" }, signal: ctrl.signal });
-    if (!res.ok) return "";
-    return await res.text();
-  } catch {
-    return "";
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-/** "LAST, FIRST MIDDLE" (or "First Last") → "First Middle Last", title-cased. */
-export function toFirstLast(raw: string): string {
-  const clean = raw.replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
-  const title = (s: string) => s.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()).trim();
-  if (clean.includes(",")) {
-    const [last, rest] = clean.split(",");
-    return title(`${rest} ${last}`.replace(/\s+/g, " "));
-  }
-  return title(clean);
-}
-
-/** Build the "Last, First" query string the MSA search expects. */
-function toLastFirst(name: string): string {
-  const clean = name.replace(/\s+/g, " ").trim();
-  if (clean.includes(",")) return clean;
-  const parts = clean.split(" ");
-  if (parts.length < 2) return clean;
-  const last = parts[parts.length - 1];
-  const first = parts.slice(0, -1).join(" ");
-  return `${last}, ${first}`;
+/** An online-rated section the target played in — the traversable unit. */
+export interface OnlineSection {
+  eventId: string;
+  name: string;
+  sectionName?: string;
+  sectionNumber: number;
+  startDate?: string;
+  endDate?: string;
+  ratingSystem: string; // OR / OQ / OB
+  timeControl?: string;
+  roundCount?: number;
+  isBlitz?: boolean;
+  platformGuess?: string; // lichess / chesscom / chesskid / icc
+  players: UscfSectionPlayer[];
 }
 
 // ---------------------------------------------------------------------------
-// Name search
+// Low-level fetch with timeout + light retry (429 / 5xx / network)
 // ---------------------------------------------------------------------------
 
-export async function searchUscfByName(name: string, state?: string): Promise<UscfSearchRow[]> {
-  const params = new URLSearchParams({ name: toLastFirst(name), rating: "R", mode: "Find" });
-  if (state && /^[A-Za-z]{2}$/.test(state.trim())) params.set("state", state.trim().toUpperCase());
-  const html = await fetchText(`${DATAPAGE}/player-search.php?${params.toString()}`);
-  if (!html || /Query Failed/i.test(html)) return [];
-
-  const rows: UscfSearchRow[] = [];
-  const canonicalIds = new Set<string>();
-  // Each result: MbrDtlMain.php?<id>...>NAME</a> then rating/state cells.
-  const re = /MbrDtlMain\.php\?(\d{6,})[^>]*>([^<]+)<\/a>((?:(?!<\/tr>)[\s\S]){0,400})/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) && rows.length < 25) {
-    const id = m[1];
-    const rawName = m[2].replace(/&nbsp;/g, " ");
-    const tail = m[3].replace(/&nbsp;/g, " ");
-    const combined = `${rawName} ${tail}`;
-    // MSA marks retired/merged records "(Duplicate — See <canonicalId>)".
-    const see = combined.match(/See\s+(\d{6,})/i);
-    if (see) canonicalIds.add(see[1]);
-    const isDuplicate = /duplicate/i.test(combined);
-    const cleanName = toFirstLast(rawName.replace(/\(?\s*See\s+\d+\s*\)?/i, "").replace(/\(?\s*duplicate[^)]*\)?/i, ""));
-    const ratingMatch = tail.match(/\b(\d{3,4})\b/);
-    const stateMatch = tail.match(/>\s*([A-Z]{2})\s*</);
-    rows.push({
-      id,
-      name: cleanName,
-      rating: ratingMatch ? parseInt(ratingMatch[1], 10) : undefined,
-      state: stateMatch ? stateMatch[1] : undefined,
-      isDuplicate,
-    });
-  }
-  // Follow "See <id>" pointers to the canonical (active, rated) record.
-  for (const cid of canonicalIds) {
-    if (!rows.some((r) => r.id === cid)) {
-      rows.unshift({ id: cid, name: toFirstLast(name), canonical: true });
+async function fetchJson(path: string, timeoutMs = 12000, retries = 2): Promise<any | null> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${API}${path}`, {
+        headers: { "User-Agent": UA, Accept: "application/json" },
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      if (res.status === 429 || res.status >= 500) {
+        if (attempt < retries) {
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+          continue;
+        }
+        return null;
+      }
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      clearTimeout(t);
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+        continue;
+      }
+      return null;
     }
   }
-  return rows;
+  return null;
 }
 
 // ---------------------------------------------------------------------------
-// Member detail (ratings, state, FIDE, expiration)
+// Helpers
 // ---------------------------------------------------------------------------
 
-const RATING_LABELS: [keyof UscfRatings, RegExp][] = [
-  ["onlineRegular", /Online-?Regular Rating/i],
-  ["onlineQuick", /Online-?Quick Rating/i],
-  ["onlineBlitz", /Online-?Blitz Rating/i],
-  ["regular", /(?<!Online-)\bRegular Rating/i],
-  ["quick", /(?<!Online-)\bQuick Rating/i],
-  ["blitz", /(?<!Online-)\bBlitz Rating/i],
-  ["correspondence", /Correspondence Rating/i],
-];
-
-function parseRatingAfterLabel(html: string, labelRe: RegExp): number | undefined {
-  const idx = html.search(labelRe);
-  if (idx < 0) return undefined;
-  // The value sits in the next <td><b> ... </b>; look within a short window.
-  const window = html.slice(idx, idx + 260);
-  // Skip "(Unrated)"; grab the first standalone 3-4 digit number.
-  if (/\(Unrated\)/i.test(window.slice(0, 120))) return undefined;
-  const num = window.match(/<b>[\s\S]{0,60}?(\d{3,4})\b/) || window.match(/(\d{3,4})\b/);
-  return num ? parseInt(num[1], 10) : undefined;
+/** Title-case a possibly ALL-CAPS MUIR name for display. */
+function titleCase(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\b([a-z])/g, (c) => c.toUpperCase())
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-export async function fetchUscfMember(id: string): Promise<UscfMember | null> {
-  const html = await fetchText(`${MSA}/MbrDtlMain.php?${id}`);
-  if (!html) return null;
+function fullName(first?: string, last?: string): string {
+  return titleCase(`${first || ""} ${last || ""}`.trim());
+}
 
-  const nameMatch = html.match(new RegExp(`<b>\\s*${id}:\\s*([^<]+)</b>`));
-  const name = nameMatch ? toFirstLast(nameMatch[1]) : "";
+const FIDE_TITLE_MAP: Record<string, string> = {
+  G: "GM",
+  I: "IM",
+  F: "FM",
+  C: "CM",
+  W: "WGM",
+  WG: "WGM",
+  WI: "WIM",
+  WF: "WFM",
+  WC: "WCM",
+};
 
-  const ratings: UscfRatings = {};
-  for (const [key, re] of RATING_LABELS) {
-    const v = parseRatingAfterLabel(html, re);
-    if (v !== undefined) ratings[key] = v;
+/** Map MUIR's ratings[] array into our structured UscfRatings. */
+function mapRatings(ratings: any[]): UscfRatings {
+  const out: UscfRatings = {};
+  const key: Record<string, keyof UscfRatings> = {
+    R: "regular",
+    Q: "quick",
+    B: "blitz",
+    OR: "onlineRegular",
+    OQ: "onlineQuick",
+    OB: "onlineBlitz",
+  };
+  for (const r of ratings || []) {
+    const k = key[r?.ratingSystem];
+    if (k && typeof r.rating === "number") out[k] = r.rating;
   }
+  return out;
+}
 
-  // State — MSA shows it near the top; try a couple of patterns.
-  let state: string | undefined;
-  const st =
-    html.match(/State\s*<\/td>\s*<td[^>]*>\s*<b>\s*([A-Z]{2})\b/i) ||
-    html.match(/\b([A-Z]{2})\b\s*<\/b>\s*<\/td>\s*<\/tr>\s*<tr>\s*<td[^>]*>\s*Expiration/i);
-  if (st) state = st[1].toUpperCase();
-
-  const fideMatch =
-    html.match(/FIDE[^0-9]{0,60}?(\d{6,})/i) || html.match(/ratings\.fide\.com\/(?:profile\/)?(\d{6,})/i);
-  const fideId = fideMatch ? fideMatch[1] : undefined;
-
-  const expMatch = html.match(/Expiration Dt\.\s*<\/td>\s*<td[^>]*>\s*<b>\s*(\d{4}-\d{2}-\d{2})/i);
-  const expiration = expMatch ? expMatch[1] : undefined;
-
+function memberFrom(raw: any): UscfMember | null {
+  if (!raw || !raw.id) return null;
+  const ratings = mapRatings(raw.ratings || []);
   const hasOnline =
     ratings.onlineRegular !== undefined ||
     ratings.onlineQuick !== undefined ||
     ratings.onlineBlitz !== undefined;
+  const title = raw.fideTitle ? FIDE_TITLE_MAP[String(raw.fideTitle).toUpperCase()] : undefined;
+  return {
+    id: String(raw.id),
+    name: fullName(raw.firstName, raw.lastName),
+    state: raw.stateRep || raw.jurisdiction || undefined,
+    fideId: raw.fideId ? String(raw.fideId) : undefined,
+    fideCountry: raw.fideCountry || undefined,
+    title,
+    expiration: raw.expirationDate || undefined,
+    ratings,
+    hasOnline,
+    status: raw.status || undefined,
+  };
+}
 
-  return { id, name, state, fideId, expiration, ratings, hasOnline };
+function bestRating(r: UscfRatings): number | undefined {
+  return r.regular ?? r.onlineRegular ?? r.quick ?? r.blitz ?? r.onlineBlitz;
+}
+
+/** Guess the online platform from an event/section name. */
+const ONLINE_NAME_RE =
+  /\b(online|virtual|lichess|chess\.?com|chesskid|icc|internet|pandemic|covid|quarantine|web)\b/i;
+
+function platformGuess(text: string): string | undefined {
+  if (/lichess/i.test(text)) return "lichess";
+  if (/chess\.?com/i.test(text)) return "chesscom";
+  if (/chesskid/i.test(text)) return "chesskid";
+  if (/\bicc\b/i.test(text)) return "icc";
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
-// Tournament history
+// Public: search, member, history
 // ---------------------------------------------------------------------------
 
-const ONLINE_EVENT_RE =
-  /\b(online|virtual|lichess|chess\.?com|chesskid|internet|pandemic|covid|isolated|quarantine|web)\b/i;
-
-export async function fetchUscfTournaments(id: string): Promise<UscfEvent[]> {
-  const html = await fetchText(`${MSA}/MbrDtlTnmtHst.php?${id}`);
-  if (!html) return [];
-
-  const events: UscfEvent[] = [];
-  const re = /XtblMain\.php\?([0-9][0-9A-Za-z.\-]{6,})[^>]*>([^<]*)<\/a>((?:(?!<\/tr>)[\s\S]){0,400})/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) && events.length < 60) {
-    const eventId = m[1];
-    const name = m[2].replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
-    const rowText = m[3];
-    const dateMatch = (name + rowText).match(/(\d{4}-\d{2}-\d{2})/);
-    const combined = `${name} ${rowText}`;
-    const online = ONLINE_EVENT_RE.test(combined);
-    let platformGuess: string | undefined;
-    if (/lichess/i.test(combined)) platformGuess = "lichess";
-    else if (/chess\.?com/i.test(combined)) platformGuess = "chesscom";
-    else if (/chesskid/i.test(combined)) platformGuess = "chesskid";
-    events.push({ eventId, name, date: dateMatch?.[1], online, platformGuess });
+/** Name search. `Fuzzy` matches natural "First Last" order. */
+export async function searchUscfByName(name: string, state?: string): Promise<UscfSearchRow[]> {
+  const params = new URLSearchParams({ Fuzzy: name.replace(/\s+/g, " ").trim(), Size: "25" });
+  if (state && /^[A-Za-z]{2}$/.test(state.trim())) params.set("StateRep", state.trim().toUpperCase());
+  const data = await fetchJson(`/members?${params.toString()}`);
+  const items: any[] = Array.isArray(data?.items) ? data.items : [];
+  const rows: UscfSearchRow[] = [];
+  for (const it of items) {
+    const m = memberFrom(it);
+    if (m) rows.push({ ...m, rating: bestRating(m.ratings) });
   }
-  return events;
+  return rows;
+}
+
+export async function fetchUscfMember(id: string): Promise<UscfMember | null> {
+  const clean = id.replace(/\D/g, "");
+  if (!clean) return null;
+  const data = await fetchJson(`/members/${clean}`);
+  return memberFrom(data);
+}
+
+function eventRefFrom(e: any): UscfEventRef {
+  return {
+    eventId: String(e.id),
+    name: e.name || "",
+    startDate: e.startDate,
+    endDate: e.endDate,
+    sectionCount: e.sectionCount,
+    playerCount: e.playerCount,
+    state: e.stateCode,
+  };
+}
+
+export async function fetchMemberEvents(id: string, size = 80): Promise<UscfEventRef[]> {
+  const clean = id.replace(/\D/g, "");
+  if (!clean) return [];
+  const data = await fetchJson(`/members/${clean}/events?Offset=0&Size=${size}`);
+  const items: any[] = Array.isArray(data?.items) ? data.items : [];
+  return items.map(eventRefFrom);
+}
+
+/**
+ * Page a member's event history (newest-first) collecting every event on/after
+ * `sinceDate`. Active players can have hundreds of events, and the online-rated
+ * era (2020–2021) may sit many pages deep, so we page until a page drops below
+ * the cutoff (or a safety page cap is hit) rather than reading only page one.
+ */
+export async function fetchMemberEventsSince(
+  id: string,
+  sinceDate: string,
+  pageCap = 10,
+  pageSize = 100
+): Promise<UscfEventRef[]> {
+  const clean = id.replace(/\D/g, "");
+  if (!clean) return [];
+  const out: UscfEventRef[] = [];
+  for (let page = 0; page < pageCap; page++) {
+    const data = await fetchJson(`/members/${clean}/events?Offset=${page * pageSize}&Size=${pageSize}`);
+    const items: any[] = Array.isArray(data?.items) ? data.items : [];
+    if (!items.length) break;
+    let pageMax = "0";
+    for (const e of items) {
+      const ref = eventRefFrom(e);
+      if ((ref.startDate || "0") >= sinceDate) out.push(ref);
+      if ((ref.startDate || "0") > pageMax) pageMax = ref.startDate || "0";
+    }
+    // Newest-first: once an entire page predates the cutoff, we're done.
+    if (pageMax < sinceDate) break;
+    if (!data?.hasNextPage) break;
+  }
+  return out;
+}
+
+interface SectionRef {
+  number: number;
+  name?: string;
+}
+
+async function fetchEventSections(eventId: string): Promise<{ sections: SectionRef[]; startDate?: string; endDate?: string; name?: string }> {
+  const data = await fetchJson(`/rated-events/${eventId}`);
+  const sections: SectionRef[] = Array.isArray(data?.sections)
+    ? data.sections.map((s: any) => ({ number: s.number, name: s.name }))
+    : [];
+  return { sections, startDate: data?.startDate, endDate: data?.endDate, name: data?.name };
+}
+
+interface SectionMeta {
+  isOnline: boolean;
+  ratingSystem?: string;
+  timeControl?: string;
+  roundCount?: number;
+  isBlitz?: boolean;
+  startDate?: string;
+  endDate?: string;
+}
+
+async function fetchSectionMeta(eventId: string, number: number): Promise<SectionMeta | null> {
+  const s = await fetchJson(`/rated-events/${eventId}/sections/${number}`);
+  if (!s) return null;
+  return {
+    isOnline: !!s.isOnline,
+    ratingSystem: s.ratingSystem,
+    timeControl: s.timeControl,
+    roundCount: s.roundCount,
+    isBlitz: !!s.isBlitz,
+    startDate: s.startDate,
+    endDate: s.endDate,
+  };
+}
+
+function colorFrom(raw: any): GameColor {
+  const c = String(raw || "").toLowerCase();
+  if (c === "white") return "white";
+  if (c === "black") return "black";
+  return "unknown";
+}
+
+/** Standings → roster of players with round-by-round games. */
+async function fetchSectionPlayers(eventId: string, number: number, rootId: string): Promise<UscfSectionPlayer[]> {
+  const data = await fetchJson(`/rated-events/${eventId}/sections/${number}/standings?Offset=0&Size=250`);
+  const items: any[] = Array.isArray(data?.items) ? data.items : [];
+  const players: UscfSectionPlayer[] = [];
+  for (const row of items) {
+    const uscfId = String(row.memberId || "");
+    if (!uscfId) continue;
+    const games: UscfGame[] = [];
+    for (const ro of row.roundOutcomes || []) {
+      if (!ro?.opponentMemberId) continue; // byes/forfeits vs nobody
+      games.push({
+        round: ro.roundNumber,
+        color: colorFrom(ro.color),
+        outcome: ro.outcome || "",
+        opponentUscfId: String(ro.opponentMemberId),
+        opponentName: fullName(ro.opponentFirstName, ro.opponentLastName),
+      });
+    }
+    // pre-event rating for this section's system, if present
+    const rating = Array.isArray(row.ratings) && row.ratings[0]?.preRating ? row.ratings[0].preRating : undefined;
+    players.push({
+      uscfId,
+      name: fullName(row.firstName, row.lastName),
+      rating,
+      isTarget: uscfId === rootId,
+      games,
+    });
+  }
+  return players;
 }
 
 // ---------------------------------------------------------------------------
-// Crosstable → opponents (all players in the section, minus the root)
+// Online tournament graph for a member
 // ---------------------------------------------------------------------------
 
-export async function fetchCrosstableOpponents(eventId: string, rootId: string): Promise<UscfOpponent[]> {
-  const html = await fetchText(`${MSA}/XtblMain.php?${eventId}`);
-  if (!html) return [];
-  const opponents: UscfOpponent[] = [];
-  const seen = new Set<string>();
-  const re = /MbrDtlMain\.php\?(\d{6,})[^>]*>\s*([^<]+?)\s*<\/a>((?:(?!<\/tr>)[\s\S]){0,160})/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) && opponents.length < 40) {
-    const uscfId = m[1];
-    if (uscfId === rootId || seen.has(uscfId)) continue;
-    seen.add(uscfId);
-    const name = toFirstLast(m[2]);
-    const ratingMatch = m[3].match(/\b(\d{3,4})\b/);
-    opponents.push({ uscfId, name, rating: ratingMatch ? parseInt(ratingMatch[1], 10) : undefined });
+export interface BuildGraphOptions {
+  /** Max online sections to include (each is one crosstable). */
+  maxSections?: number;
+  /** Max candidate events to inspect. */
+  maxEvents?: number;
+}
+
+/**
+ * Build the list of online-rated sections the member played in, each with the
+ * full roster and every player's round-by-round games. This is the mesh the
+ * client BFS traverses to discover online usernames.
+ */
+export async function buildOnlineGraphForMember(
+  member: UscfMember,
+  opts: BuildGraphOptions = {}
+): Promise<OnlineSection[]> {
+  if (!member.hasOnline) return []; // no online ratings ⇒ nothing to traverse
+  const maxSections = opts.maxSections ?? 6;
+  const maxEvents = opts.maxEvents ?? 24;
+
+  // Online-rated systems launched in 2020 — page back to that era (it can sit
+  // many pages deep for active players) and ignore anything older.
+  const era = await fetchMemberEventsSince(member.id, "2020-03-01");
+  // Prefer events whose name signals online play; fall back to scanning the era.
+  const named = era.filter((e) => ONLINE_NAME_RE.test(e.name));
+  const candidates = (named.length ? named : era).slice(0, maxEvents);
+
+  // Phase 1 (cheap, concurrent): find which sections are actually online.
+  interface Found {
+    ev: UscfEventRef;
+    section: SectionRef;
+    meta: SectionMeta;
   }
-  return opponents;
+  const perEvent = await mapLimit(candidates, 4, async (ev): Promise<Found[]> => {
+    const { sections, startDate, endDate, name } = await fetchEventSections(ev.eventId);
+    const evRef: UscfEventRef = { ...ev, name: ev.name || name || "", startDate: ev.startDate || startDate, endDate: ev.endDate || endDate };
+    const metas = await mapLimit(sections, 3, async (sec) => {
+      const meta = await fetchSectionMeta(ev.eventId, sec.number);
+      return meta && meta.isOnline ? { ev: evRef, section: sec, meta } : null;
+    });
+    return metas.filter((x): x is Found => !!x);
+  });
+  const foundSections = perEvent.flat().slice(0, maxSections);
+
+  // Phase 2 (concurrent): pull the crosstable for each online section.
+  const online = await mapLimit(foundSections, 3, async ({ ev, section, meta }): Promise<OnlineSection | null> => {
+    const players = await fetchSectionPlayers(ev.eventId, section.number, member.id);
+    if (!players.some((p) => p.isTarget)) return null; // target not actually here
+    const evName = ev.name || "";
+    return {
+      eventId: ev.eventId,
+      name: evName,
+      sectionName: section.name,
+      sectionNumber: section.number,
+      startDate: meta.startDate || ev.startDate,
+      endDate: meta.endDate || ev.endDate,
+      ratingSystem: meta.ratingSystem || "OR",
+      timeControl: meta.timeControl,
+      roundCount: meta.roundCount,
+      isBlitz: meta.isBlitz,
+      platformGuess: platformGuess(`${evName} ${section.name || ""}`),
+      players,
+    };
+  });
+  return online.filter((x): x is OnlineSection => !!x);
 }
 
 // ---------------------------------------------------------------------------
