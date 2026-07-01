@@ -5,82 +5,53 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Prototype scraper in Python
+      - name: Dump structures
         run: |
           python3 - <<'PY'
-          import urllib.request, urllib.parse, re, html
+          import urllib.request, re
           UA={'User-Agent':'Mozilla/5.0'}
           def get(url):
-              try:
-                  return urllib.request.urlopen(urllib.request.Request(url,headers=UA),timeout=25).read().decode('latin-1','replace')
-              except Exception as e:
-                  return f"ERR {e}"
+              try: return urllib.request.urlopen(urllib.request.Request(url,headers=UA),timeout=25).read().decode('latin-1','replace')
+              except Exception as e: return f"ERR {e}"
+          def flat(s): return re.sub(r'\s+',' ', s)
 
-          print("===== SEARCH FORM FIELDS =====")
-          form=get("https://www.uschess.org/datapage/player-search.php")
-          for m in re.findall(r'<(input|select)[^>]+>', form, re.I)[:40]:
-              print(m[:160])
+          # correct search needs rating=R
+          s=get("https://www.uschess.org/datapage/player-search.php?name=Nakamura&rating=R&mode=Find")
+          print("search rows:")
+          for m in re.findall(r'MbrDtlMain\.php\?(\d{6,})[^>]*>([^<]*)</a>(?:[^<]*<[^>]*>){0,6}([^<]*)', s)[:8]:
+              print(" ", m[0], flat(m[1])[:26], "|", flat(m[2])[:40])
 
-          print("\n===== SEARCH VARIANTS =====")
-          for q in [
-              "https://www.uschess.org/datapage/player-search.php?name=Nakamura&mode=Find",
-              "https://www.uschess.org/datapage/player-search.php?eMbrKey=&mode=Find&eMbrName=Nakamura",
-              "https://www.uschess.org/datapage/player-search.php?name=Nakamura&rating=R&mode=Find",
-              "https://www.uschess.org/datapage/player-search.php?name=Nakamura&order=N&mode=Find",
-          ]:
-              h=get(q)
-              ids=re.findall(r'MbrDtlMain\.php\?(\d{6,})', h)
-              print(q.split('?')[1][:60], "-> ids:", ids[:6], "fail:" , 'Query Failed' in h)
+          MID="12530928"
+          h=get(f"https://www.uschess.org/msa/MbrDtlMain.php?{MID}")
+          print(f"\n===== MbrDtlMain {MID} (size {len(h)}) =====")
+          nm=re.search(r'<b>\s*'+MID+r':\s*([^<]+)</b>', h); print("name:", nm.group(1).strip() if nm else '?')
+          i=h.find('Regular Rating')
+          print("RATINGS REGION:\n", flat(h[max(0,i-80):i+1400]))
+          for kw in ['Online','FIDE','State','Expir']:
+              j=h.find(kw)
+              if j>0: print(f"[{kw}]:", flat(h[j-10:j+120]))
 
-          # find a player with online ratings among search results
-          ids=[]
-          for q in ["https://www.uschess.org/datapage/player-search.php?name=Nakamura&order=N&mode=Find",
-                    "https://www.uschess.org/datapage/player-search.php?name=Carlsen&order=N&mode=Find",
-                    "https://www.uschess.org/datapage/player-search.php?name=Smith&order=N&mode=Find"]:
-              h=get(q); ids+=re.findall(r'MbrDtlMain\.php\?(\d{6,})', h)
-          ids=list(dict.fromkeys(ids))[:25]
-          print("\ncandidate ids:", ids[:25])
-
-          def ratings(mid):
-              h=get(f"https://www.uschess.org/msa/MbrDtlMain.php?{mid}")
-              name=re.search(r'<b>\s*'+mid+r':\s*([^<]+)</b>', h)
-              # capture "<label>Rating</label> ... NNNN" patterns
-              rr={}
-              for lab in ["Online Regular","Online Quick","Online Blitz","Regular","Quick","Blitz"]:
-                  m=re.search(re.escape(lab)+r'\s*Rating.{0,400}?(\d{3,4})\b', h, re.S|re.I)
-                  if m and lab not in rr: rr[lab]=int(m.group(1))
-              onl = 'Online' in h
-              return (name.group(1).strip() if name else '?'), rr, onl, h
-
-          picked=None
-          for mid in ids:
-              nm,rr,onl,h=ratings(mid)
-              flag="ONLINE" if onl else ""
-              print(f"{mid} {nm[:24]:24} {rr} {flag}")
-              if onl and picked is None and any(k.startswith('Online') for k in rr):
-                  picked=(mid,nm,h)
-          if not picked and ids:
-              mid=ids[0]; nm,rr,onl,h=ratings(mid); picked=(mid,nm,h)
-
-          if picked:
-              mid,nm,h=picked
-              print(f"\n===== RATINGS TABLE RAW for {mid} {nm} =====")
-              i=h.find('Regular')
-              print(re.sub(r'\s+',' ', h[max(0,i-200):i+900]))
-              print(f"\n===== TOURNAMENT HISTORY links for {mid} =====")
-              hist=get(f"https://www.uschess.org/msa/MbrDtlTnmtHst.php?{mid}")
-              print("hist size", len(hist))
-              for a in re.findall(r'href=["\']?([^"\'> ]+)["\']?[^>]*>([^<]{0,40})', hist)[:25]:
-                  if 'php' in a[0].lower(): print(a[0][:70], "|", a[1].strip()[:30])
-              print("--- rows with rating-system hints ---")
-              for line in re.findall(r'(Online|Regular|Quick|Blitz)[^<\n]{0,50}', hist)[:12]:
-                  print(line)
-              ev=re.search(r'(Xtbl\w*\.php\?[0-9A-Za-z.\-]+)', hist)
-              if ev:
-                  url="https://www.uschess.org/msa/"+ev.group(1)
-                  print("\n===== CROSSTABLE", url, "=====")
-                  x=get(url)
-                  print("size", len(x))
-                  for a in re.findall(r'MbrDtlMain\.php\?(\d{6,})[^>]*>\s*([^<]{0,40})', x)[:20]:
-                      print(a[0], a[1].strip()[:30])
+          hh=get(f"https://www.uschess.org/msa/MbrDtlTnmtHst.php?{MID}")
+          print(f"\n===== TnmtHst {MID} (size {len(hh)}) =====")
+          # each event row: capture the Xtbl link + full row text
+          rows=re.findall(r'(Xtbl\w+\.php\?[0-9A-Za-z.\-]+)[^>]*>([^<]*)</a>((?:(?!</tr>).){0,300})', hh)
+          print("event rows:", len(rows))
+          for r in rows[:8]:
+              print("  LINK", r[0])
+              print("   txt", flat(r[1])[:30], "||", flat(re.sub(r'<[^>]+>',' ',r[2]))[:150])
+          # try an online event: look for a row whose text mentions online
+          onlmatch=[r for r in rows if re.search(r'online', r[1]+r[2], re.I)]
+          print("rows mentioning online:", len(onlmatch))
+          ev = (onlmatch[0][0] if onlmatch else (rows[0][0] if rows else None))
+          if ev:
+              url="https://www.uschess.org/msa/"+ev
+              x=get(url)
+              print(f"\n===== CROSSTABLE {url} (size {len(x)}) =====")
+              # header area (event name + rating system)
+              hd=re.search(r'(Online|Regular|Quick|Blitz)[^<]{0,60}Rated', x, re.I)
+              print("sys hint:", flat(hd.group(0)) if hd else "n/a")
+              print("first 600 of body:", flat(re.sub(r'<[^>]+>',' ', x[x.find('<body'):x.find('<body')+1600])) if '<body' in x else flat(x[:600]))
+              print("opponents:")
+              for a in re.findall(r'MbrDtlMain\.php\?(\d{6,})[^>]*>\s*([^<]{0,40})', x)[:16]:
+                  print("  ", a[0], flat(a[1])[:30])
           PY
