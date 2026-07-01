@@ -1,0 +1,71 @@
+name: Probe USCF (temporary)
+
+# Temporary reconnaissance: dumps the real structure of US Chess pages so the
+# scraper in resolve-identity can be built against ground truth. Delete after.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: New ratings site
+        run: |
+          echo "===== ratings.uschess.org index ====="
+          curl -sS -m 30 -A "Mozilla/5.0" "https://ratings.uschess.org/" -o new.html -w "HTTP %{http_code} size %{size_download}\n" || true
+          echo "--- script/api references ---"
+          grep -oE '(src|href)="[^"]+"' new.html | grep -iE 'api|main|\.js' | head -30 || true
+          grep -oiE 'https?://[a-z0-9./_-]*api[a-z0-9./_-]*' new.html | head -20 || true
+
+      - name: Try a plausible new-site API
+        run: |
+          for u in \
+            "https://ratings.uschess.org/api/players?name=Nakamura" \
+            "https://ratings.uschess.org/api/player-search?name=Nakamura" \
+            "https://api.uschess.org/players?name=Nakamura" ; do
+            echo "===== $u ====="
+            curl -sS -m 20 -A "Mozilla/5.0" "$u" -w "\nHTTP %{http_code} size %{size_download}\n" | head -c 500 || true
+            echo
+          done
+
+      - name: MSA name search
+        run: |
+          echo "===== MSA player-search: Nakamura, Hikaru ====="
+          curl -sS -m 30 -A "Mozilla/5.0" "https://www.uschess.org/datapage/player-search.php?name=Nakamura%2C+Hikaru&mode=Find" -o search.html -w "HTTP %{http_code} size %{size_download}\n" || true
+          echo "--- member-id links ---"
+          grep -oE 'MbrDtlMain\.php\?[0-9]+' search.html | head -10 || true
+          echo "--- rows (first 1500 chars of body table) ---"
+          grep -oE '<tr[^>]*>.*</tr>' search.html | head -5 | cut -c1-300 || true
+
+      - name: MSA member detail + tournament history + crosstable
+        run: |
+          ID=$(grep -oE 'MbrDtlMain\.php\?[0-9]+' search.html | head -1 | grep -oE '[0-9]+')
+          echo "First member id: ${ID:-none}"
+          [ -z "$ID" ] && ID=12571843
+          echo "Using ID=$ID"
+
+          echo "===== MbrDtlMain ====="
+          curl -sS -m 30 -A "Mozilla/5.0" "https://www.uschess.org/msa/MbrDtlMain.php?$ID" -o main.html -w "HTTP %{http_code} size %{size_download}\n" || true
+          echo "--- rating labels present ---"
+          grep -oiE '(Regular|Quick|Blitz|Online Regular|Online Quick|Online Blitz|OR |OQ |OB |FIDE)[^<]{0,40}' main.html | head -30 || true
+          echo "--- event links on main ---"
+          grep -oE 'XtblMain\.php\?[0-9A-Za-z.\-]+' main.html | head -10 || true
+
+          echo "===== MbrDtlTnmtHst ====="
+          curl -sS -m 30 -A "Mozilla/5.0" "https://www.uschess.org/msa/MbrDtlTnmtHst.php?$ID" -o hist.html -w "HTTP %{http_code} size %{size_download}\n" || true
+          echo "--- event rows (first 12) ---"
+          grep -oE 'XtblMain\.php\?[0-9A-Za-z.\-]+[^<]*</a>[^<]*' hist.html | head -12 || true
+          echo "--- lines mentioning Online ---"
+          grep -oiE '.{0,30}online.{0,40}' hist.html | head -12 || true
+
+          EV=$(grep -oE 'XtblMain\.php\?[0-9]+' hist.html | head -1 | grep -oE '[0-9]+')
+          echo "First event id: ${EV:-none}"
+          if [ -n "$EV" ]; then
+            echo "===== XtblMain crosstable ====="
+            curl -sS -m 30 -A "Mozilla/5.0" "https://www.uschess.org/msa/XtblMain.php?$EV" -o xtbl.html -w "HTTP %{http_code} size %{size_download}\n" || true
+            echo "--- player links in crosstable ---"
+            grep -oE 'MbrDtlMain\.php\?[0-9]+[^<]*</a>' xtbl.html | head -15 || true
+            echo "--- rating-system hints ---"
+            grep -oiE '(online|regular|quick|blitz)[^<]{0,30}' xtbl.html | head -10 || true
+          fi
