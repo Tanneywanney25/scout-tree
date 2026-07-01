@@ -183,6 +183,29 @@ async function deepUscfSearch(
     debug.error = String(e);
   }
 
+  // Follow "(See <id>)" duplicate pointers that appear on member-detail pages
+  // themselves — famous players accrue several placeholder records that point at
+  // one canonical, rated record (the one with real ratings + online events).
+  try {
+    const seeIds = new Set<string>();
+    for (const m of members) {
+      const mm = m.name.match(/See\s+(\d{6,})/i);
+      if (mm) seeIds.add(mm[1]);
+    }
+    for (const cid of seeIds) {
+      if (!members.some((m) => m.id === cid)) {
+        const canon = await fetchUscfMember(cid);
+        if (canon) members.unshift(canon);
+      }
+    }
+    // Prefer real, rated records over empty "Duplicate" placeholders.
+    const real = members.filter((m) => !/duplicate/i.test(m.name) && Object.keys(m.ratings).length > 0);
+    if (real.length) members = [...real, ...members.filter((m) => !real.includes(m))];
+    debug.followedSee = Array.from(seeIds);
+  } catch (e) {
+    debug.seeError = String(e);
+  }
+
   debug.members = members.map((m) => ({ id: m.id, name: m.name, state: m.state, ratings: m.ratings, hasOnline: m.hasOnline }));
   const candidates = members.map((m) => memberToCandidate(m, query));
 
