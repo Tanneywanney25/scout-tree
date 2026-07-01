@@ -122,6 +122,8 @@ function rankRows(rows: UscfSearchRow[], query: PlayerQuery): UscfSearchRow[] {
     if (query.approxRating && r.rating) s += Math.max(0, 2 - Math.abs(query.approxRating - r.rating) / 200);
     if (query.state && r.state && query.state.toUpperCase() === r.state.toUpperCase()) s += 2;
     if (r.rating) s += 0.2; // prefer rated members over unrated homonyms
+    if (r.canonical) s += 5; // a "See <id>" pointer is the real active record
+    if (r.isDuplicate) s -= 4; // retired/merged placeholder
     return s;
   };
   return [...rows].sort((a, b) => score(b) - score(a));
@@ -167,8 +169,15 @@ async function deepUscfSearch(
       const rows = await searchUscfByName(query.name, query.state);
       debug.searchCount = rows.length;
       debug.searchRows = rows.slice(0, 6);
-      const top = rankRows(rows, query).slice(0, 3);
-      members = (await mapLimit(top, 3, (r) => fetchUscfMember(r.id))).filter((x): x is UscfMember => !!x);
+      const top = rankRows(rows, query).slice(0, 4);
+      const fetched = (await mapLimit(top, 4, (r) => fetchUscfMember(r.id))).filter((x): x is UscfMember => !!x);
+      // Prefer members that actually carry ratings (the real active record) and
+      // drop empty "Duplicate" placeholders when a rated record exists.
+      const rated = fetched.filter((m) => Object.keys(m.ratings).length > 0 && !/duplicate/i.test(m.name));
+      members = (rated.length ? rated : fetched).sort((a, b) => {
+        const rank = (m: UscfMember) => (m.hasOnline ? 2 : 0) + (Object.keys(m.ratings).length ? 1 : 0);
+        return rank(b) - rank(a);
+      });
     }
   } catch (e) {
     debug.error = String(e);

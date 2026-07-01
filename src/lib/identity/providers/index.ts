@@ -14,7 +14,9 @@ import { chesscomProvider } from "./chesscom";
 import { lichessProvider } from "./lichess";
 import { googleProvider } from "./google";
 import { chessResultsProvider } from "./chessresults";
+import { uscfGraphProvider } from "./uscfGraph";
 
+/** Fast, always-run providers (direct lookups + AI + server sources). */
 export const PROVIDERS: Provider[] = [
   uscfProvider,
   fideProvider,
@@ -24,6 +26,13 @@ export const PROVIDERS: Provider[] = [
   chessResultsProvider,
 ];
 
+/**
+ * Deep, expensive providers run as a *second phase* only when the fast phase
+ * didn't confidently find the player — this keeps easy searches quick and
+ * reserves the tournament-graph traversal for the hard cases that need it.
+ */
+export const DEEP_PROVIDERS: Provider[] = [uscfGraphProvider];
+
 export {
   uscfProvider,
   fideProvider,
@@ -31,4 +40,5 @@ export {
   lichessProvider,
   googleProvider,
   chessResultsProvider,
+  uscfGraphProvider,
 };

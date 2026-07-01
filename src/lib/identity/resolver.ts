@@ -26,7 +26,7 @@ import type {
   SearchEvent,
   ProviderResult,
 } from "./types";
-import { PROVIDERS } from "./providers";
+import { PROVIDERS, DEEP_PROVIDERS } from "./providers";
 import {
   scoreFromEvidence,
   nameSimilarity,
@@ -236,6 +236,47 @@ export async function resolveIdentity(
           inPool.add(key);
           pool.push({ account, attachName: s.attachName });
         }
+      }
+    }
+  }
+
+  // --- 2b. Deep phase: tournament-graph traversal, only when the fast phase
+  // didn't confidently find a matching online account. Keeps easy searches
+  // quick and reserves the expensive opponent-traversal for the hard cases.
+  const strongDirect = pool.some(
+    (pa) =>
+      (pa.account.platform === "lichess" || pa.account.platform === "chesscom") &&
+      pa.account.confidence >= 0.72 &&
+      nameSimilarity(query.name, pa.account.displayName || pa.account.username) >= 0.6
+  );
+  if (!strongDirect && !signal?.aborted) {
+    const deep = DEEP_PROVIDERS.filter((p) => p.enabled(query));
+    const deepSettled = await Promise.allSettled(
+      deep.map((p) =>
+        p
+          .run({ query, signal, log: (m) => emit(m, "running", p.name) })
+          .then((r) => {
+            if (!r.unavailable) emit(`${p.label} done.`, "done", p.name);
+            return r;
+          })
+      )
+    );
+    for (let i = 0; i < deepSettled.length; i++) {
+      const s = deepSettled[i];
+      const p = deep[i];
+      if (s.status === "fulfilled") {
+        results.push(s.value);
+        providerStatus.push({ name: p.name, label: p.label, available: !s.value.unavailable, notes: s.value.notes });
+        fragments.push(...s.value.identities);
+        for (const acc of s.value.accounts) {
+          const key = poolKey(acc.platform, acc.username);
+          if (!inPool.has(key)) {
+            inPool.add(key);
+            pool.push({ account: acc });
+          }
+        }
+      } else {
+        providerStatus.push({ name: p.name, label: p.label, available: false, notes: ["Provider error."] });
       }
     }
   }

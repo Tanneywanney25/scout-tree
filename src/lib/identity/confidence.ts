@@ -127,16 +127,20 @@ export function nameMatchWeight(similarity: number): number {
 }
 
 /**
- * Rating proximity → signed weight. Within ~75 points is a strong corroborator;
- * far apart is mild contra-evidence (people sometimes have stale ratings).
+ * Rating proximity → signed weight. Deliberately lenient on large gaps because
+ * ratings are compared across systems: a player's USCF (OTB) rating typically
+ * sits several hundred points ABOVE their Chess.com/Lichess ratings, so a big
+ * spread is expected for the same person and must not read as a mismatch. Only
+ * an implausibly huge gap counts (mildly) against a match.
  */
 export function ratingMatchWeight(approx: number, candidate: number): number {
   const diff = Math.abs(approx - candidate);
-  if (diff <= 75) return 1.2;
-  if (diff <= 150) return 0.7;
-  if (diff <= 300) return 0.2;
-  if (diff <= 500) return -0.4;
-  return -1.0;
+  if (diff <= 100) return 1.2;
+  if (diff <= 250) return 0.8;
+  if (diff <= 450) return 0.4; // ~USCF↔online offset — still corroborating
+  if (diff <= 700) return 0.05;
+  if (diff <= 1000) return -0.2;
+  return -0.6;
 }
 
 /** ISO-2 / loose country comparison. */

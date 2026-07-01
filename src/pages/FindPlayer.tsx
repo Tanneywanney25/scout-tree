@@ -38,8 +38,9 @@ const FindPlayer = () => {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // Guarantee the magical search screen is felt even when sources are fast.
-    const minDisplay = new Promise((r) => setTimeout(r, 2600));
+    // A small floor so the search screen never just flashes; the real work
+    // (USCF deep search + tournament-graph traversal) usually runs much longer.
+    const minDisplay = new Promise((r) => setTimeout(r, 1200));
 
     try {
       const [res] = await Promise.all([

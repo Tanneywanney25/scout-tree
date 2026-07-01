@@ -52,6 +52,22 @@ jobs:
             echo "No AI key in GitHub secrets; assuming it is already set in the Supabase dashboard."
           fi
 
+      - name: Configure hosted auth (instant email signup + OAuth redirects)
+        run: |
+          # Instant email/password signup (no confirmation email) and an allow-list
+          # that lets Google OAuth return to the real app instead of localhost.
+          echo "Patching auth config…"
+          curl -sS -X PATCH "https://api.supabase.com/v1/projects/${PROJECT_REF}/config/auth" \
+            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+            -H "content-type: application/json" \
+            -d '{
+              "mailer_autoconfirm": true,
+              "external_email_enabled": true,
+              "external_google_enabled": true,
+              "site_url": "https://chess-scout.vercel.app",
+              "uri_allow_list": "https://*.vercel.app/**,https://chess-scout.vercel.app/**,http://localhost:8080/**,http://localhost:5173/**"
+            }' -w $'\nHTTP %{http_code}\n' | tail -3
+
       - name: Deploy edge functions
         run: |
           supabase functions deploy resolve-identity --project-ref "$PROJECT_REF" --no-verify-jwt

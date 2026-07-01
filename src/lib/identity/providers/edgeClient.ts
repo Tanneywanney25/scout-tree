@@ -38,15 +38,37 @@ export interface EdgeIdentityCandidate {
   tournaments?: string[];
 }
 
+/** One opponent (USCF member) the scouted player faced in an online event. */
+export interface GraphOpponent {
+  uscfId: string;
+  name: string;
+  rating?: number;
+}
+export interface GraphEvent {
+  eventId: string;
+  name: string;
+  date?: string; // YYYY-MM-DD
+  platformGuess?: string;
+  opponents: GraphOpponent[];
+}
+export interface TournamentGraph {
+  rootUscfId: string;
+  rootName: string;
+  rootState?: string;
+  onlineEvents: GraphEvent[];
+}
+
 export interface EdgeResponse {
   available: boolean;
   candidates: EdgeIdentityCandidate[];
   /** Which server sources actually returned something. */
   sources: string[];
   notes?: string[];
+  /** USCF tournament graph for the "secret" opponent-traversal feature. */
+  tournamentGraph?: TournamentGraph | null;
 }
 
-const EMPTY: EdgeResponse = { available: false, candidates: [], sources: [], notes: [] };
+const EMPTY: EdgeResponse = { available: false, candidates: [], sources: [], notes: [], tournamentGraph: null };
 
 // Memoize per query so the four server providers share one invocation.
 const cache = new Map<string, Promise<EdgeResponse>>();
@@ -81,6 +103,7 @@ export function fetchEdgeIdentity(query: PlayerQuery, signal?: AbortSignal): Pro
         candidates,
         sources: Array.isArray(data.sources) ? data.sources : [],
         notes: Array.isArray(data.notes) ? data.notes : [],
+        tournamentGraph: (data.tournamentGraph as TournamentGraph | null) ?? null,
       };
     } catch {
       // Function not deployed / network blocked / aborted — degrade silently.
@@ -92,6 +115,12 @@ export function fetchEdgeIdentity(query: PlayerQuery, signal?: AbortSignal): Pro
   // Don't cache forever; allow a retry on the next distinct search session.
   promise.finally(() => setTimeout(() => cache.delete(key), 60_000));
   return promise;
+}
+
+/** The tournament graph from the (memoized) edge response, or null. */
+export async function getTournamentGraph(query: PlayerQuery, signal?: AbortSignal): Promise<TournamentGraph | null> {
+  const res = await fetchEdgeIdentity(query, signal);
+  return res.tournamentGraph ?? null;
 }
 
 /** Convert a server candidate into a scored PartialIdentity for the resolver. */

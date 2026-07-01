@@ -47,6 +47,8 @@ export interface UscfSearchRow {
   name: string; // "First Last"
   rating?: number;
   state?: string;
+  isDuplicate?: boolean; // MSA "(Duplicate ...)" placeholder record
+  canonical?: boolean; // synthesised from a "See <id>" pointer
 }
 
 export interface UscfEvent {
@@ -110,21 +112,35 @@ export async function searchUscfByName(name: string, state?: string): Promise<Us
   if (!html || /Query Failed/i.test(html)) return [];
 
   const rows: UscfSearchRow[] = [];
+  const canonicalIds = new Set<string>();
   // Each result: MbrDtlMain.php?<id>...>NAME</a> then rating/state cells.
   const re = /MbrDtlMain\.php\?(\d{6,})[^>]*>([^<]+)<\/a>((?:(?!<\/tr>)[\s\S]){0,400})/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(html)) && rows.length < 25) {
     const id = m[1];
-    const name = toFirstLast(m[2]);
+    const rawName = m[2].replace(/&nbsp;/g, " ");
     const tail = m[3].replace(/&nbsp;/g, " ");
+    const combined = `${rawName} ${tail}`;
+    // MSA marks retired/merged records "(Duplicate — See <canonicalId>)".
+    const see = combined.match(/See\s+(\d{6,})/i);
+    if (see) canonicalIds.add(see[1]);
+    const isDuplicate = /duplicate/i.test(combined);
+    const cleanName = toFirstLast(rawName.replace(/\(?\s*See\s+\d+\s*\)?/i, "").replace(/\(?\s*duplicate[^)]*\)?/i, ""));
     const ratingMatch = tail.match(/\b(\d{3,4})\b/);
     const stateMatch = tail.match(/>\s*([A-Z]{2})\s*</);
     rows.push({
       id,
-      name,
+      name: cleanName,
       rating: ratingMatch ? parseInt(ratingMatch[1], 10) : undefined,
       state: stateMatch ? stateMatch[1] : undefined,
+      isDuplicate,
     });
+  }
+  // Follow "See <id>" pointers to the canonical (active, rated) record.
+  for (const cid of canonicalIds) {
+    if (!rows.some((r) => r.id === cid)) {
+      rows.unshift({ id: cid, name: toFirstLast(name), canonical: true });
+    }
   }
   return rows;
 }
