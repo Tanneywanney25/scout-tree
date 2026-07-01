@@ -70,3 +70,13 @@ jobs:
           echo "$resp" | grep -q '"available":true' || { echo "::error::Function returned no candidates (available:false). Is GEMINI_API_KEY set in Supabase?"; exit 1; }
           echo "$resp" | grep -q 'suggestedUsernames' || echo "::warning::available:true but no AI suggestedUsernames — USCF lookup may have answered without Gemini."
           echo "AI detective is responding."
+
+      - name: Smoke test USCF deep search (debug)
+        run: |
+          echo "Invoking resolve-identity USCF deep search with debug…"
+          resp=$(curl -sS -X POST "https://${PROJECT_REF}.supabase.co/functions/v1/resolve-identity" \
+            -H "apikey: ${ANON_KEY}" -H "Authorization: Bearer ${ANON_KEY}" -H "content-type: application/json" \
+            -d '{"query":{"name":"Hans Niemann","federation":"USCF"},"debug":true}')
+          echo "$resp" | python3 -m json.tool 2>/dev/null | head -80 || { echo "$resp" | head -c 2000; }
+          echo "$resp" | grep -q '"uscf"' && echo "USCF member match OK" || echo "::warning::No USCF member matched (scraper may need tuning; check debug above)."
+          echo "$resp" | grep -q 'tournamentGraph' && echo "tournamentGraph present" || true

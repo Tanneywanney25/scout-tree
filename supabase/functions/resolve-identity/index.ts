@@ -1,5 +1,14 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { callAI } from "../_shared/ai.ts";
+import {
+  searchUscfByName,
+  fetchUscfMember,
+  fetchUscfTournaments,
+  fetchCrosstableOpponents,
+  mapLimit,
+  type UscfMember,
+  type UscfSearchRow,
+} from "./uscf.ts";
 
 // ============================================================================
 // Edge function: resolve-identity
@@ -67,100 +76,139 @@ interface EdgeIdentityCandidate {
 }
 
 // ---------------------------------------------------------------------------
-// Best-effort US Chess MSA lookup. Public, key-less, HTML. Wrapped so any
-// failure (markup change, network, rate limit) degrades to "no USCF candidate"
-// rather than breaking the whole search.
+// USCF deep search: name → member detail (all ratings incl. online) →
+// tournament history → online-event crosstables → opponents. Builds the
+// tournament graph the client traverses. All wrapped so failure degrades to
+// "no USCF data" rather than breaking the search.
 // ---------------------------------------------------------------------------
 
-async function uscfLookup(query: PlayerQuery): Promise<EdgeIdentityCandidate[]> {
-  const out: EdgeIdentityCandidate[] = [];
+interface GraphOpponent {
+  uscfId: string;
+  name: string;
+  rating?: number;
+}
+interface GraphEvent {
+  eventId: string;
+  name: string;
+  date?: string;
+  platformGuess?: string;
+  opponents: GraphOpponent[];
+}
+interface TournamentGraph {
+  rootUscfId: string;
+  rootName: string;
+  rootState?: string;
+  onlineEvents: GraphEvent[];
+}
+
+const RATING_KEY_LABEL: Record<string, string> = {
+  regular: "USCF Regular",
+  quick: "USCF Quick",
+  blitz: "USCF Blitz",
+  onlineRegular: "USCF Online Regular",
+  onlineQuick: "USCF Online Quick",
+  onlineBlitz: "USCF Online Blitz",
+  correspondence: "USCF Correspondence",
+};
+
+/** Rank raw search rows against the query (name similarity + rating + state). */
+function rankRows(rows: UscfSearchRow[], query: PlayerQuery): UscfSearchRow[] {
+  const qName = query.name.toLowerCase().replace(/[^a-z ]/g, "").trim();
+  const score = (r: UscfSearchRow): number => {
+    let s = 0;
+    const rn = r.name.toLowerCase();
+    const qTokens = qName.split(/\s+/).filter(Boolean);
+    for (const t of qTokens) if (rn.includes(t)) s += 2;
+    if (query.approxRating && r.rating) s += Math.max(0, 2 - Math.abs(query.approxRating - r.rating) / 200);
+    if (query.state && r.state && query.state.toUpperCase() === r.state.toUpperCase()) s += 2;
+    if (r.rating) s += 0.2; // prefer rated members over unrated homonyms
+    return s;
+  };
+  return [...rows].sort((a, b) => score(b) - score(a));
+}
+
+function memberToCandidate(m: UscfMember, query: PlayerQuery): EdgeIdentityCandidate {
+  const ratings: Record<string, number> = {};
+  for (const [k, v] of Object.entries(m.ratings)) {
+    if (typeof v === "number") ratings[RATING_KEY_LABEL[k] || k] = v;
+  }
+  const estimatedRating =
+    m.ratings.regular ?? m.ratings.onlineRegular ?? m.ratings.quick ?? m.ratings.blitz ?? m.ratings.onlineBlitz;
+  const onlineNote = m.hasOnline
+    ? ` Has online USCF ratings (played online-rated events)${m.ratings.onlineRegular ? ` — Online Regular ${m.ratings.onlineRegular}` : ""}.`
+    : "";
+  return {
+    source: "uscf",
+    name: m.name,
+    federation: "USCF",
+    country: "US",
+    state: m.state ?? query.state,
+    uscfId: m.id,
+    fideId: m.fideId,
+    estimatedRating,
+    ratings: Object.keys(ratings).length ? ratings : undefined,
+    reasoning: `US Chess member #${m.id} (${m.name})${estimatedRating ? `, ~${estimatedRating} USCF` : ""}.${onlineNote}`,
+  };
+}
+
+async function deepUscfSearch(
+  query: PlayerQuery,
+  wantGraph: boolean
+): Promise<{ candidates: EdgeIdentityCandidate[]; graph: TournamentGraph | null; debug: Record<string, unknown> }> {
+  const debug: Record<string, unknown> = {};
+  let members: UscfMember[] = [];
+
   try {
-    // Direct member-detail page when an ID is known — the most reliable path.
     if (query.uscfId && /\d{6,}/.test(query.uscfId)) {
-      const id = query.uscfId.replace(/\D/g, "");
-      const res = await fetch(`https://www.uschess.org/msa/MbrDtlMain.php?${id}`, {
-        headers: { "User-Agent": "ScoutTree/1.0" },
-      });
-      if (res.ok) {
-        const html = await res.text();
-        const parsed = parseMsaDetail(html, id);
-        if (parsed) out.push(parsed);
-      }
-      return out;
+      const mem = await fetchUscfMember(query.uscfId.replace(/\D/g, ""));
+      if (mem) members = [mem];
+      debug.byId = !!mem;
+    } else {
+      const rows = await searchUscfByName(query.name, query.state);
+      debug.searchCount = rows.length;
+      debug.searchRows = rows.slice(0, 6);
+      const top = rankRows(rows, query).slice(0, 3);
+      members = (await mapLimit(top, 3, (r) => fetchUscfMember(r.id))).filter((x): x is UscfMember => !!x);
     }
+  } catch (e) {
+    debug.error = String(e);
+  }
 
-    // Name search via the classic player-search datapage. Best-effort parse.
-    const nameParam = encodeURIComponent(query.name.trim());
-    const res = await fetch(
-      `https://www.uschess.org/datapage/player-search.php?name=${nameParam}&mode=Find`,
-      { headers: { "User-Agent": "ScoutTree/1.0" } }
-    );
-    if (!res.ok) return out;
-    const html = await res.text();
-    // Rows look like: <a href="MbrDtlMain.php?12345678">12345678: LAST, FIRST</a> ... rating ... state
-    const rowRe = /MbrDtlMain\.php\?(\d{6,})">[^<]*?(\d{6,})?:?\s*([A-Z][^<]+)</g;
-    let m: RegExpExecArray | null;
-    let count = 0;
-    while ((m = rowRe.exec(html)) && count < 5) {
-      const id = m[1];
-      const rawName = (m[3] || "").trim().replace(/\s+/g, " ");
-      const name = toFirstLast(rawName);
-      out.push({
-        source: "uscf",
-        name,
-        federation: "USCF",
-        uscfId: id,
-        state: query.state,
-        country: "US",
-        reasoning: `US Chess member #${id} (${rawName}) matched the name search.`,
-      });
-      count++;
+  debug.members = members.map((m) => ({ id: m.id, name: m.name, state: m.state, ratings: m.ratings, hasOnline: m.hasOnline }));
+  const candidates = members.map((m) => memberToCandidate(m, query));
+
+  // Tournament graph for the strongest match (only when the caller wants it).
+  let graph: TournamentGraph | null = null;
+  if (wantGraph && members.length) {
+    try {
+      const best = members[0];
+      const events = await fetchUscfTournaments(best.id);
+      debug.eventCount = events.length;
+      const online = events.filter((e) => e.online).slice(0, 4);
+      debug.onlineEventCount = online.length;
+      const withOpponents = await mapLimit(online, 3, async (e) => ({
+        event: e,
+        opponents: await fetchCrosstableOpponents(e.eventId, best.id),
+      }));
+      graph = {
+        rootUscfId: best.id,
+        rootName: best.name,
+        rootState: best.state,
+        onlineEvents: withOpponents.map(({ event, opponents }) => ({
+          eventId: event.eventId,
+          name: event.name,
+          date: event.date,
+          platformGuess: event.platformGuess,
+          opponents: opponents.slice(0, 20),
+        })),
+      };
+      debug.graphOpponents = graph.onlineEvents.reduce((n, e) => n + e.opponents.length, 0);
+    } catch (e) {
+      debug.graphError = String(e);
     }
-  } catch (_e) {
-    // swallow — best-effort only
   }
-  return out;
-}
 
-function parseMsaDetail(html: string, id: string): EdgeIdentityCandidate | null {
-  try {
-    const nameMatch = html.match(/<b>\s*(\d{6,}):\s*([^<]+)<\/b>/);
-    const rawName = nameMatch ? nameMatch[2].trim() : "";
-    const name = rawName ? toFirstLast(rawName) : "Unknown";
-    const stateMatch = html.match(/State[^<]*<\/td>\s*<td[^>]*>\s*([A-Z]{2})/i);
-    const regMatch = html.match(/Regular\s*Rating[\s\S]*?(\d{3,4})/i);
-    const fideMatch = html.match(/FIDE\s*ID[^<]*<\/td>\s*<td[^>]*>\s*(\d{6,})/i);
-    const ratings: Record<string, number> = {};
-    if (regMatch) ratings["USCF Regular"] = parseInt(regMatch[1], 10);
-    return {
-      source: "uscf",
-      name,
-      federation: "USCF",
-      uscfId: id,
-      state: stateMatch ? stateMatch[1] : undefined,
-      country: "US",
-      fideId: fideMatch ? fideMatch[1] : undefined,
-      estimatedRating: regMatch ? parseInt(regMatch[1], 10) : undefined,
-      ratings: Object.keys(ratings).length ? ratings : undefined,
-      reasoning: `US Chess member detail #${id}.`,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** "LAST, FIRST MIDDLE" → "First Middle Last" (title-cased). */
-function toFirstLast(raw: string): string {
-  const titleCase = (s: string) =>
-    s
-      .toLowerCase()
-      .replace(/\b\w/g, (c) => c.toUpperCase())
-      .trim();
-  if (raw.includes(",")) {
-    const [last, rest] = raw.split(",");
-    return titleCase(`${rest} ${last}`.replace(/\s+/g, " "));
-  }
-  return titleCase(raw);
+  return { candidates, graph, debug };
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +349,11 @@ serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const query: PlayerQuery = body?.query || {};
+    const debugMode = body?.debug === true;
+    // Only chase the (slower) tournament graph when it's plausibly a US player.
+    const wantGraph =
+      body?.graph !== false &&
+      (query.federation === "USCF" || !!query.uscfId || !!query.state || !query.federation);
     if (!query.name || !query.name.trim()) {
       return new Response(JSON.stringify({ available: false, candidates: [], sources: [], notes: ["Missing name."] }), {
         status: 200,
@@ -313,11 +366,15 @@ serve(async (req) => {
     const sources: string[] = [];
     const notes: string[] = [];
 
-    // 1. Server-side USCF best-effort (never fatal).
-    const uscfCandidates = await uscfLookup(query);
+    // 1. Server-side USCF deep search + tournament graph (never fatal).
+    const { candidates: uscfCandidates, graph, debug } = await deepUscfSearch(query, wantGraph);
     if (uscfCandidates.length) {
       sources.push("uscf");
-      notes.push(`US Chess: ${uscfCandidates.length} record(s).`);
+      notes.push(`US Chess: ${uscfCandidates.length} member match(es).`);
+    }
+    if (graph && graph.onlineEvents.length) {
+      const opps = graph.onlineEvents.reduce((n, e) => n + e.opponents.length, 0);
+      notes.push(`Tournament graph: ${graph.onlineEvents.length} online event(s), ${opps} opponents to traverse.`);
     }
 
     // 2. AI reasoning pass — refines USCF hits and proposes usernames.
@@ -339,20 +396,34 @@ serve(async (req) => {
       console.warn("[resolve-identity] AI error:", ai.status, ai.error);
     }
 
-    // Merge: AI candidates carry suggested usernames; keep USCF-only records that
-    // the AI didn't already absorb (dedupe by USCF ID / very similar name).
-    const candidates: EdgeIdentityCandidate[] = [...aiCandidates];
-    for (const u of uscfCandidates) {
+    // Merge: prefer real USCF records first (they carry verified IDs/ratings),
+    // then AI candidates the USCF pass didn't already cover (dedupe by ID/name).
+    const candidates: EdgeIdentityCandidate[] = [...uscfCandidates];
+    for (const a of aiCandidates) {
       const dup = candidates.some(
         (c) =>
-          (c.uscfId && u.uscfId && c.uscfId.replace(/\D/g, "") === u.uscfId.replace(/\D/g, "")) ||
-          c.name.toLowerCase() === u.name.toLowerCase()
+          (c.uscfId && a.uscfId && c.uscfId.replace(/\D/g, "") === a.uscfId.replace(/\D/g, "")) ||
+          c.name.toLowerCase() === a.name.toLowerCase()
       );
-      if (!dup) candidates.push(u);
+      if (dup) {
+        // Fold the AI's suggested usernames onto the matching USCF record.
+        const target = candidates.find(
+          (c) =>
+            (c.uscfId && a.uscfId && c.uscfId.replace(/\D/g, "") === a.uscfId.replace(/\D/g, "")) ||
+            c.name.toLowerCase() === a.name.toLowerCase()
+        );
+        if (target && a.suggestedUsernames?.length) {
+          target.suggestedUsernames = [...(target.suggestedUsernames || []), ...a.suggestedUsernames].slice(0, 10);
+        }
+      } else {
+        candidates.push(a);
+      }
     }
 
     const available = candidates.length > 0;
-    return new Response(JSON.stringify({ available, sources, candidates, notes }), {
+    const payload: Record<string, unknown> = { available, sources, candidates, notes, tournamentGraph: graph };
+    if (debugMode) payload.debug = debug;
+    return new Response(JSON.stringify(payload), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
