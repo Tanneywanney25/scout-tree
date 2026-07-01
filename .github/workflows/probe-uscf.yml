@@ -1,44 +1,61 @@
 name: Probe USCF (temporary)
-
-# Temporary reconnaissance for the ratings-api.uschess.org JSON API.
 on:
   workflow_dispatch:
-
 jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Discover API routes from SPA bundle
+      - name: Extract API routes from bundle
         run: |
           set +e
           curl -sS -m 30 -A "Mozilla/5.0" "https://ratings.uschess.org/" -o idx.html
           JS=$(grep -oE '/assets/[A-Za-z0-9._-]+\.js' idx.html | head -1)
-          echo "JS bundle: $JS"
-          curl -sS -m 40 -A "Mozilla/5.0" "https://ratings.uschess.org${JS}" -o app.js
-          echo "bundle size: $(wc -c < app.js)"
-          echo "===== ratings-api base refs ====="
-          grep -oE 'https://ratings-api\.uschess\.org[A-Za-z0-9/_.:{}$?=&-]*' app.js | sort -u | head -40
-          echo "===== path-like string literals (players/tournaments/etc) ====="
-          grep -oE '"/(players|player|tournaments|tournament|events|event|crosstable|members|member|ratings|search)[A-Za-z0-9/_.:{}?=&-]*"' app.js | sort -u | head -60
-          echo "===== template paths with backticks/ids ====="
-          grep -oE '`/(players|tournaments|events|members)[^`]{0,60}`' app.js | sort -u | head -40
+          curl -sS -m 45 -A "Mozilla/5.0" "https://ratings.uschess.org${JS}" -o app.js
+          echo "bundle: $(wc -c < app.js) bytes"
+          echo "===== context around 'ratings-api' ====="
+          grep -aoE '.{20}ratings-api[^\"'\'' ]{0,70}' app.js | head -8
+          echo "===== any uschess urls in bundle ====="
+          grep -aoE 'https?://[A-Za-z0-9.-]*uschess[A-Za-z0-9./_-]*' app.js | sort -u | head -20
+          echo "===== most common quoted /path literals ====="
+          grep -aoE '"/[A-Za-z0-9/_{}.:-]{3,50}"' app.js | sort | uniq -c | sort -rn | head -70
+          echo "===== template /path literals ====="
+          grep -aoE '`/[A-Za-z0-9/_{}$().:-]{3,60}`' app.js | sort -u | head -40
 
-      - name: Hit candidate API endpoints
+      - name: Confirm MSA HTML backbone (member detail / history / crosstable)
         run: |
           set +e
-          API="https://ratings-api.uschess.org"
-          for u in \
-            "$API/" "$API/docs" "$API/openapi.json" "$API/swagger.json" "$API/health" \
-            "$API/players?name=Nakamura" \
-            "$API/players/search?query=Nakamura" \
-            "$API/players/search?name=Nakamura" \
-            "$API/player/search?name=Nakamura" \
-            "$API/v1/players?search=Nakamura" \
-            "$API/players/12571843" \
-            "$API/player/12571843" \
-            "$API/players/12571843/tournaments" \
-            "$API/players/12571843/ratings" ; do
-            echo "===== $u ====="
-            curl -sS -m 20 -A "Mozilla/5.0" -H "Accept: application/json" "$u" -w $'\nHTTP %{http_code} ct=%{content_type} size=%{size_download}\n' | head -c 900
-            echo
-          done
+          ID=12571843
+          echo "===== MbrDtlMain?$ID ====="
+          curl -sS -m 30 -A "Mozilla/5.0" "https://www.uschess.org/msa/MbrDtlMain.php?$ID" -o main.html
+          echo "size $(wc -c < main.html)"
+          echo "--- name line ---"; grep -aoE '<b>[^<]*'"$ID"'[^<]*</b>' main.html | head -2
+          echo "--- rating rows (Regular/Quick/Blitz/Online + numbers) ---"
+          grep -aoiE '(Regular|Quick|Blitz|Online) Rating[^<]{0,80}' main.html | head -20
+          grep -aoiE '(OнR|Online (Regular|Quick|Blitz))[^<]{0,60}' main.html | head
+          echo "--- broader: any cell containing 4-digit near rating labels ---"
+          grep -aoE '(Regular|Quick|Blitz|Online|FIDE)[^0-9]{0,40}[0-9]{3,4}' main.html | head -25
+          echo "--- event links on detail ---"
+          grep -aoE 'XtblMain\.php\?[0-9A-Za-z.-]+' main.html | head -8
+
+          echo "===== MbrDtlTnmtHst?$ID ====="
+          curl -sS -m 30 -A "Mozilla/5.0" "https://www.uschess.org/msa/MbrDtlTnmtHst.php?$ID" -o hist.html
+          echo "size $(wc -c < hist.html)"
+          echo "--- event link + trailing text (first 15) ---"
+          grep -aoE 'XtblMain\.php\?[0-9A-Za-z.-]+"?[^<]*</a>[^<]{0,70}' hist.html | head -15
+          echo "--- any Online mentions ---"
+          grep -aoiE '.{0,25}online.{0,45}' hist.html | head -12
+          echo "--- rating-system codes (R/Q/B/OR/OQ/OB) column hints ---"
+          grep -aoE '\b(OR|OQ|OB|R|Q|B)\b[^A-Za-z]{0,3}[0-9]{3,4}' hist.html | head -15
+
+          EV=$(grep -aoE 'XtblMain\.php\?[0-9]+[^"& ]*' hist.html | head -1 | sed 's/XtblMain\.php?//')
+          echo "first event token: ${EV:-none}"
+          if [ -n "$EV" ]; then
+            echo "===== XtblMain?$EV ====="
+            curl -sS -m 30 -A "Mozilla/5.0" "https://www.uschess.org/msa/XtblMain.php?$EV" -o xtbl.html
+            echo "size $(wc -c < xtbl.html)"
+            echo "--- section/event name + rating system ---"
+            grep -aoiE '(online|regular|quick|blitz)[^<]{0,40}' xtbl.html | head -10
+            echo "--- opponent player links (id + name) ---"
+            grep -aoE 'XtblMain\.php\?[0-9A-Za-z.-]+"?[^<]*</a>[^<]{0,40}' xtbl.html | head -20
+            grep -aoE 'MbrDtlMain\.php\?[0-9]+' xtbl.html | head -20
+          fi
