@@ -14,12 +14,50 @@
 
 import { supabase } from "@/integrations/supabase/client";
 import type { Evidence, PartialIdentity, PlayerQuery, Platform, Federation, Provider } from "../types";
-import type { GraphEvent, TournamentGraph, EventPlatformInfo } from "../graphTypes";
+import type { GraphEvent, TournamentGraph, EventPlatformInfo, UsernameSearchRequest, UsernameCandidate } from "../graphTypes";
 import { nameSimilarity, nameMatchWeight, ratingMatchWeight } from "../confidence";
 
 // Graph shapes live in ../graphTypes (shared with the engine); re-export for
 // existing importers.
-export type { GraphGame, GraphPlayer, GraphEvent, TournamentGraph, EventPlatformInfo } from "../graphTypes";
+export type {
+  GraphGame,
+  GraphPlayer,
+  GraphEvent,
+  TournamentGraph,
+  EventPlatformInfo,
+  UsernameSearchRequest,
+  UsernameCandidate,
+} from "../graphTypes";
+
+/**
+ * Invoke the resolve-identity edge function with a hard client-side timeout.
+ * `supabase.functions.invoke` accepts no AbortSignal, and a hung request would
+ * otherwise freeze the traversal loop silently for minutes — the #1 cause of
+ * the search appearing to "pause and glitch out". On timeout we resolve null
+ * and the caller degrades gracefully.
+ */
+async function invokeEdge(body: Record<string, unknown>, timeoutMs: number): Promise<Record<string, unknown> | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      supabase.functions.invoke("resolve-identity", { body }),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+    if (!result) {
+      console.warn("[identity] resolve-identity call timed out after", timeoutMs, "ms:", Object.keys(body)[0]);
+      return null;
+    }
+    const { data, error } = result as { data: Record<string, unknown> | null; error: { message?: string } | null };
+    if (error || !data) return null;
+    return data;
+  } catch {
+    return null;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 /** One real-world identity candidate proposed by a server source. */
 export interface EdgeIdentityCandidate {
@@ -77,34 +115,26 @@ export function fetchEdgeIdentity(query: PlayerQuery, signal?: AbortSignal): Pro
   if (existing) return existing;
 
   const promise = (async (): Promise<EdgeResponse> => {
-    try {
-      const { data, error } = await supabase.functions.invoke("resolve-identity", {
-        body: { query },
-      });
-      if (error || !data) {
-        // Most common cause: the edge function isn't deployed yet (or has no AI
-        // key). The detective degrades to Lichess/Chess.com — surface why.
-        console.warn(
-          "[identity] resolve-identity edge function unavailable — AI/USCF/FIDE sources are off. " +
-            "Deploy it (`supabase functions deploy resolve-identity`) and set GEMINI_API_KEY. Detail:",
-          error?.message || "no data returned"
-        );
-        return EMPTY;
-      }
-      const candidates = Array.isArray(data.candidates) ? (data.candidates as EdgeIdentityCandidate[]) : [];
-      const tournamentGraph = (data.tournamentGraph as TournamentGraph | null) ?? null;
-      return {
-        available: data.available !== false,
-        candidates,
-        sources: Array.isArray(data.sources) ? data.sources : [],
-        notes: Array.isArray(data.notes) ? data.notes : [],
-        tournamentGraph,
-        graphTraversalReady: data.graphTraversalReady === true || !!tournamentGraph?.graphTraversalReady,
-      };
-    } catch {
-      // Function not deployed / network blocked / aborted — degrade silently.
+    const data = await invokeEdge({ query }, 150_000);
+    if (!data) {
+      // Most common cause: the edge function isn't deployed yet (or has no AI
+      // key). The detective degrades to Lichess/Chess.com — surface why.
+      console.warn(
+        "[identity] resolve-identity edge function unavailable — AI/USCF/FIDE sources are off. " +
+          "Deploy it (`supabase functions deploy resolve-identity`) and set GEMINI_API_KEY."
+      );
       return EMPTY;
     }
+    const candidates = Array.isArray(data.candidates) ? (data.candidates as EdgeIdentityCandidate[]) : [];
+    const tournamentGraph = (data.tournamentGraph as TournamentGraph | null) ?? null;
+    return {
+      available: data.available !== false,
+      candidates,
+      sources: Array.isArray(data.sources) ? (data.sources as string[]) : [],
+      notes: Array.isArray(data.notes) ? (data.notes as string[]) : [],
+      tournamentGraph,
+      graphTraversalReady: data.graphTraversalReady === true || !!tournamentGraph?.graphTraversalReady,
+    };
   })();
 
   cache.set(key, promise);
@@ -136,15 +166,9 @@ export function expandMemberGraph(memberId: string, signal?: AbortSignal): Promi
   if (existing) return existing;
 
   const promise = (async (): Promise<TournamentGraph | null> => {
-    try {
-      const { data, error } = await supabase.functions.invoke("resolve-identity", {
-        body: { expandMemberId: id },
-      });
-      if (error || !data) return null;
-      return (data.tournamentGraph as TournamentGraph | null) ?? null;
-    } catch {
-      return null;
-    }
+    const data = await invokeEdge({ expandMemberId: id }, 120_000);
+    if (!data) return null;
+    return (data.tournamentGraph as TournamentGraph | null) ?? null;
   })();
 
   expandCache.set(id, promise);
@@ -166,36 +190,79 @@ export function discoverEventPlatform(ev: GraphEvent, signal?: AbortSignal): Pro
   if (existing) return existing;
 
   const promise = (async (): Promise<EventPlatformInfo | null> => {
-    try {
-      const { data, error } = await supabase.functions.invoke("resolve-identity", {
-        body: {
-          discoverEvent: {
-            name: ev.name,
-            sectionName: ev.sectionName,
-            startDate: ev.startDate,
-            endDate: ev.endDate,
-            ratingSystem: ev.ratingSystem,
-            timeControl: ev.timeControl,
-          },
+    const data = await invokeEdge(
+      {
+        discoverEvent: {
+          name: ev.name,
+          sectionName: ev.sectionName,
+          startDate: ev.startDate,
+          endDate: ev.endDate,
+          ratingSystem: ev.ratingSystem,
+          timeControl: ev.timeControl,
         },
-      });
-      if (error || !data || data.available === false) return null;
-      const info: EventPlatformInfo = {
-        platform: data.platform,
-        chesscomSlugs: Array.isArray(data.chesscomSlugs) ? data.chesscomSlugs : undefined,
-        lichessSwissIds: Array.isArray(data.lichessSwissIds) ? data.lichessSwissIds : undefined,
-        lichessArenaIds: Array.isArray(data.lichessArenaIds) ? data.lichessArenaIds : undefined,
-        confidence: typeof data.confidence === "number" ? data.confidence : undefined,
-        note: typeof data.note === "string" ? data.note : undefined,
-      };
-      return info.platform || info.chesscomSlugs?.length || info.lichessSwissIds?.length || info.lichessArenaIds?.length ? info : null;
-    } catch {
-      return null;
-    }
+      },
+      90_000
+    );
+    if (!data || data.available === false) return null;
+    const info: EventPlatformInfo = {
+      platform: data.platform as EventPlatformInfo["platform"],
+      chesscomSlugs: Array.isArray(data.chesscomSlugs) ? (data.chesscomSlugs as string[]) : undefined,
+      lichessSwissIds: Array.isArray(data.lichessSwissIds) ? (data.lichessSwissIds as string[]) : undefined,
+      lichessArenaIds: Array.isArray(data.lichessArenaIds) ? (data.lichessArenaIds as string[]) : undefined,
+      confidence: typeof data.confidence === "number" ? data.confidence : undefined,
+      note: typeof data.note === "string" ? data.note : undefined,
+    };
+    return info.platform || info.chesscomSlugs?.length || info.lichessSwissIds?.length || info.lichessArenaIds?.length ? info : null;
   })();
 
   discoverCache.set(ev.eventId, promise);
   promise.finally(() => setTimeout(() => discoverCache.delete(ev.eventId), 300_000));
+  return promise;
+}
+
+// ---------------------------------------------------------------------------
+// Google-index username discovery (edge `findUsername` mode)
+// ---------------------------------------------------------------------------
+
+// Memoize per person+context — the traversal asks about the same member from
+// several events. Kept for the whole session; the answer doesn't change.
+const usernameCache = new Map<string, Promise<UsernameCandidate[]>>();
+
+// Space the Google-search calls out (they fan out to Google/an AI web search).
+// This is pacing to avoid being blocked, NOT a cap — every request still runs.
+let usernameNextSlot = 0;
+async function usernameThrottle(): Promise<void> {
+  const now = Date.now();
+  const wait = Math.max(0, usernameNextSlot - now);
+  usernameNextSlot = Math.max(now, usernameNextSlot) + 400;
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+
+/**
+ * Ask the edge function to find a person's Lichess/Chess.com usernames via the
+ * Google index (site:-restricted query ladder; see the edge implementation).
+ * Returns LEADS — the caller must verify each against real platform data
+ * (account exists, games in the tournament window, rating/country sanity).
+ */
+export function findUsernameCandidates(req: UsernameSearchRequest, signal?: AbortSignal): Promise<UsernameCandidate[]> {
+  const name = (req.name || "").trim();
+  if (!name) return Promise.resolve([]);
+  const key = JSON.stringify([name.toLowerCase(), req.state, req.uscfRating, req.eventName, [...(req.platforms || [])].sort()]);
+  const existing = usernameCache.get(key);
+  if (existing) return existing;
+
+  const promise = (async (): Promise<UsernameCandidate[]> => {
+    if (signal?.aborted) return [];
+    await usernameThrottle();
+    if (signal?.aborted) return [];
+    const data = await invokeEdge({ findUsername: req }, 90_000);
+    if (!data || data.available === false || !Array.isArray(data.candidates)) return [];
+    return (data.candidates as UsernameCandidate[])
+      .filter((c) => c && (c.platform === "chesscom" || c.platform === "lichess") && typeof c.username === "string")
+      .slice(0, 24);
+  })();
+
+  usernameCache.set(key, promise);
   return promise;
 }
 

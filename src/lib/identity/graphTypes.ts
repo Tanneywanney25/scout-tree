@@ -47,6 +47,37 @@ export interface TournamentGraph {
 }
 
 /**
+ * A Google-index username search request (served by the resolve-identity edge
+ * function's `findUsername` mode). This is THE way tournament players' handles
+ * are discovered from their names — the platforms' own name search finds the
+ * wrong homonym far too easily, so it is only ever a last resort.
+ */
+export interface UsernameSearchRequest {
+  name: string;
+  state?: string;
+  city?: string;
+  clubOrSchool?: string;
+  uscfRating?: number;
+  fideId?: string;
+  /** USCF event context — sharpens queries and helps disambiguation. */
+  eventName?: string;
+  eventDate?: string;
+  platforms?: ("chesscom" | "lichess")[];
+  /** Handles this person already uses elsewhere (username reuse). */
+  knownUsernames?: string[];
+}
+
+/** One handle the Google index tied to the person — a LEAD to verify, never
+ *  an identification by itself. */
+export interface UsernameCandidate {
+  platform: "chesscom" | "lichess";
+  username: string;
+  /** Indexed page that made the name↔handle connection. */
+  sourceUrl?: string;
+  note?: string;
+}
+
+/**
  * What a web/flyer search learned about where a USCF online event was hosted.
  * Produced server-side (AI + web search over TLAs/flyers/club announcements)
  * and consumed by the traversal engine to focus its platform work — ideally

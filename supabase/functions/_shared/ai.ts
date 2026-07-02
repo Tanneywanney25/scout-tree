@@ -18,6 +18,21 @@ export interface AIResult {
   error?: string;
 }
 
+/** Environment lookup that works in Deno (edge functions) and Node (CLI harness). */
+export function readEnv(name: string): string | undefined {
+  const deno = (globalThis as { Deno?: { env?: { get(n: string): string | undefined } } }).Deno;
+  if (deno?.env?.get) {
+    try {
+      const v = deno.env.get(name);
+      if (v) return v;
+    } catch {
+      /* permission denied — fall through */
+    }
+  }
+  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  return proc?.env?.[name];
+}
+
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
@@ -25,10 +40,10 @@ const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash";
 
 export async function callAI(system: string, prompt: string, maxTokens = 250): Promise<AIResult> {
-  const geminiKey = Deno.env.get("GEMINI_API_KEY") || Deno.env.get("GOOGLE_API_KEY");
+  const geminiKey = readEnv("GEMINI_API_KEY") || readEnv("GOOGLE_API_KEY");
   if (geminiKey) return callGemini(geminiKey, system, prompt, maxTokens);
 
-  const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
+  const anthropicKey = readEnv("ANTHROPIC_API_KEY");
   if (anthropicKey) return callAnthropic(anthropicKey, system, prompt, maxTokens);
 
   return { ok: false, text: "", status: 503, error: "No AI key configured (set GEMINI_API_KEY or ANTHROPIC_API_KEY)" };
@@ -41,16 +56,21 @@ export async function callAI(system: string, prompt: string, maxTokens = 250): P
  * if the search-enabled request is rejected (e.g. tool not available on the
  * configured model).
  */
-export async function callAIWithSearch(system: string, prompt: string, maxTokens = 1024): Promise<AIResult> {
-  const geminiKey = Deno.env.get("GEMINI_API_KEY") || Deno.env.get("GOOGLE_API_KEY");
+export async function callAIWithSearch(
+  system: string,
+  prompt: string,
+  maxTokens = 1024,
+  opts: { maxSearchUses?: number } = {}
+): Promise<AIResult> {
+  const geminiKey = readEnv("GEMINI_API_KEY") || readEnv("GOOGLE_API_KEY");
   if (geminiKey) {
     const res = await callGemini(geminiKey, system, prompt, maxTokens, true);
     if (res.ok || res.status >= 500) return res;
     return callGemini(geminiKey, system, prompt, maxTokens);
   }
-  const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
+  const anthropicKey = readEnv("ANTHROPIC_API_KEY");
   if (anthropicKey) {
-    const res = await callAnthropic(anthropicKey, system, prompt, maxTokens, true);
+    const res = await callAnthropic(anthropicKey, system, prompt, maxTokens, true, opts.maxSearchUses);
     if (res.ok || res.status >= 500) return res;
     return callAnthropic(anthropicKey, system, prompt, maxTokens);
   }
@@ -62,7 +82,7 @@ export async function callAIWithSearch(system: string, prompt: string, maxTokens
 // ---------------------------------------------------------------------------
 
 async function callGemini(apiKey: string, system: string, prompt: string, maxTokens: number, withSearch = false): Promise<AIResult> {
-  const model = Deno.env.get("GEMINI_MODEL") || GEMINI_DEFAULT_MODEL;
+  const model = readEnv("GEMINI_MODEL") || GEMINI_DEFAULT_MODEL;
 
   let response: Response;
   try {
@@ -105,8 +125,15 @@ async function callGemini(apiKey: string, system: string, prompt: string, maxTok
 // Anthropic Messages API
 // ---------------------------------------------------------------------------
 
-async function callAnthropic(apiKey: string, system: string, prompt: string, maxTokens: number, withSearch = false): Promise<AIResult> {
-  const model = Deno.env.get("AI_MODEL") || ANTHROPIC_DEFAULT_MODEL;
+async function callAnthropic(
+  apiKey: string,
+  system: string,
+  prompt: string,
+  maxTokens: number,
+  withSearch = false,
+  maxSearchUses = 3
+): Promise<AIResult> {
+  const model = readEnv("AI_MODEL") || ANTHROPIC_DEFAULT_MODEL;
 
   let response: Response;
   try {
@@ -122,7 +149,7 @@ async function callAnthropic(apiKey: string, system: string, prompt: string, max
         max_tokens: withSearch ? Math.max(maxTokens, 2048) : maxTokens,
         system,
         messages: [{ role: "user", content: prompt }],
-        ...(withSearch ? { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }] } : {}),
+        ...(withSearch ? { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: maxSearchUses }] } : {}),
       }),
     });
   } catch (e) {

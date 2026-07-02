@@ -41,25 +41,31 @@ function plausibleFideId(v: unknown): string | undefined {
 const LICHESS_FORMAT_PRIORITY = ["rapid", "blitz", "classical", "bullet"];
 
 async function fetchJson(url: string, init: RequestInit, timeoutMs = 9000): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  // Chain the caller's abort signal into our timeout controller.
   const outer = init.signal as AbortSignal | undefined;
-  if (outer) {
-    if (outer.aborted) controller.abort();
-    else outer.addEventListener("abort", () => controller.abort(), { once: true });
-  }
-  try {
-    const res = await fetch(url, { ...init, signal: controller.signal });
-    // A 429 is "slow down", not "doesn't exist" — treating it as a missing
-    // account could silently lose the player. Wait once and retry.
-    if (res.status === 429 && !outer?.aborted) {
-      await new Promise((r) => setTimeout(r, 1500));
-      return await fetch(url, { ...init, signal: controller.signal });
+  // A 429 is "slow down", NEVER "doesn't exist" — treating it as a missing
+  // account silently loses the player mid-traversal. Retry with growing
+  // backoff; each attempt gets its own timeout so a backoff pause can't be
+  // killed by an earlier attempt's timer.
+  for (let attempt = 0; ; attempt++) {
+    if (outer?.aborted) throw new DOMException("Aborted", "AbortError");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onAbort = () => controller.abort();
+    if (outer) {
+      if (outer.aborted) controller.abort();
+      else outer.addEventListener("abort", onAbort, { once: true });
     }
-    return res;
-  } finally {
-    clearTimeout(timer);
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      if (res.status === 429 && attempt < 3 && !outer?.aborted) {
+        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+        continue;
+      }
+      return res;
+    } finally {
+      clearTimeout(timer);
+      outer?.removeEventListener("abort", onAbort);
+    }
   }
 }
 

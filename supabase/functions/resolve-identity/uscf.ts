@@ -413,8 +413,11 @@ export async function buildOnlineGraphForMember(
   opts: BuildGraphOptions = {}
 ): Promise<OnlineSection[]> {
   if (!member.hasOnline) return []; // no online ratings ⇒ nothing to traverse
-  const maxSections = opts.maxSections ?? 8;
-  const maxEvents = opts.maxEvents ?? 40;
+  // Generous defaults: the traversal must be able to work EVERY online
+  // tournament the player has. The only real ceiling is the edge function's
+  // own wall-clock limit — these keep a full build comfortably inside it.
+  const maxSections = opts.maxSections ?? 16;
+  const maxEvents = opts.maxEvents ?? 100;
 
   // Online-rated systems launched in 2020 — page back to that era (it can sit
   // many pages deep for active players) and ignore anything older.
@@ -443,7 +446,7 @@ export async function buildOnlineGraphForMember(
   let foundCount = 0;
   let unnamedMisses = 0;
   const perEvent = await mapLimit(candidates, 2, async (ev): Promise<Found[]> => {
-    if (foundCount >= maxSections || (unnamedMisses >= 8 && !named.has(ev))) return [];
+    if (foundCount >= maxSections || (unnamedMisses >= 20 && !named.has(ev))) return [];
     const { sections, startDate, endDate, name } = await fetchEventSections(ev.eventId);
     const evRef: UscfEventRef = { ...ev, name: ev.name || name || "", startDate: ev.startDate || startDate, endDate: ev.endDate || endDate };
     const metas = await mapLimit(sections, 2, async (sec) => {

@@ -13,11 +13,21 @@
 //      or Lichess swiss/arena whose public API returns the EXACT participant
 //      handles. Match those to the crosstable by real name; if every player but
 //      the target is claimed, the leftover handle IS the target (elimination).
-//   3. Seed hunt — resolve ANY section player's account (direct opponents
-//      first, then the whole roster) by careful name→handle guessing, with the
-//      strict rule that a guess only counts when the profile's real name
-//      matches. Seeds are never the answer — they are entry points.
-//   4. Pairing-chain BFS — from each seed, pull their games from the event's
+//   3. Google-index the TARGET — the `findUsernames` hook runs a ladder of
+//      site:-restricted Google searches (site:lichess.org "Name", state/USCF/
+//      club context, profile-URL mentions…) that tie real names to handles on
+//      INDEXED pages. A candidate only counts once it provably has games inside
+//      this event's date window; round-sequence alignment, membership in the
+//      event's linked tournament, or games against confirmed section players
+//      then close the case. A lead that exists but has no in-window games is
+//      the wrong username — we keep searching.
+//   4. Seed hunt — resolve ANY section player's account (direct opponents
+//      first, then the whole roster) the same Google-first way, date-verified
+//      against the event window. Platform name search (handle guessing +
+//      autocomplete) is the ABSOLUTE last resort, used only when the Google
+//      index offers nothing verifiable for that person. Seeds are never the
+//      answer — they are entry points.
+//   5. Pairing-chain BFS — from each seed, pull their games from the event's
 //      date window (Chess.com monthly archives / Lichess since-until export),
 //      keep the games scoped to the event (tournament/swiss linkage, else
 //      rated + expected time control), and align them 1:1 against that
@@ -26,20 +36,32 @@
 //      player 22 reveals player 10, who reveals player 15, … — until a chain
 //      reaches the target. No name needed at any hop: the pairing itself is
 //      the proof.
-//   5. If every event fails, recurse (depth 1) into a few direct opponents'
-//      OWN online histories via the `expandMember` hook to pin *their*
-//      handles, then come back and trace the shared event.
+//   6. If every event fails, recurse (depth 1) into direct opponents' OWN
+//      online histories via the `expandMember` hook to pin *their* handles,
+//      then come back and trace the shared event.
 //
 // A FIDE ID linked on a candidate profile is compared against the target's
 // USCF-registered FIDE ID: a match is near-decisive, a hard mismatch rejects.
+// Usernames are often reused across sites, so a handle found on one platform
+// is also echoed onto the other when the event could have run there.
 //
 // The US Chess half (crosstables) arrives via the edge function as the
 // `tournamentGraph`; this module does the online half wherever fetch exists
-// (browser, or Node for the CLI harness). Hard cases legitimately take minutes.
+// (browser, or Node for the CLI harness). There are NO request-count caps and
+// no meaningful time budget: the search runs until every avenue is exhausted
+// or the caller aborts. Politeness pacing (Lichess throttle, Google spacing)
+// is the only rate control. Hard cases legitimately take a long time.
 // ============================================================================
 
 import type { DiscoveredAccount, Evidence } from "./types";
-import type { TournamentGraph, GraphEvent, GraphGame, EventPlatformInfo } from "./graphTypes";
+import type {
+  TournamentGraph,
+  GraphEvent,
+  GraphGame,
+  EventPlatformInfo,
+  UsernameSearchRequest,
+  UsernameCandidate,
+} from "./graphTypes";
 import { verifyChesscom, verifyLichess, type VerifiedProfile } from "./verify";
 import {
   nameSimilarity,
@@ -50,17 +72,16 @@ import {
 } from "./confidence";
 
 // ---------------------------------------------------------------------------
-// Tuning
+// Tuning — pacing only. There are deliberately NO request-count caps: the
+// search must be able to grind through every tournament and every player
+// without stopping. The default budget is effectively "run until exhausted";
+// the UI's abort signal (or an explicit budgetMs, e.g. from the CLI) is the
+// only real stop.
 // ---------------------------------------------------------------------------
 
-const DEFAULT_BUDGET_MS = 210_000; // exhaustive by design — the UI can abort
+const DEFAULT_BUDGET_MS = 6 * 60 * 60_000; // effectively unbounded (6 h)
 const EVENT_MIN_MS = 30_000; // minimum slice each event gets before moving on
 const SEED_BATCH = 4; // seed candidates resolved in parallel when starving
-const MAX_SEEDS_PER_EVENT = 30; // roster members we try to resolve per event
-const MAX_MEMBERS_RESOLVED = 90; // global cap on name→handle seed attempts
-const ROSTER_VERIFY_CAP = 40; // roster handles verified per tournament roster
-const SCAN_VERIFY_CAP = 24; // opponent handles verified per archive name-scan
-const DEEP_OPPONENTS = 3; // opponents whose own history we expand at depth 0
 const DAY = 86_400_000;
 
 export type OnlinePlatform = "chesscom" | "lichess";
@@ -209,7 +230,7 @@ function monthsBetween(startMs: number, endMs: number): { y: number; m: number }
   d.setUTCDate(1);
   d.setUTCHours(0, 0, 0, 0);
   const last = new Date(endMs);
-  while (d.getTime() <= last.getTime() && out.length < 6) {
+  while (d.getTime() <= last.getTime() && out.length < 12) {
     out.push({ y: d.getUTCFullYear(), m: d.getUTCMonth() + 1 });
     d.setUTCMonth(d.getUTCMonth() + 1);
   }
@@ -286,8 +307,11 @@ async function lichessWindowGames(username: string, startMs: number, endMs: numb
     )}&max=300&pgnInJson=false&clocks=false&evals=false&opening=false`;
     await lichessThrottle();
     let res = await fetch(url, { headers: { Accept: "application/x-ndjson" }, signal });
-    if (res.status === 429 && !signal?.aborted) {
-      await new Promise((r) => setTimeout(r, 2500));
+    // A 429 means "slow down", never "no games" — losing games here silently
+    // breaks the traversal, so back off hard and keep retrying.
+    for (let attempt = 0; res.status === 429 && attempt < 4 && !signal?.aborted; attempt++) {
+      await new Promise((r) => setTimeout(r, 2500 * (attempt + 1)));
+      await lichessThrottle();
       res = await fetch(url, { headers: { Accept: "application/x-ndjson" }, signal });
     }
     if (!res.ok) return out;
@@ -493,6 +517,10 @@ export interface TraversalHooks {
   discoverPlatform?: (ev: GraphEvent) => Promise<EventPlatformInfo | null>;
   /** Fetch a specific member's own online tournament graph (edge, MUIR). */
   expandMember?: (memberId: string) => Promise<TournamentGraph | null>;
+  /** Google-index username search (site:-restricted query ladder) — THE way a
+   *  person's handles are discovered from their name. Results are leads that
+   *  the engine verifies against real games in the event's date window. */
+  findUsernames?: (req: UsernameSearchRequest) => Promise<UsernameCandidate[] | null>;
 }
 
 export interface TraversalOptions {
@@ -612,20 +640,99 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     mapped.set(memberId, per);
   };
 
-  let seedAttempts = 0;
+  // --- Google-index username discovery (the PRIMARY name→handle route) -------
+  // One index search per person (memoized): the answer doesn't change between
+  // events. Candidates are only ACCEPTED per event, once date-verified there.
+  const googleCandidatesCache = new Map<string, Promise<UsernameCandidate[]>>();
+  const googleCandidatesFor = (memberId: string, ev: GraphEvent): Promise<UsernameCandidate[]> => {
+    if (!hooks.findUsernames) return Promise.resolve([]);
+    const hit = googleCandidatesCache.get(memberId);
+    if (hit) return hit;
+    const name = memberName.get(memberId) || "";
+    if (!name) return Promise.resolve([]);
+    const req: UsernameSearchRequest = {
+      name,
+      uscfRating: memberRating.get(memberId),
+      state: memberId === targetId ? graph.rootState : undefined,
+      fideId: memberId === targetId ? targetFideId : undefined,
+      eventName: ev.name,
+      eventDate: ev.startDate,
+    };
+    const p = hooks
+      .findUsernames(req)
+      .then((r) => r || [])
+      .catch(() => [] as UsernameCandidate[]);
+    googleCandidatesCache.set(memberId, p);
+    return p;
+  };
+
+  /** Candidates to try on `platform`: same-platform finds first (discovery
+   *  order), then handles found on the OTHER platform — people frequently use
+   *  the same username on both sites, so a Lichess find is worth one cheap
+   *  check on Chess.com (and vice versa) when the event may have run there. */
+  const candidatesForPlatform = (cands: UsernameCandidate[], platform: OnlinePlatform): UsernameCandidate[] => {
+    const seen = new Set<string>();
+    const out: UsernameCandidate[] = [];
+    for (const c of cands) {
+      const k = c.username.toLowerCase();
+      if (c.platform !== platform || seen.has(k)) continue;
+      seen.add(k);
+      out.push(c);
+    }
+    for (const c of cands) {
+      const k = c.username.toLowerCase();
+      if (c.platform === platform || seen.has(k)) continue;
+      seen.add(k);
+      out.push({ ...c, platform, note: `same handle found on ${platformLabel(c.platform)}` });
+    }
+    return out;
+  };
+
   const seedCache = new Map<string, Promise<VerifiedProfile | null>>();
 
-  /** Resolve a NON-target member's account by name (guesses + autocomplete).
-   *  Strictly gated on the profile's real name so a random handle can't sneak in. */
-  const resolveMemberOn = (memberId: string, platform: OnlinePlatform): Promise<VerifiedProfile | null> => {
-    const key = `${memberId}:${platform}`;
+  /** Resolve a NON-target member's account. PRIMARY: the Google index, with
+   *  each lead verified by having games inside this event's date window (a
+   *  lead with no in-window games is the wrong username — keep going). LAST
+   *  RESORT, only when the index yields nothing verifiable: careful handle
+   *  guessing + Lichess autocomplete, strictly gated on the profile's real
+   *  name so a random handle can't sneak in. */
+  const resolveMemberOn = (memberId: string, platform: OnlinePlatform, ev: GraphEvent): Promise<VerifiedProfile | null> => {
+    const key = `${memberId}:${platform}:${ev.eventId}`;
     const hit = seedCache.get(key);
     if (hit) return hit;
     const name = memberName.get(memberId) || "";
     const promise = (async (): Promise<VerifiedProfile | null> => {
       if (!name || memberId === targetId) return null;
-      if (seedAttempts >= MAX_MEMBERS_RESOLVED) return null;
-      seedAttempts++;
+      const app = (appearances.get(memberId) || []).find((a) => a.event.eventId === ev.eventId);
+
+      // 1. PRIMARY: Google-index leads, date-verified against this event.
+      const leads = candidatesForPlatform(await googleCandidatesFor(memberId, ev), platform);
+      for (const cand of leads) {
+        if (outOfTime()) return null;
+        if (dudHandles.has(`${platform}:${cand.username.toLowerCase()}`)) continue;
+        const prof = await verifyOn(platform, cand.username);
+        if (!prof || dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) continue;
+        // A profile whose real name clearly belongs to somebody else is a bad
+        // extraction (e.g. a coach mentioned on the same page) — skip it.
+        if (prof.displayName && nameSimilarity(name, prof.displayName) < 0.25) continue;
+        if (app) {
+          const games = await windowGames(platform, prof.username, app.startMs, app.endMs);
+          if (!games.length) {
+            log(
+              `Google lead @${prof.username} (${name}) played no ${platformLabel(platform)} games during "${ev.name}" — not the right account for this event; trying the next lead.`
+            );
+            continue;
+          }
+        }
+        log(
+          `Google index: ${name} → @${prof.username} on ${platformLabel(platform)}${
+            cand.sourceUrl ? ` via ${cand.sourceUrl}` : ""
+          } — has games in the event window.`
+        );
+        return prof;
+      }
+
+      // 2. ABSOLUTE LAST RESORT: platform-side guessing (only after Google).
       const gate = (prof: VerifiedProfile): boolean => {
         const sim = prof.displayName ? nameSimilarity(name, prof.displayName) : 0;
         const handleSim = nameSimilarity(name, prof.username);
@@ -663,7 +770,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
   // --- Recording the target ---------------------------------------------------
   interface FoundVia {
-    method: "pairing" | "roster-name" | "elimination" | "opponent-archive";
+    method: "pairing" | "roster-name" | "elimination" | "opponent-archive" | "google" | "google-lead";
     event: GraphEvent;
     link?: EventLink;
     chain?: string[];
@@ -673,6 +780,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     checkedRounds?: number;
     totalRounds?: number;
     game?: ArchiveGame;
+    /** Google-index provenance (methods "google" / "google-lead"). */
+    sourceUrl?: string;
+    /** In-window games against handles known to belong to this section. */
+    sectionOverlap?: number;
   }
 
   const foundKeys = new Set<string>();
@@ -685,8 +796,6 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       return false;
     }
     const key = `${platform}:${profile.username.toLowerCase()}`;
-    if (foundKeys.has(key)) return true;
-    foundKeys.add(key);
 
     const ev = via.event;
     const evidence: Evidence[] = [];
@@ -747,6 +856,44 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           source: "uscf-graph",
         });
         break;
+      case "google":
+        evidence.push({
+          kind: "name-match",
+          weight: 1.8,
+          label: `Google index ties "${targetName}" to @${profile.username}${via.sourceUrl ? ` (${via.sourceUrl})` : ""}`,
+          source: "uscf-graph",
+        });
+        if (via.checkedRounds) {
+          evidence.push({
+            kind: "cross-reference",
+            weight: Math.min(1.8, 0.6 + 0.2 * via.checkedRounds),
+            label: `${via.checkedRounds}/${via.totalRounds ?? via.checkedRounds} round results match the USCF crosstable exactly`,
+            source: "uscf-graph",
+          });
+        }
+        if (via.sectionOverlap) {
+          evidence.push({
+            kind: "shared-opponent",
+            weight: Math.min(1.6, 0.8 * via.sectionOverlap),
+            label: `${via.sectionOverlap} in-window game(s) against confirmed section players`,
+            source: "uscf-graph",
+          });
+        }
+        break;
+      case "google-lead":
+        evidence.push({
+          kind: "name-match",
+          weight: 1.4,
+          label: `Google index ties "${targetName}" to @${profile.username}${via.sourceUrl ? ` (${via.sourceUrl})` : ""}`,
+          source: "uscf-graph",
+        });
+        evidence.push({
+          kind: "other",
+          weight: -0.4,
+          label: `Has games during "${ev.name}" but none could be tied to the event itself yet`,
+          source: "uscf-graph",
+        });
+        break;
     }
 
     if (via.link) {
@@ -767,7 +914,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
     // Positive-only name corroboration for structural methods (a pairing hit
     // must not be sunk by a missing/whimsical display name).
-    if (via.method === "pairing" || via.method === "elimination") {
+    if (via.method === "pairing" || via.method === "elimination" || via.method === "google" || via.method === "google-lead") {
       const sim = nameSimilarity(targetName, profile.displayName || "");
       if (profile.displayName && sim >= 0.6) {
         evidence.push({
@@ -789,6 +936,20 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         source: "uscf-graph",
       });
     }
+    // Country sanity: a USCF (US federation) member's account normally flies a
+    // US flag or none at all — a different flag is a mild strike, never fatal
+    // (dual-federation players exist).
+    if (profile.country) {
+      const isUs = profile.country.trim().slice(-2).toUpperCase() === "US";
+      evidence.push({
+        kind: "country-match",
+        weight: isUs ? 0.3 : -0.35,
+        label: isUs
+          ? "Profile country US matches the US Chess federation"
+          : `Profile lists country ${profile.country} for a US Chess member`,
+        source: "uscf-graph",
+      });
+    }
     evidence.push({ kind: "account-verified", weight: 0.5, label: `Account confirmed live via ${platformLabel(platform)} API`, source: "uscf-graph" });
     if (effTargetRating && profile.rating) {
       evidence.push({
@@ -799,7 +960,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       });
     }
 
-    accounts.push({
+    const account: DiscoveredAccount = {
       platform,
       username: profile.username,
       displayName: profile.displayName,
@@ -814,7 +975,17 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       verified: true,
       confidence: scoreFromEvidence(evidence, -0.5),
       evidence,
-    });
+    };
+    if (foundKeys.has(key)) {
+      // Already recorded — keep whichever evidence trail is stronger (a
+      // google-lead upgraded by a later structural proof, or vice versa).
+      const idx = accounts.findIndex((a) => a.platform === platform && a.username.toLowerCase() === profile.username.toLowerCase());
+      if (idx >= 0 && account.confidence > accounts[idx].confidence) accounts[idx] = account;
+      else if (idx < 0) accounts.push(account);
+      return true;
+    }
+    foundKeys.add(key);
+    accounts.push(account);
     const how =
       via.method === "pairing"
         ? `pairing chain ${(via.chain || []).concat(via.viaName || "").filter(Boolean).join(" → ")} in "${ev.name}"`
@@ -822,8 +993,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         ? `elimination over the tournament roster of "${ev.name}"`
         : via.method === "roster-name"
         ? `the participant roster of "${ev.name}"`
+        : via.method === "google"
+        ? `the Google index, verified against "${ev.name}"'s games`
+        : via.method === "google-lead"
+        ? `the Google index (games in the "${ev.name}" window; structural proof still pending)`
         : `tracing ${via.viaName}'s games in "${ev.name}"`;
-    log(`✔ Match! ${targetName} plays ${platformLabel(platform)} as @${profile.username} — found via ${how}.`);
+    if (via.method === "google-lead") {
+      log(`Google-index lead: ${targetName} may play ${platformLabel(platform)} as @${profile.username} — found via ${how}.`);
+    } else {
+      log(`✔ Match! ${targetName} plays ${platformLabel(platform)} as @${profile.username} — found via ${how}.`);
+    }
     return true;
   };
 
@@ -864,7 +1043,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
     let found = false;
     await pool(
-      handles.slice(0, ROSTER_VERIFY_CAP),
+      handles,
       5,
       async (handle) => {
         if (found || outOfTime(localDeadline)) return;
@@ -924,11 +1103,6 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     oppSeen: Map<string, number>;
     /** Seed queue (present on real event states; duds get requeued here). */
     seedOrder?: string[];
-    /** Consecutive dud seeds per platform — a long streak with no live source
-     *  means the event wasn't hosted there (e.g. it secretly ran on ICC). */
-    dudStreak?: Map<OnlinePlatform, number>;
-    /** Platforms where at least one section player HAS games in the window. */
-    liveSources?: Set<OnlinePlatform>;
   }
 
   /** Queue a mapped member for tracing — the target's own opponents go FIRST:
@@ -960,24 +1134,25 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const games = await windowGames(platform, handle, app.startMs, app.endMs);
     if (!games.length) {
       log(`@${handle} (${srcName}) played no ${platformLabel(platform)} games in that window — likely a namesake or second account.`);
-      state.dudStreak?.set(platform, (state.dudStreak.get(platform) || 0) + 1);
-      // A name-guessed seed that never played the event is a dud: blacklist the
-      // handle, unmap, and — for the target's own opponents, the highest-value
+      // A seed that never played the event is a dud: blacklist the handle,
+      // unmap, and — for the target's own opponents, the highest-value
       // sources — requeue the member so their REAL account can win.
-      if (mapping.how === "seed" && (dudCount.get(memberId) || 0) < 2) {
+      if (mapping.how === "seed" && (dudCount.get(memberId) || 0) < 3) {
         dudCount.set(memberId, (dudCount.get(memberId) || 0) + 1);
         dudHandles.add(`${platform}:${handle.toLowerCase()}`);
-        seedCache.delete(`${memberId}:${platform}`);
+        // Seed resolutions are cached per event — clear them all so the next
+        // attempt can move past the blacklisted handle.
+        for (const k of Array.from(seedCache.keys())) {
+          if (k.startsWith(`${memberId}:${platform}:`)) seedCache.delete(k);
+        }
         mapped.get(memberId)?.delete(platform);
         if (directOpponents.has(memberId)) {
           state.seedOrder?.push(memberId);
-          log(`Retrying ${srcName} with different handle guesses…`);
+          log(`Retrying ${srcName} with their remaining Google leads and handle guesses…`);
         }
       }
       return false;
     }
-    state.liveSources?.add(platform);
-    state.dudStreak?.set(platform, 0);
 
     // (a) New tournament linkage revealed by the source's games?
     for (const link of linksFromGames(games)) {
@@ -1091,7 +1266,6 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const candidates = Array.from(byHandle.entries())
       .map(([k, g]) => ({ g, s: scoreCand(k, g) }))
       .sort((a, b) => b.s - a.s)
-      .slice(0, SCAN_VERIFY_CAP)
       .map((c) => c.g);
     // Record this source's scoped opponents for later sources' ranking.
     for (const k of scopedKeys) state.oppSeen.set(k, (state.oppSeen.get(k) || 0) + 1);
@@ -1141,15 +1315,134 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   };
 
   // ---------------------------------------------------------------------------
+  // The target via the Google index: search once, then test the leads against
+  // EVERY event — the right username must have games inside the event's date
+  // window; alignment with the target's own crosstable rounds, membership in
+  // the event's linked platform tournament, or games against confirmed section
+  // players then upgrade the lead into a confirmed match. A lead whose games
+  // don't fit keeps the search going — never stop on an unverified result.
+  // ---------------------------------------------------------------------------
+  const googleTargetPassDone = new Set<string>(); // `${eventId}:${phase}`
+  const googleTargetRejects = new Set<string>(); // hard rejects (FIDE mismatch)
+
+  const tryGoogleTarget = async (
+    ev: GraphEvent,
+    state: EventState,
+    platforms: OnlinePlatform[],
+    localDeadline: number,
+    phase: "early" | "late"
+  ): Promise<boolean> => {
+    if (!hooks.findUsernames) return false;
+    const passKey = `${ev.eventId}:${phase}`;
+    if (googleTargetPassDone.has(passKey)) return false;
+    googleTargetPassDone.add(passKey);
+    const app = (appearances.get(targetId) || []).find((a) => a.event.eventId === ev.eventId);
+    if (!app) return false;
+
+    const cands = await googleCandidatesFor(targetId, ev);
+    if (!cands.length) {
+      if (phase === "early") log(`The Google index has no username candidates for ${targetName} yet — proceeding with the tournament traversal.`);
+      return false;
+    }
+    if (phase === "early") {
+      log(`Google index produced ${cands.length} username lead(s) for ${targetName} — verifying each against "${ev.name}"'s dates…`);
+    }
+
+    for (const platform of platforms) {
+      for (const cand of candidatesForPlatform(cands, platform)) {
+        if (outOfTime(localDeadline)) return false;
+        const rejectKey = `${platform}:${cand.username.toLowerCase()}`;
+        if (googleTargetRejects.has(rejectKey)) continue;
+        const prof = await verifyOn(platform, cand.username);
+        if (!prof) continue;
+        if (targetFideId && prof.fideId && digits(prof.fideId) !== targetFideId) {
+          googleTargetRejects.add(rejectKey);
+          log(`Google lead @${prof.username} links FIDE ID ${prof.fideId} — contradicts ${targetName}'s (${targetFideId}); rejected.`);
+          continue;
+        }
+        const games = await windowGames(platform, prof.username, app.startMs, app.endMs);
+        if (!games.length) {
+          if (phase === "early") {
+            log(
+              `Google lead @${prof.username} played no ${platformLabel(platform)} games during "${ev.name}" — not the right username for this event; continuing the search.`
+            );
+          }
+          continue;
+        }
+        // The lead's own games can reveal the event's tournament link — free
+        // fuel for the roster/elimination path even if the lead is wrong.
+        for (const link of linksFromGames(games)) {
+          if (!state.links.has(linkKey(link))) state.links.set(linkKey(link), link);
+        }
+        // Scope the games to the event exactly like traceFromSource does.
+        let scoped: ArchiveGame[] = [];
+        let viaLink: EventLink | undefined;
+        for (const link of state.links.values()) {
+          if (link.platform !== platform) continue;
+          const inLink = games.filter((g) => gameInLink(g, link));
+          if (inLink.length) {
+            scoped = inLink;
+            viaLink = link;
+            break;
+          }
+        }
+        if (!scoped.length) {
+          const classes = expectedTimeClasses(ev);
+          scoped = games.filter((g) => !g.timeClass || classes.has(g.timeClass));
+        }
+        let alignment = alignRounds(app.rounds, scoped, !!viaLink);
+        if (!alignment && !viaLink) {
+          const unrated = scoped.filter((g) => !g.rated);
+          if (unrated.length && unrated.length !== scoped.length) alignment = alignRounds(app.rounds, unrated, false);
+        }
+        // Do the lead's in-window opponents include handles already proven to
+        // be section players?
+        const knownSectionHandles = new Set<string>();
+        for (const p of ev.players) {
+          const m = mapped.get(p.uscfId)?.get(platform);
+          if (m) knownSectionHandles.add(m.profile.username.toLowerCase());
+        }
+        const overlap = scoped.filter(
+          (g) => knownSectionHandles.has(g.oppHandle.toLowerCase()) || (state.oppSeen.get(g.oppHandle.toLowerCase()) || 0) > 0
+        ).length;
+
+        if (alignment || viaLink || overlap > 0) {
+          if (
+            recordTarget(platform, prof, {
+              method: "google",
+              event: ev,
+              link: viaLink,
+              game: scoped[0] || games[0],
+              checkedRounds: alignment?.checked,
+              totalRounds: app.rounds.length,
+              sourceUrl: cand.sourceUrl,
+              sectionOverlap: overlap || undefined,
+            })
+          )
+            return true;
+          continue;
+        }
+        // Games in the window but nothing tying them to THIS event's structure
+        // yet: record the lead (it surfaces in results) and keep digging — the
+        // late phase re-tests it once links and mapped handles are richer.
+        recordTarget(platform, prof, {
+          method: "google-lead",
+          event: ev,
+          game: scoped[0] || games[0],
+          sourceUrl: cand.sourceUrl,
+        });
+      }
+    }
+    return false;
+  };
+
+  // ---------------------------------------------------------------------------
   // Work one event to exhaustion (platform → roster → seeds → pairing BFS).
   // ---------------------------------------------------------------------------
   interface WorkState extends EventState {
     seedOrder: string[];
     platforms: OnlinePlatform[] | null;
     seedIdx: number;
-    seedsTried: number;
-    lichessSeedMisses: number;
-    lichessSeedHits: number;
     /** No seeds left and nothing queued — revisiting is pointless. */
     exhausted: boolean;
   }
@@ -1171,9 +1464,6 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         seedOrder: [],
         platforms: null,
         seedIdx: 0,
-        seedsTried: 0,
-        lichessSeedMisses: 0,
-        lichessSeedHits: 0,
         exhausted: false,
       };
       workStates.set(ev.eventId, ws);
@@ -1229,6 +1519,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       if (await tryRoster(ev, link, localDeadline, state)) return true;
     }
 
+    // 2b. The target straight from the Google index — the cheapest possible
+    // win. Every lead is verified against this event's date window before it
+    // counts; unverified leads just keep the traversal going.
+    if (await tryGoogleTarget(ev, state, platforms, localDeadline, "early")) return true;
+
     // 3. Free seeds: members already mapped (in other events, or since the last
     // visit here) who are in this section and haven't been traced yet.
     for (const p of roster) {
@@ -1258,17 +1553,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       log(`Back to "${ev.name}" with time to spare — resuming where we left off.`);
     }
 
-    // 4. BFS with lazy seeding.
+    // 4. BFS with lazy seeding. No seed caps: every section player is fair
+    // game until the event is genuinely exhausted.
     while (!outOfTime(localDeadline)) {
       if (!state.frontier.length) {
-        // Starving — resolve the next batch of seed candidates by name. Keep a
-        // healthy reserve of the event slice for actually TRACING the seeds
-        // (resolution is the expensive, throttled part and must not eat it all).
-        if (localDeadline - Date.now() < 20_000) break;
+        // Starving — resolve the next batch of seed candidates (Google-first).
+        // When a finite deadline is set, keep a reserve for TRACING the seeds.
+        if (isFinite(localDeadline) && localDeadline - Date.now() < 20_000) break;
         const batch: string[] = [];
-        while (batch.length < SEED_BATCH && ws.seedIdx < ws.seedOrder.length && ws.seedsTried < MAX_SEEDS_PER_EVENT) {
+        while (batch.length < SEED_BATCH && ws.seedIdx < ws.seedOrder.length) {
           const memberId = ws.seedOrder[ws.seedIdx++];
-          ws.seedsTried++;
           if (platforms.some((p) => !mapped.get(memberId)?.has(p))) batch.push(memberId);
         }
         if (!batch.length) {
@@ -1279,21 +1573,17 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         const order = [...platforms].sort((a, b) => (a === "chesscom" ? -1 : 0) - (b === "chesscom" ? -1 : 0));
         await Promise.all(
           batch.map(async (memberId) => {
-            // Chess.com first (fast, parallel-friendly); Lichess only when it
-            // fails — Lichess's per-IP limits make speculative guessing dear.
+            // Chess.com first (fast, parallel-friendly); Lichess when it fails.
             for (const platform of order) {
               if (outOfTime(localDeadline)) return;
               if (mapped.get(memberId)?.has(platform)) continue;
-              if (platform === "lichess" && platforms.length > 1 && ws.lichessSeedMisses >= 5 && ws.lichessSeedHits === 0) continue;
-              const prof = await resolveMemberOn(memberId, platform);
+              const prof = await resolveMemberOn(memberId, platform, ev);
               if (prof) {
-                if (platform === "lichess") ws.lichessSeedHits++;
                 setMapping(memberId, platform, { profile: prof, how: "seed", chain: [] });
                 enqueue(state, { memberId, platform, mapping: mapped.get(memberId)!.get(platform)! });
                 log(`Found ${platformLabel(platform)} @${prof.username} for section player ${memberName.get(memberId)} — tracing their event games…`);
                 return; // one platform is enough for a seed
               }
-              if (platform === "lichess") ws.lichessSeedMisses++;
             }
           })
         );
@@ -1325,6 +1615,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         if (await traceFromSource(ev, state, src.memberId, src.platform, src.mapping, localDeadline)) return true;
       }
     }
+
+    // Re-test the target's Google leads now that this event's links, rosters
+    // and mapped section players are as rich as they will get.
+    if (!outOfTime(localDeadline) && (await tryGoogleTarget(ev, state, platforms, localDeadline, "late"))) return true;
     return false;
   };
 
@@ -1349,7 +1643,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   log(
     `Tournament-first search for ${targetName}: ${events.length} online event${events.length === 1 ? "" : "s"}, ${totalOpp} direct opponent${
       totalOpp === 1 ? "" : "s"
-    } to work with. Name-based platform search stays OFF unless every event is exhausted.`
+    } to work with. Names resolve through the Google index and get date-verified; platform name search stays OFF unless the index has nothing.`
   );
 
   let found = false;
@@ -1357,8 +1651,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const pending = events.filter((e) => !workStates.get(e.eventId)?.exhausted);
     if (!pending.length) break;
     if (pass > 0) {
+      const secsLeft = Math.round((deadline - Date.now()) / 1000);
       log(
-        `${Math.round((deadline - Date.now()) / 1000)}s left on the clock and ${pending.length} event(s) still have open leads — going back in.`
+        `${pending.length} event(s) still have open leads — going back in${secsLeft < 3600 ? ` (${secsLeft}s left on the clock)` : ""}.`
       );
     }
     for (let i = 0; i < pending.length && !found; i++) {
@@ -1374,10 +1669,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // Deep phase: recurse into direct opponents' own online histories.
   // ---------------------------------------------------------------------------
   if (!found && depth === 0 && hooks.expandMember && deadline - Date.now() > 35_000) {
+    // Every unmapped direct opponent is worth a deep dive — most-present first.
     const oppByPresence = Array.from(directOpponents)
       .filter((id) => !mapped.has(id))
-      .sort((a, b) => (appearances.get(b)?.length || 0) - (appearances.get(a)?.length || 0))
-      .slice(0, DEEP_OPPONENTS);
+      .sort((a, b) => (appearances.get(b)?.length || 0) - (appearances.get(a)?.length || 0));
     if (oppByPresence.length) {
       log(`Still nothing — going deeper: exploring ${oppByPresence.length} opponents' own tournament histories to pin their usernames first.`);
     }
@@ -1392,8 +1687,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         targetRating: memberRating.get(oppId),
         signal,
         log,
-        budgetMs: Math.min(60_000, deadline - Date.now() - 15_000),
-        hooks: { discoverPlatform: hooks.discoverPlatform }, // no further expansion
+        budgetMs: Math.min(300_000, Math.max(60_000, deadline - Date.now() - 15_000)),
+        // Google-index + flyer search stay available; no further expansion.
+        hooks: { discoverPlatform: hooks.discoverPlatform, findUsernames: hooks.findUsernames },
         depth: 1,
       });
       for (const acc of subResult.accounts) {

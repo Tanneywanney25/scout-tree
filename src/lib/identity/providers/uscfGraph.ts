@@ -15,6 +15,7 @@ import {
   getTournamentGraph,
   discoverEventPlatform,
   expandMemberGraph,
+  findUsernameCandidates,
   type TournamentGraph,
 } from "./edgeClient";
 import {
@@ -32,6 +33,7 @@ export function runGraphTraversal(graph: TournamentGraph, opts: TraversalOptions
     hooks: {
       discoverPlatform: (ev) => discoverEventPlatform(ev, opts.signal),
       expandMember: (memberId) => expandMemberGraph(memberId, opts.signal),
+      findUsernames: (req) => findUsernameCandidates(req, opts.signal),
       ...(opts.hooks || {}),
     },
   });

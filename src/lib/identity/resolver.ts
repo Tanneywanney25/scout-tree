@@ -15,11 +15,14 @@
 //      seeds, pairing-chain BFS through the crosstable, and a deep dive into
 //      opponents' own histories). Usernames found here are anchored to real
 //      games the person provably played.
-//   3. LAST RESORT — only when the traversal finds nothing do we search the
-//      platforms by name (autocomplete / handle guesses / AI suggestions).
-//      Those results are capped and explicitly flagged: a name match alone can
-//      easily be a namesake — the 200-rated John Smith is not the 2000-rated
-//      one you're scouting.
+//   3. FALLBACKS, in strict trust order — only when the traversal finds
+//      nothing: FIRST the Google index (site:-restricted searches tying the
+//      real name to indexed profile pages), and only if that yields nothing
+//      verifiable, platform name search (autocomplete / handle guesses / AI
+//      suggestions) as the absolute last resort. Everything found down here is
+//      capped and explicitly flagged: without a tournament-verified game it
+//      can still be a namesake — the 200-rated John Smith is not the
+//      2000-rated one you're scouting.
 //   4. Cluster the real-world identity fragments with the discovered accounts,
 //      score each cluster's confidence in log-odds space, and rank.
 //
@@ -40,7 +43,7 @@ import type {
   Provider,
 } from "./types";
 import { PROVIDERS, NAME_FALLBACK_PROVIDERS } from "./providers";
-import { getTournamentGraph } from "./providers/edgeClient";
+import { getTournamentGraph, findUsernameCandidates } from "./providers/edgeClient";
 import { runGraphTraversal } from "./providers/uscfGraph";
 import {
   scoreFromEvidence,
@@ -78,6 +81,11 @@ const SINGLE_VALUED = new Set<Evidence["kind"]>([
 
 /** Cap on what a purely name-based (last-resort) account may claim. */
 const NAME_FALLBACK_MAX_CONFIDENCE = 0.62;
+
+/** Cap for a Google-index find with no tournament-verified game behind it —
+ *  more trustworthy than platform name search (an indexed page ties the name
+ *  to the handle) but still short of a tournament-anchored identification. */
+const GOOGLE_FALLBACK_MAX_CONFIDENCE = 0.7;
 
 function collapseForScoring(evidence: Evidence[]): Evidence[] {
   const best = new Map<string, Evidence>();
@@ -378,58 +386,119 @@ export async function resolveIdentity(
   }
 
   if (!traversalFound && !hintStrong && !signal?.aborted) {
-    if (graphAvailable) {
-      emit(
-        "Every tournament avenue came up empty — falling back to name-based platform search (last resort; results may be a namesake).",
-        "info"
+    // --- 3a. GOOGLE INDEX (primary fallback) ---------------------------------
+    // site:-restricted searches tying the real name to indexed profile pages.
+    // Platform name search only runs if this yields nothing verifiable.
+    emit(
+      graphAvailable
+        ? "Every tournament avenue came up empty — asking the Google index for the username before any name search."
+        : "No tournament history to trace — asking the Google index for the username before any name search.",
+      "info"
+    );
+
+    let googleVerified = 0;
+    try {
+      const leads = await findUsernameCandidates(
+        {
+          name: query.name,
+          state: query.state,
+          clubOrSchool: query.club || query.school,
+          uscfRating: targetRating,
+          fideId: targetFideId,
+          eventName: query.tournamentName,
+        },
+        signal
       );
-    } else {
-      emit("Falling back to name-based platform search (last resort; results may be a namesake).", "info");
+      if (leads.length) {
+        emit(`Google index returned ${leads.length} candidate handle(s) — verifying against the live platforms…`, "running");
+        for (const lead of leads) {
+          if (signal?.aborted) break;
+          const acc = await verifyCandidate(lead.platform, lead.username, { attachName: query.name });
+          if (!acc) continue;
+          const evidence: Evidence[] = [
+            ...acc.evidence,
+            {
+              kind: "cross-reference",
+              weight: 1.2,
+              label: `Google index ties "${query.name}" to this profile${lead.sourceUrl ? ` (${lead.sourceUrl})` : ""}`,
+              source: "resolver",
+            },
+            {
+              kind: "other",
+              weight: -0.5,
+              label: "Not verified through any tournament game — could still be a namesake",
+              source: "resolver",
+            },
+          ];
+          addToPool(
+            { ...acc, evidence, confidence: Math.min(scoreFromEvidence(evidence), GOOGLE_FALLBACK_MAX_CONFIDENCE) },
+            query.name
+          );
+          googleVerified++;
+        }
+        if (googleVerified) emit(`Verified ${googleVerified} Google-indexed handle(s).`, "done");
+      }
+    } catch {
+      /* Google fallback is best-effort */
     }
 
-    const demote = (acc: DiscoveredAccount): DiscoveredAccount => {
-      const evidence: Evidence[] = [
-        ...acc.evidence,
-        {
-          kind: "other",
-          weight: -0.7,
-          label: "Found by name search only — not verified through any tournament game; could be a namesake",
-          source: "resolver",
-        },
-      ];
-      return {
-        ...acc,
-        evidence,
-        confidence: Math.min(scoreFromEvidence(evidence), NAME_FALLBACK_MAX_CONFIDENCE),
-      };
-    };
+    // --- 3b. ABSOLUTE LAST RESORT: platform name search ----------------------
+    if (googleVerified === 0 && !signal?.aborted) {
+      emit("The Google index gave nothing verifiable — falling back to platform name search (results may be a namesake).", "info");
 
-    const fallbackResults = await runProviders(NAME_FALLBACK_PROVIDERS);
-    for (const r of fallbackResults) {
-      for (const acc of r.accounts) addToPool(demote(acc));
-      // Their fragments may carry further suggestions worth one verification.
-      for (const frag of r.identities) {
-        for (const s of frag.suggestedAccounts || []) {
-          const key = poolKey(s.platform, s.username);
-          if (!inPool.has(key) && !suggestions.some((x) => poolKey(x.platform, x.username) === key)) {
-            suggestions.push({ ...s, attachName: frag.name });
+      const demote = (acc: DiscoveredAccount): DiscoveredAccount => {
+        const evidence: Evidence[] = [
+          ...acc.evidence,
+          {
+            kind: "other",
+            weight: -0.7,
+            label: "Found by name search only — not verified through any tournament game; could be a namesake",
+            source: "resolver",
+          },
+        ];
+        return {
+          ...acc,
+          evidence,
+          confidence: Math.min(scoreFromEvidence(evidence), NAME_FALLBACK_MAX_CONFIDENCE),
+        };
+      };
+
+      const fallbackResults = await runProviders(NAME_FALLBACK_PROVIDERS);
+      for (const r of fallbackResults) {
+        for (const acc of r.accounts) addToPool(demote(acc));
+        // Their fragments may carry further suggestions worth one verification.
+        for (const frag of r.identities) {
+          for (const s of frag.suggestedAccounts || []) {
+            const key = poolKey(s.platform, s.username);
+            if (!inPool.has(key) && !suggestions.some((x) => poolKey(x.platform, x.username) === key)) {
+              suggestions.push({ ...s, attachName: frag.name });
+            }
           }
         }
       }
-    }
 
-    if (suggestions.length) {
-      emit(`Verifying ${suggestions.length} suggested handle(s) against the live platforms…`, "running");
-      const CONCURRENCY = 4;
-      for (let i = 0; i < suggestions.length; i += CONCURRENCY) {
-        if (signal?.aborted) break;
-        const batch = suggestions.slice(i, i + CONCURRENCY);
-        const verified = await Promise.all(
-          batch.map(async (s) => await verifyCandidate(s.platform, s.username, { attachName: s.attachName }))
-        );
-        batch.forEach((s, j) => {
-          const acc = verified[j];
-          if (acc) addToPool(demote(acc), s.attachName);
+      if (suggestions.length) {
+        emit(`Verifying ${suggestions.length} suggested handle(s) against the live platforms…`, "running");
+        const CONCURRENCY = 4;
+        for (let i = 0; i < suggestions.length; i += CONCURRENCY) {
+          if (signal?.aborted) break;
+          const batch = suggestions.slice(i, i + CONCURRENCY);
+          const verified = await Promise.all(
+            batch.map(async (s) => await verifyCandidate(s.platform, s.username, { attachName: s.attachName }))
+          );
+          batch.forEach((s, j) => {
+            const acc = verified[j];
+            if (acc) addToPool(demote(acc), s.attachName);
+          });
+        }
+      }
+    } else if (googleVerified > 0) {
+      for (const p of NAME_FALLBACK_PROVIDERS) {
+        providerStatus.push({
+          name: p.name,
+          label: p.label,
+          available: true,
+          notes: ["Skipped — the Google index already produced verified leads."],
         });
       }
     }

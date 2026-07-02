@@ -20,10 +20,20 @@ import {
 
 type Phase = "input" | "searching" | "results";
 
+// The live feed only ever renders the newest handful of lines, but a long
+// traversal emits THOUSANDS of events — keeping them all in state makes every
+// append re-render O(n) and eventually freezes the tab. Keep a bounded tail
+// and track the tiny bits of derived state (provider status, match flag)
+// incrementally instead of re-scanning the whole list each render.
+const EVENT_TAIL_KEPT = 200;
+const EVENT_TAIL_TRIM_AT = 260;
+
 const FindPlayer = () => {
   const navigate = useNavigate();
   const [phase, setPhase] = useState<Phase>("input");
   const [events, setEvents] = useState<SearchEvent[]>([]);
+  const [providerStatus, setProviderStatus] = useState<Record<string, "running" | "done">>({});
+  const [matched, setMatched] = useState(false);
   const [activeQuery, setActiveQuery] = useState<PlayerQuery | null>(null);
   const [result, setResult] = useState<ResolutionResult | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -31,6 +41,8 @@ const FindPlayer = () => {
   const handleSearch = async (query: PlayerQuery) => {
     setActiveQuery(query);
     setEvents([]);
+    setProviderStatus({});
+    setMatched(false);
     setResult(null);
     setPhase("searching");
 
@@ -46,7 +58,19 @@ const FindPlayer = () => {
       const [res] = await Promise.all([
         resolveIdentity(query, {
           signal: controller.signal,
-          onEvent: (event) => setEvents((prev) => [...prev, event]),
+          onEvent: (event) => {
+            setEvents((prev) =>
+              prev.length >= EVENT_TAIL_TRIM_AT ? [...prev.slice(prev.length - EVENT_TAIL_KEPT), event] : [...prev, event]
+            );
+            if (event.provider) {
+              const provider = event.provider;
+              setProviderStatus((prev) => {
+                const next = event.status === "done" ? "done" : prev[provider] ?? "running";
+                return prev[provider] === next ? prev : { ...prev, [provider]: next };
+              });
+            }
+            if (event.message.includes("✔ Match")) setMatched(true);
+          },
         }),
         minDisplay,
       ]);
@@ -76,6 +100,8 @@ const FindPlayer = () => {
     abortRef.current?.abort();
     setPhase("input");
     setEvents([]);
+    setProviderStatus({});
+    setMatched(false);
     setResult(null);
   };
 
@@ -83,7 +109,9 @@ const FindPlayer = () => {
     <div className="min-h-screen flex flex-col bg-background">
       <Header />
 
-      {phase === "searching" && activeQuery && <SearchExperience query={activeQuery} events={events} />}
+      {phase === "searching" && activeQuery && (
+        <SearchExperience query={activeQuery} events={events} providerStatus={providerStatus} matched={matched} />
+      )}
 
       <main className="flex-1 py-10 sm:py-14">
         <div className="container mx-auto px-4 max-w-3xl">

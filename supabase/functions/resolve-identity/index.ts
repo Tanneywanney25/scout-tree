@@ -1,5 +1,11 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { callAI, callAIWithSearch } from "../_shared/ai.ts";
+import { callAI } from "../_shared/ai.ts";
+import {
+  discoverEventOnWeb,
+  findUsernamesOnWeb,
+  type DiscoverEventRequest,
+  type UsernameSearchRequest,
+} from "./googleSearch.ts";
 import {
   searchUscfByName,
   fetchUscfMember,
@@ -379,103 +385,63 @@ async function handleExpand(memberId: string): Promise<Response> {
 // Discover: web-search the flyer/TLA/announcement of a USCF online event to
 // learn which platform hosted it — and ideally the exact tournament page
 // (Chess.com tournament slug / Lichess swiss or arena id), whose public API
-// then hands the client the full participant roster.
+// then hands the client the full participant roster. Logic in googleSearch.ts.
 // ---------------------------------------------------------------------------
 
-interface DiscoverEventBody {
-  name?: string;
-  sectionName?: string;
-  startDate?: string;
-  endDate?: string;
-  ratingSystem?: string;
-  timeControl?: string;
+async function handleDiscoverEvent(ev: DiscoverEventRequest): Promise<Response> {
+  const info = await discoverEventOnWeb(ev);
+  if (!info) return json({ available: false });
+  console.log("[resolve-identity] discoverEvent:", JSON.stringify({ name: ev.name, ...info }));
+  return json({
+    available: true,
+    platform: info.platform,
+    chesscomSlugs: info.chesscomSlugs,
+    lichessSwissIds: info.lichessSwissIds,
+    lichessArenaIds: info.lichessArenaIds,
+    confidence: info.confidence,
+    note: info.note,
+  });
 }
 
-const CHESSCOM_TOURNAMENT_RE = /(?:api\.)?chess\.com\/(?:pub\/tournament|(?:play\/)?tournament(?:\/live)?)\/([a-z0-9][a-z0-9-]{2,120})/gi;
-const LICHESS_SWISS_RE = /lichess\.org\/(?:api\/)?swiss\/([a-zA-Z0-9]{8})/g;
-const LICHESS_ARENA_RE = /lichess\.org\/(?:api\/)?tournament\/([a-zA-Z0-9]{8})/g;
+// ---------------------------------------------------------------------------
+// Find-username: Google-index search for a specific person's Lichess/Chess.com
+// handles (the query ladder lives in googleSearch.ts). This replaces platform
+// name search as the way the traversal engine resolves tournament players —
+// candidates are verified client-side against real games in the event window.
+// ---------------------------------------------------------------------------
 
-function collectMatches(re: RegExp, text: string): string[] {
-  const out = new Set<string>();
-  re.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) && out.size < 5) out.add(m[1]);
-  return Array.from(out);
-}
+async function handleFindUsername(body: Record<string, unknown>): Promise<Response> {
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) return json({ available: false, candidates: [] });
 
-async function handleDiscoverEvent(ev: DiscoverEventBody): Promise<Response> {
-  const name = (ev.name || "").trim();
-  if (!name) return json({ available: false });
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+  const req: UsernameSearchRequest = {
+    name,
+    state: str(body.state),
+    city: str(body.city),
+    clubOrSchool: str(body.clubOrSchool),
+    uscfRating: typeof body.uscfRating === "number" && isFinite(body.uscfRating) ? body.uscfRating : undefined,
+    fideId: str(body.fideId),
+    eventName: str(body.eventName),
+    eventDate: str(body.eventDate),
+    platforms: Array.isArray(body.platforms)
+      ? (body.platforms.filter((p) => p === "chesscom" || p === "lichess") as ("chesscom" | "lichess")[])
+      : undefined,
+    knownUsernames: Array.isArray(body.knownUsernames)
+      ? (body.knownUsernames.filter((u) => typeof u === "string") as string[]).slice(0, 4)
+      : undefined,
+  };
 
-  const lines = [
-    `Name: ${name}`,
-    ev.sectionName ? `Section: ${ev.sectionName}` : "",
-    ev.startDate ? `Dates: ${ev.startDate}${ev.endDate && ev.endDate !== ev.startDate ? ` to ${ev.endDate}` : ""}` : "",
-    ev.ratingSystem ? `US Chess rating system: ${ev.ratingSystem} (online-rated)` : "",
-    ev.timeControl ? `Time control: ${ev.timeControl}` : "",
-  ].filter(Boolean);
-
-  const prompt = `A US Chess (USCF) rated ONLINE tournament needs to be located on the web. Figure out which platform hosted the games — chess.com, lichess, chesskid or ICC — and if at all possible find the EXACT tournament page.
-
-EVENT:
-${lines.join("\n")}
-
-Search for the event's flyer, TLA (Tournament Life Announcement), club announcement/website, or results page. USCF online events (mostly 2020-2021) almost always say "played on Chess.com" or "hosted on lichess.org", and often link the tournament directly (chess.com/tournament/..., lichess.org/swiss/... or lichess.org/tournament/...). Organiser/club names inside the event name are strong search terms.
-
-Return STRICT JSON only (no prose, no markdown fences):
-{"platform":"chesscom"|"lichess"|"chesskid"|"icc"|"unknown","urls":["any tournament/flyer URLs found"],"confidence":0.0-1.0,"note":"one short sentence on what you found"}`;
-
-  const ai = await callAIWithSearch(
-    "You are a research assistant locating where US Chess online-rated tournaments were hosted. You search the web, answer only from what you find, and output strict JSON.",
-    prompt,
-    1200
-  );
-  if (!ai.ok) return json({ available: false, note: ai.error });
-
-  // Parse the JSON answer, but also regex-scan the WHOLE response for platform
-  // URLs — grounded answers sometimes cite links outside the JSON.
-  let platform: string | undefined;
-  let confidence: number | undefined;
-  let note: string | undefined;
-  let urlText = ai.text;
-  try {
-    const s = ai.text.replace(/```(?:json)?/gi, "").trim();
-    const start = s.indexOf("{");
-    const end = s.lastIndexOf("}");
-    if (start !== -1 && end > start) {
-      const parsed = JSON.parse(s.slice(start, end + 1));
-      if (typeof parsed.platform === "string") {
-        const p = parsed.platform.toLowerCase().replace(/[^a-z]/g, "");
-        if (["chesscom", "lichess", "chesskid", "icc"].includes(p)) platform = p;
-      }
-      if (typeof parsed.confidence === "number") confidence = Math.max(0, Math.min(1, parsed.confidence));
-      if (typeof parsed.note === "string") note = parsed.note.slice(0, 300);
-      if (Array.isArray(parsed.urls)) urlText += "\n" + parsed.urls.filter((u: unknown) => typeof u === "string").join("\n");
-    }
-  } catch {
-    /* fall through to regex-only parsing */
-  }
-
-  const chesscomSlugs = collectMatches(CHESSCOM_TOURNAMENT_RE, urlText);
-  const lichessSwissIds = collectMatches(LICHESS_SWISS_RE, urlText);
-  const lichessArenaIds = collectMatches(LICHESS_ARENA_RE, urlText);
-  if (!platform) {
-    if (chesscomSlugs.length && !lichessSwissIds.length && !lichessArenaIds.length) platform = "chesscom";
-    else if (!chesscomSlugs.length && (lichessSwissIds.length || lichessArenaIds.length)) platform = "lichess";
-  }
-
+  const result = await findUsernamesOnWeb(req, (m) => console.log("[resolve-identity] findUsername:", m));
   console.log(
-    "[resolve-identity] discoverEvent:",
-    JSON.stringify({ name, platform, chesscomSlugs, lichessSwissIds, lichessArenaIds, confidence })
+    "[resolve-identity] findUsername:",
+    JSON.stringify({ name, backend: result.backend, found: result.candidates.length })
   );
   return json({
-    available: !!(platform || chesscomSlugs.length || lichessSwissIds.length || lichessArenaIds.length),
-    platform,
-    chesscomSlugs,
-    lichessSwissIds,
-    lichessArenaIds,
-    confidence,
-    note,
+    available: result.backend !== "none",
+    candidates: result.candidates,
+    backend: result.backend,
+    note: result.note,
   });
 }
 
@@ -494,7 +460,12 @@ serve(async (req) => {
 
     // --- Discover mode (web/flyer search: which platform hosted this event) --
     if (body?.discoverEvent && typeof body.discoverEvent === "object") {
-      return await handleDiscoverEvent(body.discoverEvent as DiscoverEventBody);
+      return await handleDiscoverEvent(body.discoverEvent as DiscoverEventRequest);
+    }
+
+    // --- Find-username mode (Google-index search for a person's handles) -----
+    if (body?.findUsername && typeof body.findUsername === "object") {
+      return await handleFindUsername(body.findUsername as Record<string, unknown>);
     }
 
     const query: PlayerQuery = body?.query || {};

@@ -5,7 +5,13 @@ import type { PlayerQuery, SearchEvent } from "@/lib/identity";
 
 interface SearchExperienceProps {
   query: PlayerQuery;
+  /** Bounded tail of the live feed (the parent trims it — long traversals emit
+   *  thousands of lines and an unbounded list freezes the tab). */
   events: SearchEvent[];
+  /** Per-provider status, maintained incrementally by the parent. */
+  providerStatus?: Record<string, "running" | "done">;
+  /** Sticky "a match was found" flag (a match line may leave the bounded tail). */
+  matched?: boolean;
 }
 
 // The orbiting source nodes. `match` decides which provider event lights them up.
@@ -36,7 +42,7 @@ const AMBIENT_LINES = [
   "Building confidence graph…",
 ];
 
-export function SearchExperience({ query, events }: SearchExperienceProps) {
+export function SearchExperience({ query, events, providerStatus: providerStatusProp, matched: matchedProp }: SearchExperienceProps) {
   const [ambientIdx, setAmbientIdx] = useState(0);
   const feedRef = useRef<HTMLDivElement>(null);
   const startRef = useRef(Date.now());
@@ -59,27 +65,33 @@ export function SearchExperience({ query, events }: SearchExperienceProps) {
     feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: "smooth" });
   }, [events]);
 
-  // Per-provider status (running vs done) for lighting up source nodes.
+  // Per-provider status (running vs done) for lighting up source nodes —
+  // provided incrementally by the parent; the fallback scan only runs when the
+  // component is used standalone with a full event list.
   const providerStatus = useMemo(() => {
     const map = new Map<string, "running" | "done">();
+    if (providerStatusProp) {
+      for (const [p, s] of Object.entries(providerStatusProp)) map.set(p, s);
+      return map;
+    }
     for (const e of events) {
       if (!e.provider) continue;
       if (e.status === "done") map.set(e.provider, "done");
       else if (!map.has(e.provider)) map.set(e.provider, "running");
     }
     return map;
-  }, [events]);
+  }, [providerStatusProp, events]);
 
   const doneCount = SOURCE_NODES.filter((n) => {
     for (const [p, s] of providerStatus) if (n.match(p) && s === "done") return true;
     return false;
   }).length;
 
-  // The tournament-graph traversal is the long pole (60–180s), so drive progress
-  // primarily off elapsed time — an eased curve that fills slowly and never
-  // jumps to 100% — with a small floor from completed sources for early feedback.
-  const graphActive = events.some((e) => e.provider === "uscf-graph");
-  const matched = events.some((e) => /✔ Match/.test(e.message));
+  // The tournament-graph traversal is the long pole (it runs until exhausted),
+  // so drive progress primarily off elapsed time — an eased curve that fills
+  // slowly and never jumps to 100% — with a small floor from completed sources.
+  const graphActive = providerStatus.has("uscf-graph") || events.some((e) => e.provider === "uscf-graph");
+  const matched = matchedProp ?? events.some((e) => /✔ Match/.test(e.message));
   const elapsed = now - startRef.current;
   const timeFill = 96 * (1 - Math.exp(-elapsed / 55_000));
   const milestoneFloor = Math.min(32, (doneCount / SOURCE_NODES.length) * 32);
