@@ -109,6 +109,8 @@ export interface DiscoveredAccount {
   /** Per-format ratings when available, e.g. { blitz: 1850, rapid: 1900 }. */
   ratings?: Record<string, number>;
   country?: string;
+  /** FIDE ID linked on the account profile (decisive when it matches the target's). */
+  fideId?: string;
   gamesFound?: number;
   lastActive?: string; // ISO date or human string
   profileUrl: string;

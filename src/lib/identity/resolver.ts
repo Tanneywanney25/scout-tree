@@ -1,18 +1,30 @@
 // ============================================================================
 // Identity Resolution Engine — the resolver
 //
-// Orchestrates every Provider, then turns their raw output into ranked,
-// explainable identities:
+// Orchestrates every Provider in a strict trust order, then turns their raw
+// output into ranked, explainable identities:
 //
-//   1. run all enabled providers concurrently (each narrates into the live UI)
-//   2. pool every discovered + AI-suggested online account, and *verify* the
-//      unconfirmed suggestions against the real Lichess / Chess.com APIs
-//   3. cluster real-world identity fragments (USCF / FIDE / AI) with the online
-//      accounts that corroborate them — name, IDs, rating and country all vote
-//   4. score each cluster's confidence in log-odds space and rank them
+//   1. ANCHOR PHASE — real-world sources (US Chess, FIDE, AI reasoning,
+//      tournament archives) run concurrently and establish WHO the person is
+//      (IDs, state, ratings, online-rated history). Any explicit username the
+//      *user* supplied is verified here too — that's their knowledge, not a
+//      guess.
+//   2. PRIMARY DISCOVERY — the tournament-graph traversal. Every online-rated
+//      USCF event the target played is worked to exhaustion (host-platform
+//      discovery via web flyers, tournament rosters + elimination, opponent
+//      seeds, pairing-chain BFS through the crosstable, and a deep dive into
+//      opponents' own histories). Usernames found here are anchored to real
+//      games the person provably played.
+//   3. LAST RESORT — only when the traversal finds nothing do we search the
+//      platforms by name (autocomplete / handle guesses / AI suggestions).
+//      Those results are capped and explicitly flagged: a name match alone can
+//      easily be a namesake — the 200-rated John Smith is not the 2000-rated
+//      one you're scouting.
+//   4. Cluster the real-world identity fragments with the discovered accounts,
+//      score each cluster's confidence in log-odds space, and rank.
 //
-// The result is 0..N candidate identities ("we found 3 possible matches"), each
-// with its discovered accounts and the evidence behind every number.
+// The result is 0..N candidate identities, each with its discovered accounts
+// and the evidence behind every number.
 // ============================================================================
 
 import type {
@@ -25,8 +37,9 @@ import type {
   Platform,
   SearchEvent,
   ProviderResult,
+  Provider,
 } from "./types";
-import { PROVIDERS } from "./providers";
+import { PROVIDERS, NAME_FALLBACK_PROVIDERS } from "./providers";
 import { getTournamentGraph } from "./providers/edgeClient";
 import { runGraphTraversal } from "./providers/uscfGraph";
 import {
@@ -62,6 +75,9 @@ const SINGLE_VALUED = new Set<Evidence["kind"]>([
   "activity-recency",
   "username-hint",
 ]);
+
+/** Cap on what a purely name-based (last-resort) account may claim. */
+const NAME_FALLBACK_MAX_CONFIDENCE = 0.62;
 
 function collapseForScoring(evidence: Evidence[]): Evidence[] {
   const best = new Map<string, Evidence>();
@@ -124,6 +140,20 @@ function pickTargetRating(fragments: PartialIdentity[], query: PlayerQuery): num
   return uscf?.estimatedRating ?? query.approxRating;
 }
 
+/** Handle-looking tokens the user explicitly typed as a username hint. */
+function extractHintHandles(hint?: string): string[] {
+  if (!hint) return [];
+  const tokens = hint.match(/[A-Za-z0-9_-]{3,25}/g) || [];
+  const stop =
+    /^(the|and|with|chess|com|org|username|handle|account|name|player|starts|start|their|they|think|maybe|something|lichess|chesscom|like|about)$/i;
+  const out: string[] = [];
+  for (const t of tokens) {
+    if (stop.test(t)) continue;
+    if (!out.some((o) => o.toLowerCase() === t.toLowerCase())) out.push(t);
+  }
+  return out.slice(0, 4);
+}
+
 export async function resolveIdentity(
   query: PlayerQuery,
   options: ResolveOptions = {}
@@ -141,142 +171,175 @@ export async function resolveIdentity(
 
   emit("Starting identity resolution…", "info");
 
-  // --- 1. Run every enabled provider concurrently ----------------------------
-  const enabled = PROVIDERS.filter((p) => p.enabled(query));
-  const settled = await Promise.allSettled(
-    enabled.map((p) =>
-      p
-        .run({ query, signal, log: (m) => emit(m, "running", p.name) })
-        .then((r) => {
-          if (!r.unavailable) emit(`${p.label} done.`, "done", p.name);
-          return r;
-        })
-    )
-  );
-
   const results: ProviderResult[] = [];
   const providerStatus: ResolutionResult["providerStatus"] = [];
-  settled.forEach((s, i) => {
-    const p = enabled[i];
-    if (s.status === "fulfilled") {
-      results.push(s.value);
-      providerStatus.push({ name: p.name, label: p.label, available: !s.value.unavailable, notes: s.value.notes });
-    } else {
-      providerStatus.push({ name: p.name, label: p.label, available: false, notes: ["Provider error."] });
-    }
-  });
 
+  const runProviders = async (providers: Provider[]) => {
+    const enabled = providers.filter((p) => p.enabled(query));
+    const settled = await Promise.allSettled(
+      enabled.map((p) =>
+        p
+          .run({ query, signal, log: (m) => emit(m, "running", p.name) })
+          .then((r) => {
+            if (!r.unavailable) emit(`${p.label} done.`, "done", p.name);
+            return r;
+          })
+      )
+    );
+    const batch: ProviderResult[] = [];
+    settled.forEach((s, i) => {
+      const p = enabled[i];
+      if (s.status === "fulfilled") {
+        batch.push(s.value);
+        results.push(s.value);
+        providerStatus.push({ name: p.name, label: p.label, available: !s.value.unavailable, notes: s.value.notes });
+      } else {
+        providerStatus.push({ name: p.name, label: p.label, available: false, notes: ["Provider error."] });
+      }
+    });
+    return batch;
+  };
+
+  // --- 1. ANCHOR PHASE: who is this person? ----------------------------------
+  await runProviders(PROVIDERS);
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-  // --- 2. Pool accounts + verify AI/edge-suggested usernames -----------------
+  const fragments: PartialIdentity[] = results.flatMap((r) => r.identities);
+  const targetFideId = idDigits(fragments.find((f) => f.source === "uscf")?.fideId) || idDigits(query.fideId) || undefined;
+  const targetRating = pickTargetRating(fragments, query);
+
   const pool: PooledAccount[] = [];
   const poolKey = (platform: Platform, username: string) => `${platform}:${username.toLowerCase()}`;
   const inPool = new Set<string>();
+  const addToPool = (account: DiscoveredAccount, attachName?: string) => {
+    const key = poolKey(account.platform, account.username);
+    if (inPool.has(key)) return;
+    inPool.add(key);
+    pool.push({ account, attachName });
+  };
 
-  for (const r of results) {
-    for (const acc of r.accounts) {
-      const key = poolKey(acc.platform, acc.username);
-      if (!inPool.has(key)) {
-        inPool.add(key);
-        pool.push({ account: acc });
-      }
-    }
-  }
+  for (const r of results) for (const acc of r.accounts) addToPool(acc);
 
-  // Collect unique suggestions that we haven't already verified as accounts.
-  const fragments: PartialIdentity[] = results.flatMap((r) => r.identities);
-  const suggestions: { platform: Platform; username: string; attachName: string }[] = [];
-  const suggestionSeen = new Set<string>();
-  for (const frag of fragments) {
-    for (const s of frag.suggestedAccounts || []) {
-      const key = poolKey(s.platform, s.username);
-      if (inPool.has(key) || suggestionSeen.has(key)) continue;
-      suggestionSeen.add(key);
-      suggestions.push({ ...s, attachName: frag.name });
-    }
-  }
-
-  if (suggestions.length) {
-    emit(`Verifying ${suggestions.length} suggested online account(s)…`, "running");
-    // Verify with limited concurrency to respect platform rate limits.
-    const CONCURRENCY = 4;
-    for (let i = 0; i < suggestions.length; i += CONCURRENCY) {
-      if (signal?.aborted) break;
-      const batch = suggestions.slice(i, i + CONCURRENCY);
-      const verified = await Promise.all(
-        batch.map(async (s) => ({ s, profile: await verifyAccount(s.platform, s.username, signal) }))
-      );
-      for (const { s, profile } of verified) {
-        if (!profile) continue;
-        const evidence: Evidence[] = [];
-        const candidateName = profile.displayName || profile.username;
-        const simToFragment = nameSimilarity(s.attachName, candidateName);
-        const simToQuery = nameSimilarity(query.name, candidateName);
-        const sim = Math.max(simToFragment, simToQuery);
+  /** Verify one suggested/hinted handle and score it as an account. */
+  const verifyCandidate = async (
+    platform: Platform,
+    username: string,
+    opts: { attachName?: string; hinted?: boolean }
+  ): Promise<DiscoveredAccount | null> => {
+    const profile = await verifyAccount(platform, username, signal);
+    if (!profile) return null;
+    const evidence: Evidence[] = [];
+    const candidateName = profile.displayName || profile.username;
+    const sim = Math.max(
+      opts.attachName ? nameSimilarity(opts.attachName, candidateName) : 0,
+      nameSimilarity(query.name, candidateName)
+    );
+    if (opts.hinted) {
+      evidence.push({
+        kind: "username-hint",
+        weight: 1.6,
+        label: `User-supplied handle "${profile.username}" exists`,
+        source: "verification",
+      });
+      // A whimsical display name must not sink a handle the user typed in.
+      if (profile.displayName) {
         evidence.push({
           kind: "name-match",
-          weight: nameMatchWeight(sim),
-          label: profile.displayName
-            ? `Profile name "${profile.displayName}" matches`
-            : `Suggested handle "${profile.username}" verified`,
+          weight: Math.max(-0.4, nameMatchWeight(sim)),
+          label: `Profile name "${profile.displayName}" vs "${query.name}"`,
           source: "verification",
         });
-        if (query.approxRating && profile.rating) {
-          evidence.push({
-            kind: "rating-match",
-            weight: ratingMatchWeight(query.approxRating, profile.rating),
-            label: `Rating ${profile.rating} vs expected ~${query.approxRating}`,
-            source: "verification",
-          });
-        }
-        evidence.push({ kind: "account-verified", weight: 0.6, label: "AI-suggested account confirmed live", source: "verification" });
+      }
+    } else {
+      evidence.push({
+        kind: "name-match",
+        weight: nameMatchWeight(sim),
+        label: profile.displayName
+          ? `Profile name "${profile.displayName}" ${sim >= 0.8 ? "matches" : "resembles"} "${query.name}"`
+          : `Suggested handle "${profile.username}" verified`,
+        source: "verification",
+      });
+    }
+    if (targetRating && profile.rating) {
+      evidence.push({
+        kind: "rating-match",
+        weight: ratingMatchWeight(targetRating, profile.rating),
+        label: `Rating ${profile.rating} vs expected ~${targetRating}`,
+        source: "verification",
+      });
+    }
+    if (targetFideId && profile.fideId) {
+      const match = idDigits(profile.fideId) === targetFideId;
+      evidence.push({
+        kind: "fide-id-match",
+        weight: match ? 4.0 : -3.0,
+        label: match
+          ? `Profile links FIDE ID ${profile.fideId} — exact match`
+          : `Profile links FIDE ID ${profile.fideId}, which contradicts the target's (${targetFideId})`,
+        source: "verification",
+      });
+    }
+    evidence.push({
+      kind: "account-verified",
+      weight: opts.hinted ? 0.5 : 0.6,
+      label: opts.hinted ? "Hinted account confirmed live" : "Suggested account confirmed live",
+      source: "verification",
+    });
+    return {
+      platform: profile.platform,
+      username: profile.username,
+      displayName: profile.displayName,
+      title: profile.title,
+      rating: profile.rating,
+      ratings: profile.ratings,
+      country: profile.country,
+      fideId: profile.fideId,
+      gamesFound: profile.gamesFound,
+      lastActive: profile.lastActiveMs ? new Date(profile.lastActiveMs).toISOString() : undefined,
+      profileUrl: profile.profileUrl,
+      verified: true,
+      confidence: scoreFromEvidence(evidence),
+      evidence,
+    };
+  };
 
-        const account: DiscoveredAccount = {
-          platform: profile.platform,
-          username: profile.username,
-          displayName: profile.displayName,
-          title: profile.title,
-          rating: profile.rating,
-          ratings: profile.ratings,
-          country: profile.country,
-          gamesFound: profile.gamesFound,
-          lastActive: profile.lastActiveMs ? new Date(profile.lastActiveMs).toISOString() : undefined,
-          profileUrl: profile.profileUrl,
-          verified: true,
-          confidence: scoreFromEvidence(evidence),
-          evidence,
-        };
-        const key = poolKey(account.platform, account.username);
-        if (!inPool.has(key)) {
-          inPool.add(key);
-          pool.push({ account, attachName: s.attachName });
-        }
+  // --- 1b. Hint probe: handles the USER explicitly gave us --------------------
+  const hintHandles = extractHintHandles(query.usernameHint);
+  let hintStrong = false;
+  if (hintHandles.length && !signal?.aborted) {
+    emit(`Checking the username hint (${hintHandles.map((h) => `"${h}"`).join(", ")})…`, "running");
+    for (const h of hintHandles) {
+      for (const platform of ["chesscom", "lichess"] as Platform[]) {
+        if (signal?.aborted) break;
+        const acc = await verifyCandidate(platform, h, { hinted: true });
+        if (!acc) continue;
+        addToPool(acc, query.name);
+        const sim = nameSimilarity(query.name, acc.displayName || "");
+        const fideMatch = !!(targetFideId && acc.fideId && idDigits(acc.fideId) === targetFideId);
+        if (fideMatch || sim >= 0.92) hintStrong = true;
       }
     }
+    if (hintStrong) emit("The user-supplied handle checks out against the player's identity.", "done");
   }
 
-  // --- 2b. PRIMARY discovery: tournament-graph traversal. For any player with
-  // online USCF history this is the main event — a multi-agent detective that
-  // traces the player's real online usernames through their tournament
-  // opponents' games. Name-based matches from the fast phase become a fallback.
-  // A trivially-strong direct match (exact-looking handle) lets us skip the long
-  // trace; otherwise we run the full traversal even if a weak direct guess exists.
-  const strongDirect = pool.some(
-    (pa) =>
-      (pa.account.platform === "lichess" || pa.account.platform === "chesscom") &&
-      pa.account.confidence >= 0.85 &&
-      nameSimilarity(query.name, pa.account.displayName || pa.account.username) >= 0.82
-  );
-  if (!strongDirect && !signal?.aborted) {
+  // --- 2. PRIMARY DISCOVERY: tournament-graph traversal ------------------------
+  // The main event for any player with online USCF history: work every online
+  // event they played (platform flyers, tournament rosters, opponent seeds,
+  // pairing chains, deep opponent recursion) until a username falls out.
+  // Name-based platform search stays OFF unless all of this comes up empty.
+  let traversalFound = false;
+  let graphAvailable = false;
+  if (!hintStrong && !signal?.aborted) {
     const graph = await getTournamentGraph(query, signal).catch(() => null);
     if (graph && graph.graphTraversalReady && graph.onlineEvents.length) {
-      emit("Tracing tournament opponents to uncover online usernames…", "running", "uscf-graph");
-      const targetRating = pickTargetRating(fragments, query);
+      graphAvailable = true;
+      emit("Tracing the player's USCF online events to uncover their real usernames…", "running", "uscf-graph");
       let traversal;
       try {
         traversal = await runGraphTraversal(graph, {
           targetName: graph.rootName || query.name,
           targetRating,
+          targetFideId,
           signal,
           log: (m) => emit(m, "running", "uscf-graph"),
         });
@@ -285,30 +348,109 @@ export async function resolveIdentity(
       }
       providerStatus.push({ name: "uscf-graph", label: "Tournament graph", available: true, notes: traversal.notes });
 
-      const strongGraph = traversal.accounts.filter((a) => a.confidence > 0.5);
-      if (strongGraph.length) {
-        emit(`Traced ${strongGraph.length} online account(s) through tournament opponents.`, "done", "uscf-graph");
-      } else if (traversal.accounts.length) {
-        emit("Tournament trace found weak leads — falling back to name-based matches.", "info", "uscf-graph");
-      } else {
-        emit("No online username from the tournament graph — using name-based matches as a fallback.", "info", "uscf-graph");
+      for (const acc of traversal.accounts) addToPool(acc, graph.rootName);
+      traversalFound = traversal.accounts.length > 0;
+      if (traversalFound) {
+        emit(`Traced ${traversal.accounts.length} online account(s) through the player's own tournaments.`, "done", "uscf-graph");
       }
-      // Attach graph accounts to the real-world (USCF) identity by the root name.
-      for (const acc of traversal.accounts) {
-        const key = poolKey(acc.platform, acc.username);
-        if (!inPool.has(key)) {
-          inPool.add(key);
-          pool.push({ account: acc, attachName: graph.rootName });
+    } else {
+      emit("No online USCF tournament history to trace for this player.", "info", "uscf-graph");
+    }
+  } else if (hintStrong) {
+    emit("Skipping the tournament trace — the user-supplied handle already identifies the account.", "info", "uscf-graph");
+  }
+
+  // --- 3. LAST RESORT: name-based platform search -----------------------------
+  // Only when no tournament-verified username exists. Everything found here is
+  // capped and carries an explicit namesake warning — it is a lead, not an
+  // identification.
+  const suggestions: { platform: Platform; username: string; attachName: string }[] = [];
+  {
+    const seen = new Set<string>();
+    for (const frag of fragments) {
+      for (const s of frag.suggestedAccounts || []) {
+        const key = poolKey(s.platform, s.username);
+        if (inPool.has(key) || seen.has(key)) continue;
+        seen.add(key);
+        suggestions.push({ ...s, attachName: frag.name });
+      }
+    }
+  }
+
+  if (!traversalFound && !hintStrong && !signal?.aborted) {
+    if (graphAvailable) {
+      emit(
+        "Every tournament avenue came up empty — falling back to name-based platform search (last resort; results may be a namesake).",
+        "info"
+      );
+    } else {
+      emit("Falling back to name-based platform search (last resort; results may be a namesake).", "info");
+    }
+
+    const demote = (acc: DiscoveredAccount): DiscoveredAccount => {
+      const evidence: Evidence[] = [
+        ...acc.evidence,
+        {
+          kind: "other",
+          weight: -0.7,
+          label: "Found by name search only — not verified through any tournament game; could be a namesake",
+          source: "resolver",
+        },
+      ];
+      return {
+        ...acc,
+        evidence,
+        confidence: Math.min(scoreFromEvidence(evidence), NAME_FALLBACK_MAX_CONFIDENCE),
+      };
+    };
+
+    const fallbackResults = await runProviders(NAME_FALLBACK_PROVIDERS);
+    for (const r of fallbackResults) {
+      for (const acc of r.accounts) addToPool(demote(acc));
+      // Their fragments may carry further suggestions worth one verification.
+      for (const frag of r.identities) {
+        for (const s of frag.suggestedAccounts || []) {
+          const key = poolKey(s.platform, s.username);
+          if (!inPool.has(key) && !suggestions.some((x) => poolKey(x.platform, x.username) === key)) {
+            suggestions.push({ ...s, attachName: frag.name });
+          }
         }
       }
-    } else if (!graph || !graph.graphTraversalReady) {
-      emit("No online tournament history to trace — using name-based matches.", "info", "uscf-graph");
+    }
+
+    if (suggestions.length) {
+      emit(`Verifying ${suggestions.length} suggested handle(s) against the live platforms…`, "running");
+      const CONCURRENCY = 4;
+      for (let i = 0; i < suggestions.length; i += CONCURRENCY) {
+        if (signal?.aborted) break;
+        const batch = suggestions.slice(i, i + CONCURRENCY);
+        const verified = await Promise.all(
+          batch.map(async (s) => await verifyCandidate(s.platform, s.username, { attachName: s.attachName }))
+        );
+        batch.forEach((s, j) => {
+          const acc = verified[j];
+          if (acc) addToPool(demote(acc), s.attachName);
+        });
+      }
+    }
+  } else {
+    for (const p of NAME_FALLBACK_PROVIDERS) {
+      providerStatus.push({
+        name: p.name,
+        label: p.label,
+        available: true,
+        notes: [
+          traversalFound
+            ? "Skipped — username already verified through the player's own tournament games."
+            : "Skipped — the user-supplied handle already identifies the account.",
+        ],
+      });
     }
   }
 
   emit("Matching player identities & building confidence graph…", "running");
 
-  // --- 3. Cluster anchors + accounts -----------------------------------------
+  // --- 4. Cluster anchors + accounts -----------------------------------------
   const clusters: Cluster[] = [];
 
   // Seed clusters from anchor fragments (real-world identities).
@@ -364,6 +506,7 @@ export async function resolveIdentity(
       // Corroborating attributes nudge attachment.
       if (account.country && c.country && account.country.slice(-2).toLowerCase() === c.country.slice(-2).toLowerCase()) score += 0.1;
       if (account.rating && c.estimatedRating && Math.abs(account.rating - c.estimatedRating) <= 250) score += 0.1;
+      if (account.fideId && c.fideId && idDigits(account.fideId) === idDigits(c.fideId)) score += 0.5;
       if (score > bestScore) {
         bestScore = score;
         best = c;
@@ -388,7 +531,7 @@ export async function resolveIdentity(
     }
   }
 
-  // --- 4. Score + assemble final identities ----------------------------------
+  // --- 5. Score + assemble final identities ----------------------------------
   const identities: ResolvedIdentity[] = clusters
     .map((c, idx) => buildIdentity(c, query, idx))
     .filter((id) => id.accounts.length > 0 || id.confidence >= 0.25);

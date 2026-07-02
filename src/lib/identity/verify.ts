@@ -23,12 +23,19 @@ export interface VerifiedProfile {
   /** Per-format ratings, e.g. { blitz: 1850, rapid: 1900 }. */
   ratings?: Record<string, number>;
   country?: string; // ISO-2 where possible
+  /** FIDE ID the account owner linked on their profile (Lichess only). */
   fideId?: string;
   uscfRating?: number;
   fideRating?: number;
   lastActiveMs?: number;
   gamesFound?: number;
   profileUrl: string;
+}
+
+/** FIDE IDs are 5+ digit registry numbers; anything shorter is a rating. */
+function plausibleFideId(v: unknown): string | undefined {
+  const digits = String(v ?? "").replace(/\D/g, "");
+  return digits.length >= 5 && Number(digits) >= 10000 ? digits : undefined;
 }
 
 const LICHESS_FORMAT_PRIORITY = ["rapid", "blitz", "classical", "bullet"];
@@ -43,7 +50,14 @@ async function fetchJson(url: string, init: RequestInit, timeoutMs = 9000): Prom
     else outer.addEventListener("abort", () => controller.abort(), { once: true });
   }
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const res = await fetch(url, { ...init, signal: controller.signal });
+    // A 429 is "slow down", not "doesn't exist" — treating it as a missing
+    // account could silently lose the player. Wait once and retry.
+    if (res.status === 429 && !outer?.aborted) {
+      await new Promise((r) => setTimeout(r, 1500));
+      return await fetch(url, { ...init, signal: controller.signal });
+    }
+    return res;
   } finally {
     clearTimeout(timer);
   }
@@ -92,7 +106,7 @@ export async function verifyLichess(
       rating,
       ratings: Object.keys(ratings).length ? ratings : undefined,
       country: profile.country || undefined,
-      fideId: profile.fideId ? String(profile.fideId) : undefined,
+      fideId: plausibleFideId(profile.fideId),
       fideRating: typeof profile.fideRating === "number" ? profile.fideRating : undefined,
       uscfRating: typeof profile.uscfRating === "number" ? profile.uscfRating : undefined,
       lastActiveMs: typeof data.seenAt === "number" ? data.seenAt : undefined,
@@ -170,7 +184,8 @@ export async function verifyChesscom(
       rating,
       ratings: Object.keys(ratings).length ? ratings : undefined,
       country,
-      fideId: data.fide ? String(data.fide) : undefined,
+      // Chess.com's `fide` field is the player's FIDE *rating*, not their ID.
+      fideRating: typeof data.fide === "number" ? data.fide : undefined,
       lastActiveMs: typeof data.last_online === "number" ? data.last_online * 1000 : undefined,
       gamesFound,
       profileUrl: data.url || `https://www.chess.com/member/${data.username || clean}`,

@@ -72,16 +72,52 @@ USCF/FIDE ID, a username hint, free-text details) and the **Identity Resolution
 Engine** (`src/lib/identity/`) discovers the person and their online accounts,
 scoring every clue as evidence toward a transparent confidence number.
 
+Username discovery is **tournament-first** — searching a platform by name finds
+the wrong homonym far too easily, so it is the extreme last resort, never the
+method. The resolver works in strict phases:
+
+1. **Anchors** — US Chess / FIDE / AI reasoning establish *who* the person is
+   (IDs, state, ratings, online-rated history). A username the user explicitly
+   supplied is verified here too.
+2. **Tournament-graph traversal** (`src/lib/identity/uscfGraphEngine.ts`) — the
+   primary discovery. Every online-rated USCF event the player appeared in is
+   worked to exhaustion, in order: pin the host platform (event name, or a
+   web/flyer search for the TLA/announcement via the edge function); pull the
+   hosting Chess.com tournament / Lichess swiss or arena **participant roster**
+   and match it to the crosstable (if every player but the target is claimed,
+   the leftover handle *is* the target); resolve *any* section player as a seed
+   (direct opponents first, then the whole roster); then run a **pairing-chain
+   BFS** — a seed's games from the event's date window are aligned 1:1 against
+   their crosstable rounds by result sequence, so each aligned game maps one
+   more crosstable player to their handle (player 22 reveals player 10, who
+   reveals player 16…) until a chain reaches the target. If all events fail, it
+   recurses into direct opponents' own online histories to pin *their* handles
+   first. A FIDE ID linked on a candidate profile is checked against the USCF
+   record's — a match is near-decisive, a contradiction rejects.
+3. **Name fallback (last resort)** — only when the traversal finds nothing do
+   the Lichess/Chess.com name searches and AI username suggestions run, and
+   their results are confidence-capped and explicitly flagged as possible
+   namesakes.
+
+Try the traversal from a terminal (no edge function needed — Node isn't
+CORS-bound):
+
+```sh
+node scripts/trace-username.mjs --name "First Last" [--state XX] [--budget 150]
+node scripts/trace-username.mjs --id 12345678 --list   # inspect the graph only
+```
+
 Each data source is a `Provider`:
 
 - **Lichess** and **Chess.com** resolve directly in the browser against their
   public, key-less APIs (autocomplete + profile verification, real ratings and
-  last-seen).
+  last-seen) — last-resort tier only.
 - **US Chess**, **FIDE**, **web/AI reasoning** and **tournament/chess-results**
   run server-side in the optional `resolve-identity` edge function, which does a
-  best-effort USCF lookup plus an AI reasoning pass that proposes the usernames
-  most worth verifying. The browser then verifies those handles against the real
-  Lichess/Chess.com APIs before trusting them.
+  best-effort USCF lookup, builds the online tournament graph, answers
+  `discoverEvent` flyer searches (AI with live web search), and runs an AI
+  reasoning pass whose suggested handles are only verified in the fallback
+  phase.
 
 The engine **degrades gracefully**: with no edge function or AI key, Find Player
 still works from the direct Lichess/Chess.com providers. Deploy the function and

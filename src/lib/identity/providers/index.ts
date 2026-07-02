@@ -1,10 +1,22 @@
 // ============================================================================
 // Provider registry
 //
-// The single ordered list of data sources the resolver consults. Adding a new
-// source is intentionally a one-line change here — implement a Provider, import
-// it, append it. Order is cosmetic (it shapes the live narration sequence); the
-// resolver runs them concurrently.
+// Three tiers, reflecting how much we trust each discovery route:
+//
+//   PROVIDERS (anchors)      — real-world identity sources (US Chess, FIDE,
+//                              AI reasoning, tournament archives). They tell us
+//                              WHO the person is; they never pick usernames.
+//   DEEP_PROVIDERS           — the tournament-graph traversal: the PRIMARY way
+//                              usernames are discovered, by tracing the
+//                              player's actual USCF online events.
+//   NAME_FALLBACK_PROVIDERS  — Lichess/Chess.com search by name. The extreme
+//                              last resort: it finds namesakes ("the wrong
+//                              John Smith") far too easily, so the resolver
+//                              only runs it after every tournament avenue has
+//                              been exhausted, and caps what it can claim.
+//
+// Adding a new source stays a one-line change: implement a Provider, import
+// it, append it to the right tier.
 // ============================================================================
 
 import type { Provider } from "../types";
@@ -16,22 +28,19 @@ import { googleProvider } from "./google";
 import { chessResultsProvider } from "./chessresults";
 import { uscfGraphProvider } from "./uscfGraph";
 
-/** Fast, always-run providers (direct lookups + AI + server sources). */
+/** Anchor providers — always run first, concurrently. */
 export const PROVIDERS: Provider[] = [
   uscfProvider,
   fideProvider,
-  lichessProvider,
-  chesscomProvider,
   googleProvider,
   chessResultsProvider,
 ];
 
-/**
- * Deep, expensive providers run as a *second phase* only when the fast phase
- * didn't confidently find the player — this keeps easy searches quick and
- * reserves the tournament-graph traversal for the hard cases that need it.
- */
+/** The tournament-graph traversal (primary username discovery). */
 export const DEEP_PROVIDERS: Provider[] = [uscfGraphProvider];
+
+/** Name-based platform search — last resort only. */
+export const NAME_FALLBACK_PROVIDERS: Provider[] = [lichessProvider, chesscomProvider];
 
 export {
   uscfProvider,

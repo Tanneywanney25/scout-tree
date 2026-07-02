@@ -34,11 +34,34 @@ export async function callAI(system: string, prompt: string, maxTokens = 250): P
   return { ok: false, text: "", status: 503, error: "No AI key configured (set GEMINI_API_KEY or ANTHROPIC_API_KEY)" };
 }
 
+/**
+ * Like `callAI`, but with the provider's live web-search tool enabled (Gemini
+ * google_search grounding / Anthropic web_search). Used to look up tournament
+ * flyers, TLAs and announcements on the open web. Falls back to a plain call
+ * if the search-enabled request is rejected (e.g. tool not available on the
+ * configured model).
+ */
+export async function callAIWithSearch(system: string, prompt: string, maxTokens = 1024): Promise<AIResult> {
+  const geminiKey = Deno.env.get("GEMINI_API_KEY") || Deno.env.get("GOOGLE_API_KEY");
+  if (geminiKey) {
+    const res = await callGemini(geminiKey, system, prompt, maxTokens, true);
+    if (res.ok || res.status >= 500) return res;
+    return callGemini(geminiKey, system, prompt, maxTokens);
+  }
+  const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
+  if (anthropicKey) {
+    const res = await callAnthropic(anthropicKey, system, prompt, maxTokens, true);
+    if (res.ok || res.status >= 500) return res;
+    return callAnthropic(anthropicKey, system, prompt, maxTokens);
+  }
+  return { ok: false, text: "", status: 503, error: "No AI key configured (set GEMINI_API_KEY or ANTHROPIC_API_KEY)" };
+}
+
 // ---------------------------------------------------------------------------
 // Google Gemini (Generative Language API)
 // ---------------------------------------------------------------------------
 
-async function callGemini(apiKey: string, system: string, prompt: string, maxTokens: number): Promise<AIResult> {
+async function callGemini(apiKey: string, system: string, prompt: string, maxTokens: number, withSearch = false): Promise<AIResult> {
   const model = Deno.env.get("GEMINI_MODEL") || GEMINI_DEFAULT_MODEL;
 
   let response: Response;
@@ -52,6 +75,7 @@ async function callGemini(apiKey: string, system: string, prompt: string, maxTok
       body: JSON.stringify({
         system_instruction: { parts: [{ text: system }] },
         contents: [{ role: "user", parts: [{ text: prompt }] }],
+        ...(withSearch ? { tools: [{ google_search: {} }] } : {}),
         generationConfig: {
           // Give the answer room; Flash spends some budget on hidden "thinking",
           // which we disable so tokens go to the actual response.
@@ -81,7 +105,7 @@ async function callGemini(apiKey: string, system: string, prompt: string, maxTok
 // Anthropic Messages API
 // ---------------------------------------------------------------------------
 
-async function callAnthropic(apiKey: string, system: string, prompt: string, maxTokens: number): Promise<AIResult> {
+async function callAnthropic(apiKey: string, system: string, prompt: string, maxTokens: number, withSearch = false): Promise<AIResult> {
   const model = Deno.env.get("AI_MODEL") || ANTHROPIC_DEFAULT_MODEL;
 
   let response: Response;
@@ -95,9 +119,10 @@ async function callAnthropic(apiKey: string, system: string, prompt: string, max
       },
       body: JSON.stringify({
         model,
-        max_tokens: maxTokens,
+        max_tokens: withSearch ? Math.max(maxTokens, 2048) : maxTokens,
         system,
         messages: [{ role: "user", content: prompt }],
+        ...(withSearch ? { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }] } : {}),
       }),
     });
   } catch (e) {

@@ -14,7 +14,12 @@
 
 import { supabase } from "@/integrations/supabase/client";
 import type { Evidence, PartialIdentity, PlayerQuery, Platform, Federation, Provider } from "../types";
+import type { GraphEvent, TournamentGraph, EventPlatformInfo } from "../graphTypes";
 import { nameSimilarity, nameMatchWeight, ratingMatchWeight } from "../confidence";
+
+// Graph shapes live in ../graphTypes (shared with the engine); re-export for
+// existing importers.
+export type { GraphGame, GraphPlayer, GraphEvent, TournamentGraph, EventPlatformInfo } from "../graphTypes";
 
 /** One real-world identity candidate proposed by a server source. */
 export interface EdgeIdentityCandidate {
@@ -36,44 +41,6 @@ export interface EdgeIdentityCandidate {
   confidenceHint?: number;
   /** Tournament/event names tying the player to the query, when found. */
   tournaments?: string[];
-}
-
-/** One game a section player played (colour is "unknown" for most online events). */
-export interface GraphGame {
-  round: number;
-  color: "white" | "black" | "unknown";
-  outcome: string;
-  opponentUscfId: string;
-  opponentName: string;
-}
-/** A player in an online section, with their round-by-round games. */
-export interface GraphPlayer {
-  uscfId: string;
-  name: string;
-  rating?: number;
-  isTarget?: boolean;
-  games: GraphGame[];
-}
-/** One online-rated section the scouted player appeared in (a full crosstable). */
-export interface GraphEvent {
-  eventId: string;
-  name: string;
-  sectionName?: string;
-  startDate?: string; // YYYY-MM-DD
-  endDate?: string;
-  ratingSystem: string; // OR / OQ / OB
-  timeControl?: string;
-  roundCount?: number;
-  isBlitz?: boolean;
-  platformGuess?: string;
-  players: GraphPlayer[];
-}
-export interface TournamentGraph {
-  rootUscfId: string;
-  rootName: string;
-  rootState?: string;
-  onlineEvents: GraphEvent[];
-  graphTraversalReady: boolean;
 }
 
 export interface EdgeResponse {
@@ -182,6 +149,53 @@ export function expandMemberGraph(memberId: string, signal?: AbortSignal): Promi
 
   expandCache.set(id, promise);
   promise.finally(() => setTimeout(() => expandCache.delete(id), 120_000));
+  return promise;
+}
+
+// Memoize flyer/web discovery per event — the answer never changes mid-search.
+const discoverCache = new Map<string, Promise<EventPlatformInfo | null>>();
+
+/**
+ * Ask the edge function to web-search the flyer/TLA/announcement of a USCF
+ * online event and report which platform hosted it — ideally with the exact
+ * Chess.com tournament slug or Lichess swiss/arena id (whose public APIs then
+ * hand the traversal engine the full participant roster).
+ */
+export function discoverEventPlatform(ev: GraphEvent, signal?: AbortSignal): Promise<EventPlatformInfo | null> {
+  const existing = discoverCache.get(ev.eventId);
+  if (existing) return existing;
+
+  const promise = (async (): Promise<EventPlatformInfo | null> => {
+    try {
+      const { data, error } = await supabase.functions.invoke("resolve-identity", {
+        body: {
+          discoverEvent: {
+            name: ev.name,
+            sectionName: ev.sectionName,
+            startDate: ev.startDate,
+            endDate: ev.endDate,
+            ratingSystem: ev.ratingSystem,
+            timeControl: ev.timeControl,
+          },
+        },
+      });
+      if (error || !data || data.available === false) return null;
+      const info: EventPlatformInfo = {
+        platform: data.platform,
+        chesscomSlugs: Array.isArray(data.chesscomSlugs) ? data.chesscomSlugs : undefined,
+        lichessSwissIds: Array.isArray(data.lichessSwissIds) ? data.lichessSwissIds : undefined,
+        lichessArenaIds: Array.isArray(data.lichessArenaIds) ? data.lichessArenaIds : undefined,
+        confidence: typeof data.confidence === "number" ? data.confidence : undefined,
+        note: typeof data.note === "string" ? data.note : undefined,
+      };
+      return info.platform || info.chesscomSlugs?.length || info.lichessSwissIds?.length || info.lichessArenaIds?.length ? info : null;
+    } catch {
+      return null;
+    }
+  })();
+
+  discoverCache.set(ev.eventId, promise);
+  promise.finally(() => setTimeout(() => discoverCache.delete(ev.eventId), 300_000));
   return promise;
 }
 

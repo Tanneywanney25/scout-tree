@@ -111,11 +111,22 @@ export interface OnlineSection {
 // Low-level fetch with timeout + light retry (429 / 5xx / network)
 // ---------------------------------------------------------------------------
 
-async function fetchJson(path: string, timeoutMs = 12000, retries = 2): Promise<any | null> {
+// MUIR rate-limits bursts; space requests out so a graph build (which can make
+// dozens of section/standings calls) stays under its limiter.
+let muirNextSlot = 0;
+async function muirThrottle(): Promise<void> {
+  const now = Date.now();
+  const wait = Math.max(0, muirNextSlot - now);
+  muirNextSlot = Math.max(now, muirNextSlot) + 160;
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+
+async function fetchJson(path: string, timeoutMs = 12000, retries = 3): Promise<any | null> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
+      await muirThrottle();
       const res = await fetch(`${API}${path}`, {
         headers: { "User-Agent": UA, Accept: "application/json" },
         signal: ctrl.signal,
@@ -123,7 +134,8 @@ async function fetchJson(path: string, timeoutMs = 12000, retries = 2): Promise<
       clearTimeout(t);
       if (res.status === 429 || res.status >= 500) {
         if (attempt < retries) {
-          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+          // 429s can persist for a while — back off meaningfully.
+          await new Promise((r) => setTimeout(r, (res.status === 429 ? 1500 : 500) * (attempt + 1)));
           continue;
         }
         return null;
@@ -401,35 +413,53 @@ export async function buildOnlineGraphForMember(
   opts: BuildGraphOptions = {}
 ): Promise<OnlineSection[]> {
   if (!member.hasOnline) return []; // no online ratings ⇒ nothing to traverse
-  const maxSections = opts.maxSections ?? 6;
-  const maxEvents = opts.maxEvents ?? 24;
+  const maxSections = opts.maxSections ?? 8;
+  const maxEvents = opts.maxEvents ?? 40;
 
   // Online-rated systems launched in 2020 — page back to that era (it can sit
   // many pages deep for active players) and ignore anything older.
   const era = await fetchMemberEventsSince(member.id, "2020-03-01");
-  // Prefer events whose name signals online play; fall back to scanning the era.
-  const named = era.filter((e) => ONLINE_NAME_RE.test(e.name));
-  const candidates = (named.length ? named : era).slice(0, maxEvents);
+  // Candidate order matters for active players with hundreds of events:
+  //   1. events whose NAME signals online play (any date),
+  //   2. events from the 2020-03..2022-06 window when nearly every rated event
+  //      was online (they sit at the END of the newest-first era list, so a
+  //      naive "newest N" scan misses them entirely),
+  //   3. whatever else is newest.
+  const named = new Set(era.filter((e) => ONLINE_NAME_RE.test(e.name)));
+  const pandemicEra = new Set(
+    era.filter((e) => !named.has(e) && (e.startDate || "") >= "2020-03-01" && (e.startDate || "") <= "2022-06-30")
+  );
+  const rest = era.filter((e) => !named.has(e) && !pandemicEra.has(e));
+  const candidates = [...named, ...pandemicEra, ...rest].slice(0, maxEvents);
 
-  // Phase 1 (cheap, concurrent): find which sections are actually online.
+  // Phase 1: find which sections are actually online. Modest concurrency plus
+  // early stopping — named events are near-certain hits, and once the unnamed
+  // scan keeps missing there is no point burning MUIR's rate limit further.
   interface Found {
     ev: UscfEventRef;
     section: SectionRef;
     meta: SectionMeta;
   }
-  const perEvent = await mapLimit(candidates, 4, async (ev): Promise<Found[]> => {
+  let foundCount = 0;
+  let unnamedMisses = 0;
+  const perEvent = await mapLimit(candidates, 2, async (ev): Promise<Found[]> => {
+    if (foundCount >= maxSections || (unnamedMisses >= 8 && !named.has(ev))) return [];
     const { sections, startDate, endDate, name } = await fetchEventSections(ev.eventId);
     const evRef: UscfEventRef = { ...ev, name: ev.name || name || "", startDate: ev.startDate || startDate, endDate: ev.endDate || endDate };
-    const metas = await mapLimit(sections, 3, async (sec) => {
+    const metas = await mapLimit(sections, 2, async (sec) => {
+      if (foundCount >= maxSections) return null;
       const meta = await fetchSectionMeta(ev.eventId, sec.number);
       return meta && meta.isOnline ? { ev: evRef, section: sec, meta } : null;
     });
-    return metas.filter((x): x is Found => !!x);
+    const found = metas.filter((x): x is Found => !!x);
+    foundCount += found.length;
+    if (!found.length && !named.has(ev)) unnamedMisses++;
+    return found;
   });
   const foundSections = perEvent.flat().slice(0, maxSections);
 
-  // Phase 2 (concurrent): pull the crosstable for each online section.
-  const online = await mapLimit(foundSections, 3, async ({ ev, section, meta }): Promise<OnlineSection | null> => {
+  // Phase 2: pull the crosstable for each online section.
+  const online = await mapLimit(foundSections, 2, async ({ ev, section, meta }): Promise<OnlineSection | null> => {
     const players = await fetchSectionPlayers(ev.eventId, section.number, member.id);
     if (!players.some((p) => p.isTarget)) return null; // target not actually here
     const evName = ev.name || "";
