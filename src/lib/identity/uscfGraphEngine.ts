@@ -66,6 +66,7 @@ import { verifyChesscom, verifyLichess, type VerifiedProfile } from "./verify";
 import {
   nameSimilarity,
   nameMatchWeight,
+  normalizeName,
   scoreFromEvidence,
   onlineRatingMatchWeight,
   graphDiscoveryWeight,
@@ -142,6 +143,80 @@ function platformLabel(p: OnlinePlatform): string {
 }
 
 const digits = (s?: string) => (s ? s.replace(/\D/g, "") : "");
+
+// ---------------------------------------------------------------------------
+// Name uniqueness — a "Ujwal Garine" is far more likely to Google-resolve to
+// the right person than a "John Smith", so unique names are worked FIRST.
+// ---------------------------------------------------------------------------
+
+const COMMON_LAST_NAMES = new Set([
+  "smith", "johnson", "williams", "brown", "jones", "garcia", "miller", "davis", "rodriguez", "martinez",
+  "hernandez", "lopez", "gonzalez", "wilson", "anderson", "thomas", "taylor", "moore", "jackson", "martin",
+  "lee", "perez", "thompson", "white", "harris", "sanchez", "clark", "ramirez", "lewis", "robinson",
+  "walker", "young", "allen", "king", "wright", "scott", "torres", "nguyen", "hill", "flores",
+  "green", "adams", "nelson", "baker", "hall", "rivera", "campbell", "mitchell", "carter", "roberts",
+  "gomez", "phillips", "evans", "turner", "diaz", "parker", "cruz", "edwards", "collins", "reyes",
+  "stewart", "morris", "morales", "murphy", "cook", "rogers", "peterson", "cooper", "reed", "bailey",
+  "bell", "kelly", "howard", "ward", "cox", "richardson", "wood", "watson", "brooks", "bennett",
+  "gray", "james", "price", "myers", "long", "ross", "foster", "powell", "russell", "sullivan",
+  "kim", "park", "choi", "patel", "shah", "singh", "kumar", "khan", "ali", "chen",
+  "wang", "li", "liu", "zhang", "wu", "yang", "lin", "huang", "zhao", "xu",
+]);
+
+const COMMON_FIRST_NAMES = new Set([
+  "john", "michael", "david", "james", "robert", "william", "daniel", "joseph", "thomas", "christopher",
+  "matthew", "andrew", "joshua", "ryan", "alex", "alexander", "jacob", "nicholas", "tyler", "ethan",
+  "noah", "liam", "mason", "lucas", "oliver", "jack", "henry", "leo", "kevin", "brian",
+  "eric", "adam", "mark", "paul", "steven", "peter", "richard", "charles", "sam", "samuel",
+  "ben", "benjamin", "nathan", "aaron", "justin", "brandon", "austin", "jason", "timothy", "george",
+  "sarah", "emily", "emma", "olivia", "ava", "sophia", "mia", "anna", "maria", "jennifer",
+  "jessica", "ashley", "amanda", "elizabeth", "grace", "chloe", "lily", "hannah", "julia", "victoria",
+]);
+
+/**
+ * Higher = the name is a sharper Google search key. Uses common-name lists
+ * plus how often the surname repeats inside this very tournament graph.
+ */
+function nameUniqueness(name: string, lastNameCounts?: Map<string, number>): number {
+  const tokens = normalizeName(name).split(" ").filter(Boolean);
+  if (!tokens.length) return 0;
+  const first = tokens[0];
+  const last = tokens[tokens.length - 1];
+  let s = 1;
+  if (last && COMMON_LAST_NAMES.has(last)) s -= 0.5;
+  if (first && COMMON_FIRST_NAMES.has(first)) s -= 0.2;
+  if (last) {
+    const dupes = (lastNameCounts?.get(last) || 1) - 1;
+    s -= Math.min(0.3, dupes * 0.1); // surname repeats even inside this graph
+    if (last.length >= 8) s += 0.15; // long surnames are rarely ambiguous
+    if (last.length <= 3) s -= 0.15;
+  }
+  if (tokens.length >= 3) s += 0.1; // middle names sharpen queries a lot
+  if (tokens.join("").length >= 13) s += 0.1;
+  return s;
+}
+
+// US state code → full name, for matching free-text profile locations.
+const US_STATE_NAMES: Record<string, string> = {
+  AL: "alabama", AK: "alaska", AZ: "arizona", AR: "arkansas", CA: "california", CO: "colorado",
+  CT: "connecticut", DE: "delaware", FL: "florida", GA: "georgia", HI: "hawaii", ID: "idaho",
+  IL: "illinois", IN: "indiana", IA: "iowa", KS: "kansas", KY: "kentucky", LA: "louisiana",
+  ME: "maine", MD: "maryland", MA: "massachusetts", MI: "michigan", MN: "minnesota", MS: "mississippi",
+  MO: "missouri", MT: "montana", NE: "nebraska", NV: "nevada", NH: "new hampshire", NJ: "new jersey",
+  NM: "new mexico", NY: "new york", NC: "north carolina", ND: "north dakota", OH: "ohio", OK: "oklahoma",
+  OR: "oregon", PA: "pennsylvania", RI: "rhode island", SC: "south carolina", SD: "south dakota",
+  TN: "tennessee", TX: "texas", UT: "utah", VT: "vermont", VA: "virginia", WA: "washington",
+  WV: "west virginia", WI: "wisconsin", WY: "wyoming", DC: "washington dc",
+};
+
+/** Does a free-text profile location mention the given US state? */
+function locationMatchesState(location: string, state: string): boolean {
+  const code = state.trim().toUpperCase();
+  if (code.length !== 2) return false;
+  if (new RegExp(`(^|[^A-Za-z])${code}([^A-Za-z]|$)`).test(location)) return true;
+  const full = US_STATE_NAMES[code];
+  return !!full && location.toLowerCase().includes(full);
+}
 
 /** Event date window in ms, generously padded (online events can run weekly). */
 function windowFor(ev: GraphEvent): { startMs: number; endMs: number } {
@@ -590,6 +665,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   }
   const effTargetRating = opts.targetRating ?? memberRating.get(targetId);
 
+  // Surname frequency across the whole graph — feeds name-uniqueness ordering
+  // (a surname that repeats even here is a weak Google key).
+  const lastNameCounts = new Map<string, number>();
+  for (const name of memberName.values()) {
+    const tokens = normalizeName(name).split(" ").filter(Boolean);
+    const last = tokens[tokens.length - 1];
+    if (last) lastNameCounts.set(last, (lastNameCounts.get(last) || 0) + 1);
+  }
+  const uniquenessOf = (memberId: string) => nameUniqueness(memberName.get(memberId) || "", lastNameCounts);
+
   const directOpponents = new Set<string>();
   for (const app of appearances.get(targetId) || []) {
     for (const r of app.rounds) if (r.opponentUscfId !== targetId) directOpponents.add(r.opponentUscfId);
@@ -688,15 +773,121 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     return out;
   };
 
+  // --- Attribute matching -----------------------------------------------------
+  // Every candidate is scored against what USCF knows about the player (real
+  // name on the profile, rating with the usual online offset, US country,
+  // location vs state, account age vs the event, activity, game count) BEFORE
+  // any games are pulled. Acceptance needs BOTH a passing attribute score and
+  // games in the event window. A username that merely looks like the name is a
+  // NEGATIVE signal — real-name handles are rare; namesake accounts are not.
+  const ATTR_ACCEPT = 0.7; // accept threshold (with in-window games)
+  const ATTR_SHORTLIST = 0.5; // below this a candidate isn't worth game fetches
+
+  interface AttrResult {
+    score: number;
+    evidence: Evidence[];
+  }
+
+  /** null = hard reject: the account was created after the event ended. */
+  const attributeMatch = (
+    name: string,
+    rating: number | undefined,
+    state: string | undefined,
+    prof: VerifiedProfile,
+    viaGoogle: UsernameCandidate | null,
+    startMs: number,
+    endMs: number
+  ): AttrResult | null => {
+    if (prof.joinedMs && prof.joinedMs > endMs + DAY) return null;
+    const evi: Evidence[] = [];
+    const push = (weight: number, label: string) =>
+      evi.push({ kind: "cross-reference", weight, label, source: "uscf-graph" });
+
+    if (viaGoogle) {
+      push(
+        viaGoogle.sourceUrl ? 0.7 : 0.4,
+        `Google index tied "${name}" to @${prof.username}${viaGoogle.sourceUrl ? ` via ${viaGoogle.sourceUrl}` : ""}`
+      );
+    }
+    if (prof.displayName) {
+      const sim = nameSimilarity(name, prof.displayName);
+      if (sim >= 0.85) push(1.6, `Profile real name "${prof.displayName}" matches ${name}`);
+      else if (sim >= 0.7) push(1.0, `Profile real name "${prof.displayName}" closely resembles ${name}`);
+      else if (sim >= 0.5) push(0.3, `Profile real name "${prof.displayName}" partially matches ${name}`);
+      else push(-1.2, `Profile real name "${prof.displayName}" appears to be someone else`);
+    } else if (nameSimilarity(name, prof.username) >= 0.8) {
+      push(-0.3, `Username @${prof.username} merely resembles the name — a weak NEGATIVE signal, not a match`);
+    }
+    if (rating && prof.rating) {
+      push(
+        onlineRatingMatchWeight(rating, prof.rating),
+        `${platformLabel(prof.platform as OnlinePlatform)} rating ${prof.rating} vs ~${rating} USCF`
+      );
+    }
+    if (rating && prof.uscfRating && Math.abs(prof.uscfRating - rating) <= 200) {
+      push(0.8, `Profile lists USCF rating ${prof.uscfRating} (player ~${rating})`);
+    }
+    if (prof.country) {
+      const isUs = prof.country.trim().slice(-2).toUpperCase() === "US";
+      push(isUs ? 0.3 : -0.5, isUs ? "Profile country US matches US Chess" : `Profile country ${prof.country} for a US Chess member`);
+    }
+    if (state && prof.location && locationMatchesState(prof.location, state)) {
+      push(0.6, `Profile location "${prof.location}" matches ${state}`);
+    }
+    if (!prof.gamesFound) push(-0.8, "Account has no games at all");
+    if (prof.lastActiveMs && prof.lastActiveMs < startMs) {
+      push(-1.0, "Account went inactive before the event even started");
+    }
+    return { score: scoreFromEvidence(evi, 0), evidence: evi };
+  };
+
+  /** Scope archive games to an event: known tournament links first, else the
+   *  event's expected time classes. */
+  const scopeToEvent = (
+    games: ArchiveGame[],
+    links: Map<string, EventLink> | undefined,
+    platform: OnlinePlatform,
+    ev: GraphEvent
+  ): { scoped: ArchiveGame[]; viaLink?: EventLink } => {
+    if (links) {
+      for (const link of links.values()) {
+        if (link.platform !== platform) continue;
+        const inLink = games.filter((g) => gameInLink(g, link));
+        if (inLink.length) return { scoped: inLink, viaLink: link };
+      }
+    }
+    // Manually-paired USCF events were usually played as UNRATED casual
+    // challenges, so don't require rated — the time class is the useful filter.
+    const classes = expectedTimeClasses(ev);
+    return { scoped: games.filter((g) => !g.timeClass || classes.has(g.timeClass)) };
+  };
+
+  /** Round alignment incl. the unrated-only retry for manually-paired events. */
+  const alignWithRetry = (rounds: RoundGame[], scoped: ArchiveGame[], viaLink: boolean) => {
+    let alignment = alignRounds(rounds, scoped, viaLink);
+    if (!alignment && !viaLink) {
+      const unrated = scoped.filter((g) => !g.rated);
+      if (unrated.length && unrated.length !== scoped.length) alignment = alignRounds(rounds, unrated, false);
+    }
+    return alignment;
+  };
+
   const seedCache = new Map<string, Promise<VerifiedProfile | null>>();
 
-  /** Resolve a NON-target member's account. PRIMARY: the Google index, with
-   *  each lead verified by having games inside this event's date window (a
-   *  lead with no in-window games is the wrong username — keep going). LAST
+  /** Resolve a NON-target member's account. PRIMARY: the Google index —
+   *  collect ALL leads, score each candidate profile's attributes against the
+   *  USCF record, then work the shortlist best-first; acceptance needs a
+   *  passing attribute score AND games inside this event's date window
+   *  (crosstable round alignment settles it outright when it bites). LAST
    *  RESORT, only when the index yields nothing verifiable: careful handle
-   *  guessing + Lichess autocomplete, strictly gated on the profile's real
-   *  name so a random handle can't sneak in. */
-  const resolveMemberOn = (memberId: string, platform: OnlinePlatform, ev: GraphEvent): Promise<VerifiedProfile | null> => {
+   *  guessing + Lichess autocomplete, strictly gated on the profile's REAL
+   *  name — a handle that merely looks like the name never qualifies. */
+  const resolveMemberOn = (
+    memberId: string,
+    platform: OnlinePlatform,
+    ev: GraphEvent,
+    state?: EventState
+  ): Promise<VerifiedProfile | null> => {
     const key = `${memberId}:${platform}:${ev.eventId}`;
     const hit = seedCache.get(key);
     if (hit) return hit;
@@ -704,40 +895,77 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const promise = (async (): Promise<VerifiedProfile | null> => {
       if (!name || memberId === targetId) return null;
       const app = (appearances.get(memberId) || []).find((a) => a.event.eventId === ev.eventId);
+      const win = app ?? { startMs: windowFor(ev).startMs, endMs: windowFor(ev).endMs, rounds: [] as RoundGame[] };
 
-      // 1. PRIMARY: Google-index leads, date-verified against this event.
+      // 1. PRIMARY: the Google index — never settle for the first hit.
       const leads = candidatesForPlatform(await googleCandidatesFor(memberId, ev), platform);
-      for (const cand of leads) {
-        if (outOfTime()) return null;
-        if (dudHandles.has(`${platform}:${cand.username.toLowerCase()}`)) continue;
-        const prof = await verifyOn(platform, cand.username);
-        if (!prof || dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) continue;
-        // A profile whose real name clearly belongs to somebody else is a bad
-        // extraction (e.g. a coach mentioned on the same page) — skip it.
-        if (prof.displayName && nameSimilarity(name, prof.displayName) < 0.25) continue;
-        if (app) {
-          const games = await windowGames(platform, prof.username, app.startMs, app.endMs);
+      if (leads.length && !outOfTime()) {
+        const scored: { cand: UsernameCandidate; prof: VerifiedProfile; score: number }[] = [];
+        await pool(
+          leads,
+          4,
+          async (cand) => {
+            if (outOfTime()) return;
+            if (dudHandles.has(`${platform}:${cand.username.toLowerCase()}`)) return;
+            const prof = await verifyOn(platform, cand.username);
+            if (!prof || dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) return;
+            const attr = attributeMatch(name, memberRating.get(memberId), undefined, prof, cand, win.startMs, win.endMs);
+            if (!attr) return; // account created after the event — impossible
+            scored.push({ cand, prof, score: attr.score });
+          },
+          () => outOfTime()
+        );
+        scored.sort((a, b) => b.score - a.score);
+        if (scored.length) {
+          log(
+            `${name}: ${scored.length} Google lead(s) on ${platformLabel(platform)}; best attribute match ${Math.round(
+              scored[0].score * 100
+            )}%.`
+          );
+        }
+
+        let fallback: VerifiedProfile | null = null;
+        for (const { prof, score } of scored) {
+          if (outOfTime()) break;
+          if (score < ATTR_SHORTLIST) break; // sorted — the rest are worse
+          const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
           if (!games.length) {
             log(
-              `Google lead @${prof.username} (${name}) played no ${platformLabel(platform)} games during "${ev.name}" — not the right account for this event; trying the next lead.`
+              `Google lead @${prof.username} (${name}, ${Math.round(score * 100)}% attributes) played no ${platformLabel(
+                platform
+              )} games during "${ev.name}" — wrong account for this event; trying the next lead.`
             );
             continue;
           }
+          // Crosstable check: do the in-window games line up with the member's
+          // actual rounds (result sequence + tournament linkage)?
+          const { scoped, viaLink } = scopeToEvent(games, state?.links, platform, ev);
+          const alignment = app ? alignWithRetry(app.rounds, scoped, !!viaLink) : null;
+          if (alignment) {
+            log(
+              `Google index: ${name} → @${prof.username} (${platformLabel(platform)}) — ${Math.round(
+                score * 100
+              )}% attributes AND their event games align with the crosstable.`
+            );
+            return prof;
+          }
+          if (score >= ATTR_ACCEPT && !fallback) {
+            fallback = prof;
+            log(
+              `Google index: ${name} → @${prof.username} (${platformLabel(platform)}) — ${Math.round(
+                score * 100
+              )}% attribute match with games in the event window.`
+            );
+          }
         }
-        log(
-          `Google index: ${name} → @${prof.username} on ${platformLabel(platform)}${
-            cand.sourceUrl ? ` via ${cand.sourceUrl}` : ""
-          } — has games in the event window.`
-        );
-        return prof;
+        if (fallback) return fallback;
       }
 
       // 2. ABSOLUTE LAST RESORT: platform-side guessing (only after Google).
-      const gate = (prof: VerifiedProfile): boolean => {
-        const sim = prof.displayName ? nameSimilarity(name, prof.displayName) : 0;
-        const handleSim = nameSimilarity(name, prof.username);
-        return sim >= 0.72 || handleSim >= 0.9;
-      };
+      // The profile must show a matching REAL name — a username that looks
+      // like the player's name is meaningless (namesakes, not identities).
+      const gate = (prof: VerifiedProfile): boolean =>
+        !!prof.displayName && nameSimilarity(name, prof.displayName) >= 0.72;
       for (const h of guessHandles(name)) {
         if (outOfTime()) return null;
         if (dudHandles.has(`${platform}:${h.toLowerCase()}`)) continue;
@@ -784,6 +1012,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     sourceUrl?: string;
     /** In-window games against handles known to belong to this section. */
     sectionOverlap?: number;
+    /** 0..1 attribute-match score (profile vs USCF record), when computed. */
+    attrScore?: number;
   }
 
   const foundKeys = new Set<string>();
@@ -894,6 +1124,18 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           source: "uscf-graph",
         });
         break;
+    }
+    if (typeof via.attrScore === "number") {
+      // Map the 0..1 attribute-match score to a bounded log-odds nudge.
+      const w = Math.max(-0.6, Math.min(1.0, (via.attrScore - 0.5) * 2));
+      evidence.push({
+        kind: "cross-reference",
+        weight: w,
+        label: `Profile attributes (name, rating, country, location, account age) match the USCF record at ${Math.round(
+          via.attrScore * 100
+        )}%`,
+        source: "uscf-graph",
+      });
     }
 
     if (via.link) {
@@ -1163,35 +1405,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
 
     // (b) Pairing alignment: source's crosstable rounds ↔ event-scoped games.
-    let scoped: ArchiveGame[] = [];
-    let viaLink: EventLink | undefined;
-    for (const link of state.links.values()) {
-      if (link.platform !== platform) continue;
-      const inLink = games.filter((g) => gameInLink(g, link));
-      if (inLink.length) {
-        scoped = inLink;
-        viaLink = link;
-        break;
-      }
-    }
-    if (!scoped.length) {
-      // USCF events hosted as manual pairings were usually played as UNRATED
-      // casual challenges (so they wouldn't double-rate), while the surrounding
-      // noise (kids' bullet marathons) is mostly rated — so do NOT require
-      // rated here; the expected time class is the useful filter.
-      const classes = expectedTimeClasses(ev);
-      scoped = games.filter((g) => !g.timeClass || classes.has(g.timeClass));
-    }
-
-    let alignment = alignRounds(app.rounds, scoped, !!viaLink);
-    if (!alignment && !viaLink) {
-      // Second try: only the unrated games — manually-paired USCF events were
-      // played unrated, so this strips the rated casual noise around them.
-      const unrated = scoped.filter((g) => !g.rated);
-      if (unrated.length && unrated.length !== scoped.length) {
-        alignment = alignRounds(app.rounds, unrated, false);
-      }
-    }
+    const { scoped, viaLink } = scopeToEvent(games, state.links, platform, ev);
+    const alignment = alignWithRetry(app.rounds, scoped, !!viaLink);
     if (!alignment && app.rounds.length) {
       log(
         `Couldn't align @${handle}'s ${scoped.length} in-window game(s) with ${srcName}'s ${app.rounds.length} crosstable rounds${
@@ -1279,9 +1494,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         if (found || outOfTime(localDeadline)) return;
         const prof = await verifyOn(platform, g.oppHandle);
         if (!prof) return;
-        const nm = prof.displayName || prof.username;
-        const simTarget = nameSimilarity(targetName, nm);
-        if ((prof.displayName && simTarget >= 0.78) || (!prof.displayName && simTarget >= 0.9)) {
+        // Only a REAL name on the profile counts — a username that merely
+        // resembles the target's name is how namesakes sneak in.
+        const simTarget = prof.displayName ? nameSimilarity(targetName, prof.displayName) : 0;
+        if (prof.displayName && simTarget >= 0.78) {
           if (
             recordTarget(platform, prof, {
               method: "opponent-archive",
@@ -1349,22 +1565,54 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
 
     for (const platform of platforms) {
-      for (const cand of candidatesForPlatform(cands, platform)) {
+      // Verify and attribute-score EVERY candidate first (real name, rating
+      // offset, country, state/location, account age, activity), then work the
+      // shortlist best-first — the first Google hit is often a namesake.
+      const scored: { cand: UsernameCandidate; prof: VerifiedProfile; score: number }[] = [];
+      await pool(
+        candidatesForPlatform(cands, platform),
+        4,
+        async (cand) => {
+          if (outOfTime(localDeadline)) return;
+          const rejectKey = `${platform}:${cand.username.toLowerCase()}`;
+          if (googleTargetRejects.has(rejectKey)) return;
+          const prof = await verifyOn(platform, cand.username);
+          if (!prof) return;
+          if (targetFideId && prof.fideId && digits(prof.fideId) !== targetFideId) {
+            googleTargetRejects.add(rejectKey);
+            log(`Google lead @${prof.username} links FIDE ID ${prof.fideId} — contradicts ${targetName}'s (${targetFideId}); rejected.`);
+            return;
+          }
+          const attr = attributeMatch(targetName, effTargetRating, graph.rootState, prof, cand, app.startMs, app.endMs);
+          if (!attr) {
+            googleTargetRejects.add(rejectKey);
+            log(`Google lead @${prof.username} was created after "${ev.name}" ended — impossible; rejected.`);
+            return;
+          }
+          scored.push({ cand, prof, score: attr.score });
+        },
+        () => outOfTime(localDeadline)
+      );
+      scored.sort((a, b) => b.score - a.score);
+      if (phase === "early" && scored.length) {
+        log(
+          `${targetName}: ${scored.length} Google lead(s) on ${platformLabel(platform)} — attribute scores: ${scored
+            .slice(0, 4)
+            .map((s) => `@${s.prof.username} ${Math.round(s.score * 100)}%`)
+            .join(", ")}${scored.length > 4 ? ", …" : ""}.`
+        );
+      }
+
+      for (const { cand, prof, score } of scored) {
         if (outOfTime(localDeadline)) return false;
-        const rejectKey = `${platform}:${cand.username.toLowerCase()}`;
-        if (googleTargetRejects.has(rejectKey)) continue;
-        const prof = await verifyOn(platform, cand.username);
-        if (!prof) continue;
-        if (targetFideId && prof.fideId && digits(prof.fideId) !== targetFideId) {
-          googleTargetRejects.add(rejectKey);
-          log(`Google lead @${prof.username} links FIDE ID ${prof.fideId} — contradicts ${targetName}'s (${targetFideId}); rejected.`);
-          continue;
-        }
+        if (score < ATTR_SHORTLIST) break; // sorted — the rest are worse
         const games = await windowGames(platform, prof.username, app.startMs, app.endMs);
         if (!games.length) {
           if (phase === "early") {
             log(
-              `Google lead @${prof.username} played no ${platformLabel(platform)} games during "${ev.name}" — not the right username for this event; continuing the search.`
+              `Google lead @${prof.username} (${Math.round(score * 100)}% attributes) played no ${platformLabel(
+                platform
+              )} games during "${ev.name}" — not the right username for this event; continuing the search.`
             );
           }
           continue;
@@ -1374,27 +1622,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         for (const link of linksFromGames(games)) {
           if (!state.links.has(linkKey(link))) state.links.set(linkKey(link), link);
         }
-        // Scope the games to the event exactly like traceFromSource does.
-        let scoped: ArchiveGame[] = [];
-        let viaLink: EventLink | undefined;
-        for (const link of state.links.values()) {
-          if (link.platform !== platform) continue;
-          const inLink = games.filter((g) => gameInLink(g, link));
-          if (inLink.length) {
-            scoped = inLink;
-            viaLink = link;
-            break;
-          }
-        }
-        if (!scoped.length) {
-          const classes = expectedTimeClasses(ev);
-          scoped = games.filter((g) => !g.timeClass || classes.has(g.timeClass));
-        }
-        let alignment = alignRounds(app.rounds, scoped, !!viaLink);
-        if (!alignment && !viaLink) {
-          const unrated = scoped.filter((g) => !g.rated);
-          if (unrated.length && unrated.length !== scoped.length) alignment = alignRounds(app.rounds, unrated, false);
-        }
+        const { scoped, viaLink } = scopeToEvent(games, state.links, platform, ev);
+        const alignment = alignWithRetry(app.rounds, scoped, !!viaLink);
         // Do the lead's in-window opponents include handles already proven to
         // be section players?
         const knownSectionHandles = new Set<string>();
@@ -1407,6 +1636,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         ).length;
 
         if (alignment || viaLink || overlap > 0) {
+          // Structural proof (round alignment / the linked tournament / games
+          // against confirmed section players) settles it outright.
           if (
             recordTarget(platform, prof, {
               method: "google",
@@ -1417,20 +1648,24 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
               totalRounds: app.rounds.length,
               sourceUrl: cand.sourceUrl,
               sectionOverlap: overlap || undefined,
+              attrScore: score,
             })
           )
             return true;
           continue;
         }
-        // Games in the window but nothing tying them to THIS event's structure
-        // yet: record the lead (it surfaces in results) and keep digging — the
-        // late phase re-tests it once links and mapped handles are richer.
-        recordTarget(platform, prof, {
-          method: "google-lead",
-          event: ev,
-          game: scoped[0] || games[0],
-          sourceUrl: cand.sourceUrl,
-        });
+        // Games in the window but no structural tie yet: only an attribute
+        // score past the acceptance bar earns a capped "lead" record; the late
+        // phase re-tests once links and mapped handles are richer.
+        if (score >= ATTR_ACCEPT) {
+          recordTarget(platform, prof, {
+            method: "google-lead",
+            event: ev,
+            game: scoped[0] || games[0],
+            sourceUrl: cand.sourceUrl,
+            attrScore: score,
+          });
+        }
       }
     }
     return false;
@@ -1539,15 +1774,18 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const oppHere = new Set(targetRounds.map((r) => r.opponentUscfId));
     if (!resuming) {
       // Seed candidate order: the target's direct opponents in THIS event, then
-      // every other section player — the full brute-force sweep hard cases need.
+      // every other section player — each group sorted by NAME UNIQUENESS, so
+      // "Ujwal Garine" (a sharp Google key) is worked before "John Smith"
+      // (a swamp of namesakes).
+      const byUniqueness = (a: string, b: string) => uniquenessOf(b) - uniquenessOf(a);
       ws.seedOrder = [
-        ...roster.filter((p) => oppHere.has(p.uscfId)).map((p) => p.uscfId),
-        ...roster.filter((p) => p.uscfId !== targetId && !oppHere.has(p.uscfId)).map((p) => p.uscfId),
+        ...roster.filter((p) => oppHere.has(p.uscfId)).map((p) => p.uscfId).sort(byUniqueness),
+        ...roster.filter((p) => p.uscfId !== targetId && !oppHere.has(p.uscfId)).map((p) => p.uscfId).sort(byUniqueness),
       ].filter((id, i, arr) => arr.indexOf(id) === i);
       log(
         `Working "${ev.name}"${ev.sectionName ? ` — ${ev.sectionName}` : ""} (${ev.ratingSystem}${
           ev.startDate ? `, ${ev.startDate}` : ""
-        }): ${roster.length} players, ${oppHere.size} direct opponents, platform ${platforms.map(platformLabel).join(" + ")}.`
+        }): ${roster.length} players, ${oppHere.size} direct opponents, platform ${platforms.map(platformLabel).join(" + ")}. Working the most unique names first.`
       );
     } else {
       log(`Back to "${ev.name}" with time to spare — resuming where we left off.`);
@@ -1577,7 +1815,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             for (const platform of order) {
               if (outOfTime(localDeadline)) return;
               if (mapped.get(memberId)?.has(platform)) continue;
-              const prof = await resolveMemberOn(memberId, platform, ev);
+              const prof = await resolveMemberOn(memberId, platform, ev, state);
               if (prof) {
                 setMapping(memberId, platform, { profile: prof, how: "seed", chain: [] });
                 enqueue(state, { memberId, platform, mapping: mapped.get(memberId)!.get(platform)! });

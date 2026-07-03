@@ -259,7 +259,7 @@ export function findUsernameCandidates(req: UsernameSearchRequest, signal?: Abor
     if (!data || data.available === false || !Array.isArray(data.candidates)) return [];
     return (data.candidates as UsernameCandidate[])
       .filter((c) => c && (c.platform === "chesscom" || c.platform === "lichess") && typeof c.username === "string")
-      .slice(0, 24);
+      .slice(0, 40);
   })();
 
   usernameCache.set(key, promise);

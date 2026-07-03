@@ -23,11 +23,16 @@ export interface VerifiedProfile {
   /** Per-format ratings, e.g. { blitz: 1850, rapid: 1900 }. */
   ratings?: Record<string, number>;
   country?: string; // ISO-2 where possible
+  /** Free-text location from the profile ("Seattle, WA"), when given. */
+  location?: string;
   /** FIDE ID the account owner linked on their profile (Lichess only). */
   fideId?: string;
   uscfRating?: number;
   fideRating?: number;
   lastActiveMs?: number;
+  /** When the account was created — an account younger than the tournament
+   *  cannot be the player who appeared in it. */
+  joinedMs?: number;
   gamesFound?: number;
   profileUrl: string;
 }
@@ -112,10 +117,12 @@ export async function verifyLichess(
       rating,
       ratings: Object.keys(ratings).length ? ratings : undefined,
       country: profile.country || undefined,
+      location: typeof profile.location === "string" && profile.location.trim() ? profile.location.trim() : undefined,
       fideId: plausibleFideId(profile.fideId),
       fideRating: typeof profile.fideRating === "number" ? profile.fideRating : undefined,
       uscfRating: typeof profile.uscfRating === "number" ? profile.uscfRating : undefined,
       lastActiveMs: typeof data.seenAt === "number" ? data.seenAt : undefined,
+      joinedMs: typeof data.createdAt === "number" ? data.createdAt : undefined,
       gamesFound: data.count?.all,
       profileUrl: data.url || `https://lichess.org/@/${data.username || clean}`,
     };
@@ -190,9 +197,11 @@ export async function verifyChesscom(
       rating,
       ratings: Object.keys(ratings).length ? ratings : undefined,
       country,
+      location: typeof data.location === "string" && data.location.trim() ? data.location.trim() : undefined,
       // Chess.com's `fide` field is the player's FIDE *rating*, not their ID.
       fideRating: typeof data.fide === "number" ? data.fide : undefined,
       lastActiveMs: typeof data.last_online === "number" ? data.last_online * 1000 : undefined,
+      joinedMs: typeof data.joined === "number" ? data.joined * 1000 : undefined,
       gamesFound,
       profileUrl: data.url || `https://www.chess.com/member/${data.username || clean}`,
     };

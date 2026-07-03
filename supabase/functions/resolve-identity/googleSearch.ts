@@ -208,10 +208,10 @@ interface CseItem {
 // the AI-search backend carry the load instead.
 let cseCooldownUntil = 0;
 
-async function cseQuery(query: string, key: string, cx: string): Promise<CseItem[] | "quota"> {
+async function cseQuery(query: string, key: string, cx: string, start = 1): Promise<CseItem[] | "quota"> {
   const url =
     `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(key)}` +
-    `&cx=${encodeURIComponent(cx)}&num=10&q=${encodeURIComponent(query)}`;
+    `&cx=${encodeURIComponent(cx)}&num=10&start=${start}&q=${encodeURIComponent(query)}`;
   try {
     const res = await fetch(url, { headers: { Accept: "application/json" } });
     if (res.status === 429 || res.status === 403) return "quota";
@@ -222,6 +222,10 @@ async function cseQuery(query: string, key: string, cx: string): Promise<CseItem
     return [];
   }
 }
+
+/** How many ladder queries also get a second result page. The right profile is
+ *  often NOT on page one (namesakes crowd it out), so deep queries matter. */
+const CSE_PAGE2_QUERIES = 10;
 
 async function searchViaCse(
   queries: string[],
@@ -234,22 +238,30 @@ async function searchViaCse(
   let tried = 0;
   let quotaHit = false;
 
-  // Parallel workers over the ladder, gently paced so Google doesn't block us.
+  // Page 1 of every ladder query, then page 2 of the most precise ones — the
+  // goal is MANY distinct candidates (verification happens downstream), never
+  // just the first hit.
+  const work: { q: string; start: number }[] = [
+    ...queries.map((q) => ({ q, start: 1 })),
+    ...queries.slice(0, CSE_PAGE2_QUERIES).map((q) => ({ q, start: 11 })),
+  ];
+
+  // Parallel workers, gently paced so Google doesn't block us.
   const CONCURRENCY = 3;
   const PACE_MS = 250;
   let idx = 0;
   let lastStart = 0;
-  const enough = () => out.length >= 14;
+  const enough = () => out.length >= 30;
 
   await Promise.all(
-    Array.from({ length: Math.min(CONCURRENCY, queries.length) }, async () => {
-      while (idx < queries.length && !enough() && !quotaHit) {
-        const q = queries[idx++];
+    Array.from({ length: Math.min(CONCURRENCY, work.length) }, async () => {
+      while (idx < work.length && !enough() && !quotaHit) {
+        const { q, start } = work[idx++];
         const wait = Math.max(0, lastStart + PACE_MS - Date.now());
         lastStart = Math.max(Date.now(), lastStart + PACE_MS);
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
         tried++;
-        const items = await cseQuery(q, key, cx);
+        const items = await cseQuery(q, key, cx, start);
         if (items === "quota") {
           quotaHit = true;
           cseCooldownUntil = Date.now() + 10 * 60_000;
@@ -258,7 +270,7 @@ async function searchViaCse(
         }
         for (const item of items) {
           const blob = `${item.link || ""}\n${item.title || ""}\n${item.snippet || ""}`;
-          for (const c of extractCandidatesFromText(blob, `Google: ${q}`)) {
+          for (const c of extractCandidatesFromText(blob, `Google: ${q}${start > 1 ? " (p2)" : ""}`)) {
             pushCandidate(out, seen, { ...c, sourceUrl: item.link || c.sourceUrl });
           }
         }
@@ -291,14 +303,14 @@ function buildAiSearchPrompt(req: UsernameSearchRequest, queries: string[]): str
 PLAYER:
 ${ctx.join("\n")}
 
-Run web searches following this exact ladder, starting from the top, until you find profile URLs or name↔username pairings (you do not need to run all of them — stop escalating once you have solid candidates, but DO try both platforms):
+Run web searches following this ladder (multiple query VARIATIONS, both platforms — do not settle for the first plausible hit; the correct account is often buried behind namesakes and appears only under a different query or deeper in the results):
 ${queries.map((q, i) => `${i + 1}. ${q}`).join("\n")}
 
 Rules:
-- Only report usernames that an indexed page actually ties to this person (their name on the profile, or a page mentioning both the name and the handle). Do NOT invent or guess handles from the name.
+- Collect EVERY distinct username the index ties to this person — main account, older accounts, and even same-name candidates that might be namesakes. Verification (ratings, games on the tournament dates) happens downstream; your job is a COMPLETE candidate list, up to 12 entries, not a single answer.
+- Only report usernames that an indexed page actually ties to the person or name (their name on the profile, or a page mentioning both the name and the handle). Do NOT invent or guess handles from the name — a username that merely LOOKS like the name (e.g. johnsmith) is worthless unless a page connects it to them; real players almost never use their real name as a handle.
 - Prefer exact profile URLs. Include the URL of the page that made the connection.
 - Rating sanity: their online rating should be roughly compatible with the USCF rating above (online is often a few hundred points lower). Note mismatches but still report the candidate.
-- If several distinct people share the name, report each candidate — verification happens downstream.
 
 Return STRICT JSON only (no prose, no markdown fences):
 {"candidates":[{"platform":"lichess"|"chesscom","username":"handle","url":"page that ties name to handle","why":"one short sentence"}],"note":"one short sentence on overall findings"}`;
@@ -396,9 +408,9 @@ export async function findUsernamesOnWeb(
 
 /** Requested-platform candidates first, preserving discovery order. */
 function rankForPlatforms(cands: UsernameCandidate[], platforms?: WebPlatform[]): UsernameCandidate[] {
-  if (!platforms?.length || platforms.length >= 2) return cands.slice(0, 24);
+  if (!platforms?.length || platforms.length >= 2) return cands.slice(0, 40);
   const want = new Set(platforms);
-  return [...cands.filter((c) => want.has(c.platform)), ...cands.filter((c) => !want.has(c.platform))].slice(0, 24);
+  return [...cands.filter((c) => want.has(c.platform)), ...cands.filter((c) => !want.has(c.platform))].slice(0, 40);
 }
 
 // ---------------------------------------------------------------------------

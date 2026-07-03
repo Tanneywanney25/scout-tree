@@ -237,11 +237,16 @@ export async function resolveIdentity(
     const profile = await verifyAccount(platform, username, signal);
     if (!profile) return null;
     const evidence: Evidence[] = [];
-    const candidateName = profile.displayName || profile.username;
-    const sim = Math.max(
-      opts.attachName ? nameSimilarity(opts.attachName, candidateName) : 0,
-      nameSimilarity(query.name, candidateName)
-    );
+    // Name evidence comes from the profile's REAL name only. A username that
+    // merely looks like the player's name is NOT a match — real-name handles
+    // are rare, namesake accounts are not — so it never adds confidence (and
+    // counts slightly against when it is the only "signal").
+    const sim = profile.displayName
+      ? Math.max(
+          opts.attachName ? nameSimilarity(opts.attachName, profile.displayName) : 0,
+          nameSimilarity(query.name, profile.displayName)
+        )
+      : 0;
     if (opts.hinted) {
       evidence.push({
         kind: "username-hint",
@@ -258,13 +263,22 @@ export async function resolveIdentity(
           source: "verification",
         });
       }
-    } else {
+    } else if (profile.displayName) {
       evidence.push({
         kind: "name-match",
         weight: nameMatchWeight(sim),
-        label: profile.displayName
-          ? `Profile name "${profile.displayName}" ${sim >= 0.8 ? "matches" : "resembles"} "${query.name}"`
-          : `Suggested handle "${profile.username}" verified`,
+        label: `Profile name "${profile.displayName}" ${sim >= 0.8 ? "matches" : "resembles"} "${query.name}"`,
+        source: "verification",
+      });
+    } else {
+      const handleSim = nameSimilarity(query.name, profile.username);
+      evidence.push({
+        kind: "name-match",
+        weight: handleSim >= 0.8 ? -0.3 : 0,
+        label:
+          handleSim >= 0.8
+            ? `Username @${profile.username} merely resembles the name — a weak negative, not a match`
+            : "Profile shows no real name",
         source: "verification",
       });
     }
