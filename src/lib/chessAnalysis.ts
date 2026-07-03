@@ -109,9 +109,6 @@ export async function analyzeGamesIncremental(
   let skipPlayerNotFound = 0;
   const normalizedTarget = targetUsername.toLowerCase();
 
-  // Reduced logging - only log batch summary
-  console.log(`[ANALYSIS] Batch: ${newGames.length} games for "${normalizedTarget}", color: ${playerColor}`);
-
   for (let i = 0; i < newGames.length; i++) {
     const game = newGames[i];
     const chess = new Chess();
@@ -174,11 +171,6 @@ export async function analyzeGamesIncremental(
       const positionFen = trackingChess.fen().split(' ').slice(0, 2).join(' '); // Board + turn only
       
       const moveKey = `${move.from}${move.to}${move.promotion || ""}`;
-      
-      // Debug logging (first 3 games)
-      if (totalGames <= 3) {
-        console.log(`  Move ${j}: ${move.san} (${moveKey})`);
-      }
 
       // Build tree by move sequence - each path creates separate nodes
       let targetNode: OpeningNode;
@@ -207,20 +199,18 @@ export async function analyzeGamesIncremental(
       else if (result === "draw") currentNode.draws++;
       else currentNode.losses++;
 
-      currentNode.winRate = currentNode.count > 0 
-        ? (currentNode.wins + currentNode.draws * 0.5) / currentNode.count 
+      currentNode.winRate = currentNode.count > 0
+        ? (currentNode.wins + currentNode.draws * 0.5) / currentNode.count
         : 0;
     }
-    
-    console.log(`[ANALYSIS] Game ${totalGames} added all ${maxPlies} moves to tree`);
-    
+
     // Optional: Call progress callback after each game
     if (onProgress) {
       onProgress(totalGames);
     }
   }
 
-  console.log(`[ANALYSIS] Complete. Processed: ${newGames.length}, Skipped(PGN): ${skipPgn}, Skipped(player): ${skipPlayerNotFound}, Successfully analyzed: ${totalGames - existingAnalysis.totalGames}, Total: ${totalGames}`);
+  void skipPgn; void skipPlayerNotFound;
   rootNode.count = totalGames;
 
   const allLines = extractAllLines(rootNode, "", []);

@@ -24,8 +24,10 @@ interface FilterSnapshot {
   opponentName: string;
 }
 import { toast } from "sonner";
-import { fetchLichessGames, fetchChessComGames, type GameData } from "@/lib/chessApi";
-import { analyzeGames, serializeOpeningTree, createEmptyAnalysis, analyzeGamesIncremental, type AnalysisResult } from "@/lib/chessAnalysis";
+import { fetchLichessGames, fetchChessComGames, createFetchBudget, type GameData } from "@/lib/chessApi";
+import { serializeOpeningTree, createEmptyAnalysis, type AnalysisResult } from "@/lib/chessAnalysis";
+import { TreePool } from "@/lib/analysis/treePool";
+import { mergeSerializedIntoNode, finalizeAnalysis } from "@/lib/analysis/treeCore";
 import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -375,6 +377,10 @@ const Scout = () => {
     progressRef.current = 0; // Reset progress ref
     console.log('[TIMING] State reset at', (performance.now() - t0).toFixed(0), 'ms');
 
+    // Pool of parallel tree-building workers — declared out here so the catch /
+    // finally blocks can finalize partial work and always tear it down.
+    let pool: TreePool | null = null;
+
     try {
       const actualPlatform = platform === "auto" ? "lichess" : platform;
       let analysis = createEmptyAnalysis(color);
@@ -397,41 +403,50 @@ const Scout = () => {
       console.log('[FETCH-CONFIG] Filters:', JSON.stringify(fetchOptions, null, 2));
 
       toast.loading("Fetching games...", { id: progressToast, duration: Infinity });
-      
-      // Queue-based batch processing to prevent blocking stream reading
-      const batchQueue: GameData[][] = [];
-      let processingBatches = false;
-      let lastAnalysisUpdate = 0;
+
       collectedGamesRef.current = []; // Reset game collection
-      
-      const processBatches = async () => {
-        if (processingBatches) return;
-        processingBatches = true;
-        while (batchQueue.length > 0) {
-          const batch = batchQueue.shift()!;
-          try {
-            // Collect games for the advanced analyses (profile / structures /
-            // endgames analyze as many as possible, capped for performance).
-            if (collectedGamesRef.current.length < 300) {
-              const remaining = 300 - collectedGamesRef.current.length;
-              collectedGamesRef.current.push(...batch.slice(0, remaining));
-            }
-            
-            analysis = await analyzeGamesIncremental(analysis, batch, username);
-            analysisRef.current = analysis; // Update synchronously for abort handler
-            // Throttle state updates to max 5 per second
-            const now = performance.now();
-            if (now - lastAnalysisUpdate > 200) {
-              setCurrentAnalysis(analysis);
-              lastAnalysisUpdate = now;
-            }
-          } catch (error) {
-            console.error('Error processing game batch:', error);
-          }
+
+      // A shared budget (raw-game cap + wall-clock deadline) bounds the fetch so
+      // the whole scout returns inside ~90s no matter how active the player is.
+      const budget = createFetchBudget();
+
+      // Parallel worker pool: PGN parsing / tree building runs off the main
+      // thread across CPU cores while fetching continues, then partial trees are
+      // merged into the canonical Map tree here. The Map root is mutated in place
+      // by mergeSerializedIntoNode; each merge produces a fresh wrapper object so
+      // React re-renders the live preview.
+      pool = new TreePool();
+      const root = analysis.openingTree;
+      let mergedGames = 0;
+      let lastPreview = 0;
+      const outstanding: Promise<void>[] = [];
+      let dispatchBuffer: GameData[] = [];
+      const DISPATCH_CHUNK = 48; // amortize postMessage + chess.js init per worker job
+
+      const mergePartial = (res: { tree: any; gamesAdded: number }) => {
+        mergeSerializedIntoNode(root, res.tree);
+        mergedGames += res.gamesAdded;
+        root.count = mergedGames;
+        analysis = { ...analysis, totalGames: mergedGames, openingTree: root };
+        analysisRef.current = analysis;
+        const now = performance.now();
+        if (now - lastPreview > 250) {
+          lastPreview = now;
+          setCurrentAnalysis(analysis);
         }
-        processingBatches = false;
       };
-      
+
+      const dispatch = (games: GameData[]) => {
+        if (games.length === 0 || !pool) return;
+        outstanding.push(pool.process(games, username).then(mergePartial));
+      };
+      const flushDispatch = () => {
+        if (dispatchBuffer.length > 0) {
+          dispatch(dispatchBuffer);
+          dispatchBuffer = [];
+        }
+      };
+
       // Build the list of sources to fetch: the primary account plus an optional
       // second account on the other platform (merged into one report).
       const sources: { platform: string; user: string }[] = [
@@ -467,15 +482,24 @@ const Scout = () => {
               progressRef.current = baseCount + count;
               setProgress(baseCount + count);
               toast.loading(`Analyzing ${baseCount + count} games...`, { id: progressToast, duration: Infinity });
-              if (baseCount + count > 2000 && !warning) {
-                setWarning("Large dataset - processing all games...");
-              }
             },
             (gameBatch) => {
-              batchQueue.push(normalizeBatch(gameBatch, src.user));
-              processBatches(); // Fire and forget - no await
+              const norm = normalizeBatch(gameBatch, src.user);
+              // Collect games for the advanced analyses (profile / structures /
+              // endgames), capped for performance.
+              if (collectedGamesRef.current.length < 300) {
+                const remaining = 300 - collectedGamesRef.current.length;
+                collectedGamesRef.current.push(...norm.slice(0, remaining));
+              }
+              // Buffer and hand off to a worker in amortized chunks.
+              dispatchBuffer.push(...norm);
+              if (dispatchBuffer.length >= DISPATCH_CHUNK) {
+                dispatch(dispatchBuffer);
+                dispatchBuffer = [];
+              }
             },
-            abortControllerRef.current?.signal
+            abortControllerRef.current?.signal,
+            budget
           );
         } catch (srcError: any) {
           if (srcError?.name === "AbortError") throw srcError; // propagate stops
@@ -484,12 +508,18 @@ const Scout = () => {
           console.warn("[SCOUT] Secondary source failed:", srcError?.message);
           toast.message(`Couldn't fetch ${platformLabel(src.platform)} games for "${src.user}".`);
         }
-        // Drain this source's batches before moving to the next account.
-        while (batchQueue.length > 0 || processingBatches) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
+        flushDispatch(); // hand off this source's trailing games
         baseCount += srcCount;
       }
+
+      // Wait for every worker to finish folding in its games, then compute the
+      // weakest/strongest lines exactly once (not per batch).
+      flushDispatch();
+      await Promise.all(outstanding);
+      pool.terminate();
+      pool = null;
+      analysis = finalizeAnalysis(root, mergedGames, color);
+      analysisRef.current = analysis;
       setCurrentAnalysis(analysis);
       toast.dismiss(progressToast);
 
@@ -520,8 +550,19 @@ const Scout = () => {
       toast.dismiss();
       
       if (error.name === 'AbortError') {
-        // Use synchronously-updated analysisRef (not throttled state ref)
-        const analysisSnapshot = analysisRef.current;
+        // Finalize whatever the workers merged so far so the partial report still
+        // carries weakest/strongest lines, then use that snapshot.
+        let analysisSnapshot = analysisRef.current;
+        if (analysisSnapshot?.openingTree) {
+          try {
+            analysisSnapshot = finalizeAnalysis(
+              analysisSnapshot.openingTree,
+              analysisSnapshot.totalGames,
+              color
+            );
+            analysisRef.current = analysisSnapshot;
+          } catch { /* keep raw snapshot */ }
+        }
         const gamesAnalyzed = analysisSnapshot?.totalGames || 0;
         const gamesProgress = progressRef.current || 0;
         const collectedCount = collectedGamesRef.current.length;
@@ -584,6 +625,10 @@ const Scout = () => {
         toast.error(error.message || "Failed to generate report. Try again.");
       }
     } finally {
+      if (pool) {
+        try { pool.terminate(); } catch { /* ignore */ }
+        pool = null;
+      }
       if (abortControllerRef.current) {
         abortControllerRef.current = null;
       }

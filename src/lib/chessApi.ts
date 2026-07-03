@@ -22,6 +22,38 @@ export interface FetchOptions {
   playerColor?: "white" | "black"; // Color the user will play (opponent plays opposite)
 }
 
+// A scout must return fast (≤90s). Lichess hard-throttles game export to ~8
+// games/s per stream and allows only 2 concurrent streams per IP (a 3rd → 429),
+// so the real ceiling is ~16 raw games/s. We therefore bound a fetch by BOTH a
+// raw-game budget and an absolute wall-clock deadline, shared (by reference)
+// across every concurrent stream and across both platforms so the whole fetch
+// stops together. The deadline is the hard guarantee; the budget usually trips
+// first and yields a full, representative dataset well inside the time box.
+export interface FetchBudget {
+  maxRawGames: number; // stop once this many games have been *streamed* (pre client-side filters)
+  deadlineTs: number; // Date.now() cutoff; fetching stops at/after this instant
+  rawFetched: number; // mutated in place as games stream in
+}
+
+// Default budget: ~16 raw games/s × ~75s ≈ 1200 games, with an 80s hard wall.
+// A one-colour opening tree from the most-recent ~600 games (after the ~50%
+// colour filter) is highly representative, and 80s leaves headroom under 90s
+// for the final parse/merge.
+export const DEFAULT_RAW_GAME_BUDGET = 1200;
+export const DEFAULT_FETCH_DEADLINE_MS = 80_000;
+
+export function createFetchBudget(
+  maxRawGames = DEFAULT_RAW_GAME_BUDGET,
+  deadlineMs = DEFAULT_FETCH_DEADLINE_MS,
+): FetchBudget {
+  return { maxRawGames, deadlineTs: Date.now() + deadlineMs, rawFetched: 0 };
+}
+
+function budgetExhausted(budget?: FetchBudget): boolean {
+  if (!budget) return false;
+  return budget.rawFetched >= budget.maxRawGames || Date.now() >= budget.deadlineTs;
+}
+
 // Map time control names to Chess.com time_class values
 function mapToChessComTimeClass(timeControl: string): string {
   const mapping: Record<string, string> = {
@@ -41,7 +73,8 @@ export async function fetchLichessGames(
   options: FetchOptions = {},
   onProgress?: (count: number) => void,
   onBatch?: (games: GameData[]) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  budget?: FetchBudget
 ): Promise<GameData[]> {
   const {
     variant = "standard",
@@ -97,9 +130,16 @@ export async function fetchLichessGames(
       if (signal?.aborted) {
         throw new DOMException('Request aborted', 'AbortError');
       }
-      
+
+      // Stop launching new time-control streams once the raw-game budget or the
+      // wall-clock deadline is hit — this is what keeps a scout inside 90s.
+      if (budgetExhausted(budget)) {
+        console.log(`[FETCH-MULTI] Budget/deadline reached, returning ${allGames.length} games`);
+        break;
+      }
+
       const chunkStartCount = cumulativeCount;
-      
+
       try {
         // Fetch chunk in parallel - DON'T pass onBatch to inner fetches to avoid race condition
         const results = await Promise.allSettled(
@@ -117,7 +157,8 @@ export async function fetchLichessGames(
                 }
               },
               undefined, // Don't pass onBatch - we handle dedup/batching synchronously below
-              signal
+              signal,
+              budget // shared across the 2 concurrent streams in this chunk
             );
           })
         );
@@ -198,6 +239,15 @@ export async function fetchLichessGames(
   // Always include pgnInJson and clocks for time management analysis
   params.append('pgnInJson', 'true');
   params.append('clocks', 'true');
+
+  // Cap the stream server-side to the remaining raw-game budget. Lichess returns
+  // most-recent games first, so this yields a fresh, representative sample and —
+  // crucially, given the ~8 games/s throttle — lets the server stop early instead
+  // of streaming a player's entire multi-thousand-game history.
+  if (budget) {
+    const remaining = Math.max(1, budget.maxRawGames - budget.rawFetched);
+    params.append('max', String(remaining));
+  }
   
   // Date filtering - normalize to day boundaries for inclusive behavior
   if (dateFrom) {
@@ -280,7 +330,13 @@ export async function fetchLichessGames(
         console.log(`Reached maximum of ${MAX_GAMES} games, stopping fetch`);
         break;
       }
-      
+
+      // Stop as soon as the shared raw-game budget or wall-clock deadline is hit.
+      if (budgetExhausted(budget)) {
+        try { await reader.cancel(); } catch { /* ignore */ }
+        break;
+      }
+
       const chunkStart = performance.now();
       const { done, value } = await reader.read();
       const chunkEnd = performance.now();
@@ -302,7 +358,8 @@ export async function fetchLichessGames(
           try {
             const game = JSON.parse(line);
             rawGamesRead++;
-            
+            if (budget) budget.rawFetched++;
+
             // Apply client-side filters with tracking
             let shouldInclude = true;
             let dropReason = '';
@@ -314,7 +371,6 @@ export async function fetchLichessGames(
               
               // Handle anonymous/missing user data - skip games where we can't determine player
               if (!whiteUser && !blackUser) {
-                console.log('[FILTER-WARN] Game', game.id, 'has no user data on either side, skipping');
                 shouldInclude = false;
                 dropReason = 'noUserData';
                 continue;
@@ -342,7 +398,6 @@ export async function fetchLichessGames(
                     filterDrops.color++;
                   }
                 } else {
-                  console.log('[FILTER-WARN] Game', game.id, 'player not found in either color, skipping');
                   shouldInclude = false;
                   dropReason = 'playerNotFound';
                   continue;
@@ -375,30 +430,18 @@ export async function fetchLichessGames(
             if (shouldInclude && (ratingMin !== undefined || ratingMax !== undefined)) {
               const playerIsWhite = game.players.white.user?.name?.toLowerCase() === username.toLowerCase();
               const opponentRating = playerIsWhite ? game.players.black.rating : game.players.white.rating;
-              const opponentProvisional = playerIsWhite ? game.players.black.provisional : game.players.white.provisional;
-              
-              // Log ALL games' rating info for debugging
-              console.log(`[RATING-FILTER] Game ${game.id}: playerIsWhite=${playerIsWhite}, opponentRating=${opponentRating}, provisional=${opponentProvisional}, filter: min=${ratingMin} max=${ratingMax}`);
-              
-              // If opponent rating is missing/undefined, INCLUDE the game (don't filter on unknown)
-              if (opponentRating === undefined || opponentRating === null) {
-                console.log(`[RATING-FILTER] Game ${game.id}: PASS (no rating data, including anyway)`);
-              } else {
-                // "Minimum X" in UI means opponent rating >= X, so exclude if rating < X
-                // "Above X" in UI means opponent rating > X, so exclude if rating <= X
-                // Current behavior: ratingMin is treated as "Minimum" (inclusive), so rating >= ratingMin passes
+
+              // If opponent rating is missing/undefined, INCLUDE the game (don't filter on unknown).
+              if (opponentRating !== undefined && opponentRating !== null) {
+                // ratingMin is inclusive ("Minimum X" → rating >= X), ratingMax inclusive.
                 if (ratingMin !== undefined && opponentRating < ratingMin) {
                   shouldInclude = false;
                   dropReason = 'rating';
                   filterDrops.rating++;
-                  console.log(`[RATING-FILTER] Game ${game.id}: DROPPED (${opponentRating} < min ${ratingMin})`);
                 } else if (ratingMax !== undefined && opponentRating > ratingMax) {
                   shouldInclude = false;
                   dropReason = 'rating';
                   filterDrops.rating++;
-                  console.log(`[RATING-FILTER] Game ${game.id}: DROPPED (${opponentRating} > max ${ratingMax})`);
-                } else {
-                  console.log(`[RATING-FILTER] Game ${game.id}: PASS (${opponentRating} within ${ratingMin ?? 'any'}-${ratingMax ?? 'any'})`);
                 }
               }
             }
@@ -414,10 +457,6 @@ export async function fetchLichessGames(
             }
             
             if (!shouldInclude) {
-              // Log every 100th dropped game to avoid console spam
-              if ((filterDrops.color + filterDrops.opponentName + filterDrops.rating + filterDrops.timeControl) % 100 === 1) {
-                console.log('[FILTER-DROP] Game', game.id, 'dropped for:', dropReason);
-              }
               continue;
             }
             
@@ -505,7 +544,8 @@ export async function fetchChessComGames(
   options: FetchOptions = {},
   onProgress?: (count: number) => void,
   onBatch?: (games: GameData[]) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  budget?: FetchBudget
 ): Promise<GameData[]> {
   const {
     variant = "standard",
@@ -593,169 +633,126 @@ export async function fetchChessComGames(
       if (dateTo) console.log(`  dateTo: ${dateTo.toISOString()}`);
     }
 
-    console.log(`[CHESS.COM] Fetching archives for ${username}: ${filteredArchives.length} archives to process`);
-    console.log(`[CHESS.COM] Filters: TCs=${timeControls.join(',')}, mode=${mode}, color=${playerColor ?? 'any'}`);
-    console.log(`[CHESS.COM] Date range: ${dateFrom?.toISOString() ?? 'any'} to ${dateTo?.toISOString() ?? 'any'}`);
-    console.log(`[CHESS.COM] Rating filter: ${ratingMin ?? 'any'}-${ratingMax ?? 'any'}`);
-    
-    // Process ALL archives (reversed to get newest first)
-    const recentArchives = filteredArchives.reverse();
+    console.log(`[CHESS.COM] ${filteredArchives.length} archives to process (parallel, newest-first)`);
+
+    // Newest-first so the freshest games count against the budget first.
+    const recentArchives: string[] = filteredArchives.slice().reverse();
     const allGames: GameData[] = [];
     let count = 0;
-    const MAX_GAMES = 3000; // Limit to prevent crashes
+    const MAX_GAMES = 3000; // Client safety cap
 
-    for (const archiveUrl of recentArchives) {
-      // Check if aborted
-      if (signal?.aborted) {
-        throw new DOMException('Request aborted', 'AbortError');
-      }
-      
-      // Stop if we've reached the game limit
-      if (count >= MAX_GAMES) {
-        console.log(`Reached maximum of ${MAX_GAMES} games, stopping fetch`);
-        break;
-      }
-      // Rate limiting: wait between archive requests only if we have fetched games
-      if (count > 0 && allGames.length > 0) {
-        await new Promise(resolve => setTimeout(resolve, 300)); // Reduced to 300ms
-      }
+    // Per-game filtering, factored out so archives can be fetched in parallel and
+    // their games folded in centrally. Same filter semantics as before.
+    const filterArchiveGames = (games: any[]): GameData[] => {
+      const out: GameData[] = [];
+      for (const game of games) {
+        if (mode === "rated" && !game.rated) continue;
+        if (mode === "casual" && game.rated) continue;
 
-      try {
-        const response = await fetch(archiveUrl, {
-          headers: {
-            "User-Agent": "ScoutTree/1.0 (contact: support@scouttree.com)",
-          },
-          signal, // Add abort signal to fetch
+        if (variant && variant !== "standard") {
+          const gameRules = game.rules || "chess";
+          if (gameRules !== variant) continue;
+        }
+
+        if (timeControls.length > 0 && !timeControls.includes("all")) {
+          const mappedControls = timeControls.map(mapToChessComTimeClass);
+          if (!game.time_class || !mappedControls.includes(game.time_class)) continue;
+        }
+
+        if (dateFrom) {
+          const dateFromTimestamp = new Date(dateFrom.getTime());
+          dateFromTimestamp.setHours(0, 0, 0, 0);
+          if (game.end_time < dateFromTimestamp.getTime() / 1000) continue;
+        }
+        if (dateTo) {
+          const dateToTimestamp = new Date(dateTo.getTime());
+          dateToTimestamp.setHours(23, 59, 59, 999);
+          if (game.end_time > dateToTimestamp.getTime() / 1000) continue;
+        }
+
+        if (playerColor) {
+          const scoutedPlayerPlayedWhite = game.white.username.toLowerCase() === normalizedUsername;
+          const scoutedPlayerColor = scoutedPlayerPlayedWhite ? "white" : "black";
+          if (scoutedPlayerColor !== playerColor) continue;
+        }
+
+        const opponentRating = game.white.username.toLowerCase() === normalizedUsername
+          ? game.black.rating
+          : game.white.rating;
+        if (opponentRating !== undefined && opponentRating !== null) {
+          if (ratingMin && opponentRating < ratingMin) continue;
+          if (ratingMax && opponentRating > ratingMax) continue;
+        }
+
+        if (opponentName) {
+          const opponent = game.white.username.toLowerCase() === normalizedUsername
+            ? game.black.username
+            : game.white.username;
+          if (!opponent.toLowerCase().includes(opponentName.toLowerCase())) continue;
+        }
+
+        const chessComGameId = game.url?.split('/').pop() || game.uuid;
+        out.push({
+          pgn: game.pgn,
+          white: game.white.username.toLowerCase(),
+          black: game.black.username.toLowerCase(),
+          winner: game.white.result === "win" ? "white" : game.black.result === "win" ? "black" : undefined,
+          timeControl: game.time_class,
+          gameId: chessComGameId,
         });
+      }
+      return out;
+    };
 
-        if (!response.ok) {
-          console.warn(`Failed to fetch archive ${archiveUrl}:`, response.status);
-          continue;
-        }
+    let batchBuffer: GameData[] = [];
+    const emit = (gd: GameData) => {
+      allGames.push(gd);
+      count++;
+      batchBuffer.push(gd);
+      if (onProgress) onProgress(count);
+      if ((count === 1 || batchBuffer.length >= 5) && onBatch) {
+        onBatch([...batchBuffer]);
+        batchBuffer = [];
+      }
+    };
 
-        const data = await response.json();
-        
-        if (!data.games || !Array.isArray(data.games)) {
-          continue;
-        }
+    // Fetch archives in parallel waves. Chess.com's archive API is CDN-cached and
+    // tolerates concurrency well (measured ~8x faster than the old sequential +
+    // 300ms-delay loop). We stop as soon as the budget/deadline/cap is reached.
+    const POOL = 6;
+    for (let i = 0; i < recentArchives.length; i += POOL) {
+      if (signal?.aborted) throw new DOMException('Request aborted', 'AbortError');
+      if (count >= MAX_GAMES || budgetExhausted(budget)) break;
 
-        let batchGames: GameData[] = [];
-        let gamesBeforeFilter = data.games.length;
-        
-        for (const game of data.games) {
-          // Apply filters
-          if (mode === "rated" && !game.rated) continue;
-          if (mode === "casual" && game.rated) continue;
-          
-          // Variant filter (Chess.com uses "rules" field)
-          if (variant && variant !== "standard") {
-            const gameRules = game.rules || "chess";
-            if (gameRules !== variant) continue;
-          }
-          
-          // Time control filter with mapping to Chess.com time_class
-          if (timeControls.length > 0 && !timeControls.includes("all")) {
-            const mappedControls = timeControls.map(mapToChessComTimeClass);
-            if (!game.time_class || !mappedControls.includes(game.time_class)) continue;
-          }
-          
-          // Date range filter (end_time is in seconds since epoch)
-          // Be inclusive: dateFrom at 00:00:00 and dateTo at 23:59:59
-          if (dateFrom) {
-            const dateFromTimestamp = new Date(dateFrom.getTime());
-            dateFromTimestamp.setHours(0, 0, 0, 0);
-            if (game.end_time < dateFromTimestamp.getTime() / 1000) {
-              continue;
-            }
-          }
-          if (dateTo) {
-            const dateToTimestamp = new Date(dateTo.getTime());
-            dateToTimestamp.setHours(23, 59, 59, 999);
-            if (game.end_time > dateToTimestamp.getTime() / 1000) {
-              continue;
-            }
-          }
-          
-          // Color filter - only include games where scouted player played the selected color
-          if (playerColor) {
-            const scoutedPlayerPlayedWhite = game.white.username.toLowerCase() === normalizedUsername;
-            const scoutedPlayerColor = scoutedPlayerPlayedWhite ? "white" : "black";
-            
-            // Only show games where scouted player played the selected color
-            if (scoutedPlayerColor !== playerColor) {
-              continue;
-            }
-          }
-          
-          // Rating filter - handle missing ratings gracefully
-          const opponentRating = game.white.username.toLowerCase() === normalizedUsername
-            ? game.black.rating
-            : game.white.rating;
-          
-          // Only filter if opponent rating exists AND is outside range
-          if (opponentRating !== undefined && opponentRating !== null) {
-            if (ratingMin && opponentRating < ratingMin) continue;
-            if (ratingMax && opponentRating > ratingMax) continue;
-          }
-          // If rating is missing, include the game (don't filter on unknown)
-          
-          // Opponent name filter (use partial match like Lichess)
-          if (opponentName) {
-            const opponent = game.white.username.toLowerCase() === normalizedUsername
-              ? game.black.username
-              : game.white.username;
-            
-            if (!opponent.toLowerCase().includes(opponentName.toLowerCase())) continue;
-          }
-          
-          // Extract Chess.com game ID from URL (format: https://www.chess.com/game/live/123456789)
-          const chessComGameId = game.url?.split('/').pop() || game.uuid;
-          
-          const gameData: GameData = {
-            pgn: game.pgn,
-            white: game.white.username.toLowerCase(), // Normalize to lowercase for consistent matching
-            black: game.black.username.toLowerCase(), // Normalize to lowercase for consistent matching
-            winner: game.white.result === "win" ? "white" : 
-                    game.black.result === "win" ? "black" : undefined,
-            timeControl: game.time_class,
-            gameId: chessComGameId, // Native Chess.com game ID
-          };
-          
-          batchGames.push(gameData);
-          allGames.push(gameData);
-          count++;
-          
-          // Update progress every game
-          if (onProgress) {
-            onProgress(count);
-          }
-          
-          // Send first game immediately for instant visualization
-          if (count === 1 && onBatch) {
-            onBatch([gameData]);
-            batchGames = []; // Clear after sending first game
-          }
-          // Then send batches every 5 games from the current batch buffer
-          else if (batchGames.length >= 5 && onBatch) {
-            onBatch([...batchGames]);
-            batchGames = []; // Clear batch after sending
-          }
-        }
+      const wave = recentArchives.slice(i, i + POOL);
+      const datas = await Promise.all(
+        wave.map((url) =>
+          fetch(url, {
+            headers: { "User-Agent": "ScoutTree/1.0 (contact: support@scouttree.com)" },
+            signal,
+          })
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null)
+        )
+      );
 
-        console.log(`[CHESS.COM] Archive ${archiveUrl.split('/').slice(-2).join('/')}: ${gamesBeforeFilter} raw games, ${allGames.length} passed filters`);
-        
-        // Send any remaining games in the batch after processing this archive
-        if (batchGames.length > 0 && onBatch) {
-          onBatch(batchGames);
-          batchGames = [];
+      for (const data of datas) {
+        if (!data?.games || !Array.isArray(data.games)) continue;
+        if (budget) budget.rawFetched += data.games.length;
+        const filtered = filterArchiveGames(data.games);
+        for (const gd of filtered) {
+          emit(gd);
+          if (count >= MAX_GAMES) break;
         }
-      } catch (error) {
-        console.warn(`Error processing archive ${archiveUrl}:`, error);
-        continue;
       }
     }
 
-    console.log(`[CHESS.COM] FINAL: Total games fetched and passed all filters: ${allGames.length}`);
+    if (batchBuffer.length > 0 && onBatch) {
+      onBatch([...batchBuffer]);
+      batchBuffer = [];
+    }
+
+    console.log(`[CHESS.COM] FINAL: ${allGames.length} games after filtering`);
     
     if (allGames.length === 0) {
       throw new Error(`No games found for Chess.com user "${username}" with the selected filters`);
