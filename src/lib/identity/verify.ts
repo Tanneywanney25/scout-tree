@@ -12,6 +12,7 @@
 // ============================================================================
 
 import type { Platform } from "./types";
+import { politeFetch } from "./net";
 
 export interface VerifiedProfile {
   platform: Platform;
@@ -45,34 +46,10 @@ function plausibleFideId(v: unknown): string | undefined {
 
 const LICHESS_FORMAT_PRIORITY = ["rapid", "blitz", "classical", "bullet"];
 
-async function fetchJson(url: string, init: RequestInit, timeoutMs = 9000): Promise<Response> {
-  const outer = init.signal as AbortSignal | undefined;
-  // A 429 is "slow down", NEVER "doesn't exist" — treating it as a missing
-  // account silently loses the player mid-traversal. Retry with growing
-  // backoff; each attempt gets its own timeout so a backoff pause can't be
-  // killed by an earlier attempt's timer.
-  for (let attempt = 0; ; attempt++) {
-    if (outer?.aborted) throw new DOMException("Aborted", "AbortError");
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const onAbort = () => controller.abort();
-    if (outer) {
-      if (outer.aborted) controller.abort();
-      else outer.addEventListener("abort", onAbort, { once: true });
-    }
-    try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      if (res.status === 429 && attempt < 3 && !outer?.aborted) {
-        await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
-        continue;
-      }
-      return res;
-    } finally {
-      clearTimeout(timer);
-      outer?.removeEventListener("abort", onAbort);
-    }
-  }
-}
+// All verification calls go through the shared network discipline in net.ts:
+// the global Chess.com concurrency gate / Lichess pacer, per-attempt timeouts,
+// and 429-backoff-and-retry (a 429 is "slow down", NEVER "doesn't exist" —
+// treating it as a missing account silently loses the player mid-traversal).
 
 /** Verify and enrich a Lichess account. Returns null if it doesn't exist. */
 export async function verifyLichess(
@@ -82,9 +59,10 @@ export async function verifyLichess(
   const clean = username.trim().replace(/^@/, "");
   if (!clean) return null;
   try {
-    const res = await fetchJson(
+    const res = await politeFetch(
       `https://lichess.org/api/user/${encodeURIComponent(clean)}`,
-      { headers: { Accept: "application/json" }, signal }
+      { headers: { Accept: "application/json" }, signal },
+      "lichess"
     );
     if (!res.ok) return null;
     const data = await res.json();
@@ -139,10 +117,20 @@ export async function verifyChesscom(
   const clean = username.trim().replace(/^@/, "").toLowerCase();
   if (!clean) return null;
   try {
-    const res = await fetchJson(`https://api.chess.com/pub/player/${encodeURIComponent(clean)}`, {
-      headers: { Accept: "application/json" },
-      signal,
-    });
+    // The profile and /stats calls are independent — fire both at once (the
+    // stats fetch for a nonexistent user is a cheap fast 404).
+    const [res, statsRes] = await Promise.all([
+      politeFetch(
+        `https://api.chess.com/pub/player/${encodeURIComponent(clean)}`,
+        { headers: { Accept: "application/json" }, signal },
+        "chesscom"
+      ),
+      politeFetch(
+        `https://api.chess.com/pub/player/${encodeURIComponent(clean)}/stats`,
+        { headers: { Accept: "application/json" }, signal },
+        "chesscom"
+      ).catch(() => null),
+    ]);
     if (!res.ok) return null;
     const data = await res.json();
     if (!data || data.status === "closed:abuse") return null;
@@ -154,16 +142,11 @@ export async function verifyChesscom(
       if (code && code.length === 2) country = code.toUpperCase();
     }
 
-    // Ratings need a second cheap call to /stats.
     const ratings: Record<string, number> = {};
     let rating: number | undefined;
     let gamesFound: number | undefined;
     try {
-      const statsRes = await fetchJson(
-        `https://api.chess.com/pub/player/${encodeURIComponent(clean)}/stats`,
-        { headers: { Accept: "application/json" }, signal }
-      );
-      if (statsRes.ok) {
+      if (statsRes?.ok) {
         const stats = await statsRes.json();
         let totalGames = 0;
         for (const [key, fmt] of [

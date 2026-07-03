@@ -145,26 +145,43 @@ async function main() {
     console.log("NOTE: no GEMINI_API_KEY/ANTHROPIC_API_KEY (or GOOGLE_CSE_KEY+GOOGLE_CSE_ID) in env — Google-index username discovery and flyer search are OFF for this run.");
   }
   const expandCache = new Map<string, Promise<TournamentGraph | null>>();
+  // Memoize the web-search hooks across the WHOLE run (the engine memoizes
+  // per traversal instance; deep-phase sub-traversals are separate instances
+  // and must not repeat an identical Google search / flyer lookup).
+  const usernameMemo = new Map<string, ReturnType<NonNullable<TraversalHooks["findUsernames"]>>>();
+  const discoverMemo = new Map<string, ReturnType<NonNullable<TraversalHooks["discoverPlatform"]>>>();
   const hooks: TraversalHooks = {
     ...(hasAiKey || hasCse
       ? {
-          findUsernames: async (req) => (await findUsernamesOnWeb(req, (m) => console.log(`  [google] ${m}`))).candidates,
+          findUsernames: (req) => {
+            const key = JSON.stringify([req.name.toLowerCase(), req.state, req.uscfRating, req.fideId, req.eventName]);
+            const hit = usernameMemo.get(key);
+            if (hit) return hit;
+            const p = findUsernamesOnWeb(req, (m) => console.log(`  [google] ${m}`)).then((r) => r.candidates);
+            usernameMemo.set(key, p);
+            return p;
+          },
         }
       : {}),
     ...(hasAiKey
       ? {
-          discoverPlatform: async (ev) => {
-            const info = await discoverEventOnWeb(ev);
-            return info
-              ? {
-                  platform: info.platform,
-                  chesscomSlugs: info.chesscomSlugs,
-                  lichessSwissIds: info.lichessSwissIds,
-                  lichessArenaIds: info.lichessArenaIds,
-                  confidence: info.confidence,
-                  note: info.note,
-                }
-              : null;
+          discoverPlatform: (ev) => {
+            const hit = discoverMemo.get(ev.eventId);
+            if (hit) return hit;
+            const p = discoverEventOnWeb(ev).then((info) =>
+              info
+                ? {
+                    platform: info.platform,
+                    chesscomSlugs: info.chesscomSlugs,
+                    lichessSwissIds: info.lichessSwissIds,
+                    lichessArenaIds: info.lichessArenaIds,
+                    confidence: info.confidence,
+                    note: info.note,
+                  }
+                : null
+            );
+            discoverMemo.set(ev.eventId, p);
+            return p;
           },
         }
       : {}),

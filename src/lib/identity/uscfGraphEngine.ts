@@ -49,8 +49,27 @@
 // `tournamentGraph`; this module does the online half wherever fetch exists
 // (browser, or Node for the CLI harness). There are NO request-count caps and
 // no meaningful time budget: the search runs until every avenue is exhausted
-// or the caller aborts. Politeness pacing (Lichess throttle, Google spacing)
-// is the only rate control. Hard cases legitimately take a long time.
+// or the caller aborts. Politeness pacing (Lichess pacer, Chess.com gate,
+// Google spacing) is the only rate control.
+//
+// SPEED comes from running the SAME work as concurrent agents, never from
+// skipping any of it:
+//   • EVENT AGENTS work several events at once (each event still gets the full
+//     roster → Google → seeds → pairing-BFS treatment).
+//   • Inside an event, SEED SCOUTS resolve several section players in parallel
+//     (each still gets the full Google ladder + attribute scoring + date
+//     verification) while PAIRING TRACERS drain the frontier concurrently —
+//     the frontier never starves waiting on one seed, and a fresh mapping is
+//     traced the moment it lands.
+//   • Candidate verifications, monthly game archives and shortlist game
+//     fetches all run in worker pools; flyer searches for upcoming events are
+//     prefetched so an event never blocks on the web search when its turn
+//     comes; the deep phase expands several opponents at once.
+//   • Expensive fetches (profile verifies, game archives, Google searches,
+//     Chess.com monthly archives) are memoized once and SHARED all the way
+//     down into deep-phase sub-traversals — nothing is fetched twice.
+// All of it funnels through net.ts's global Chess.com gate / Lichess pacer, so
+// forty logical agents still make a polite, bounded number of HTTP calls.
 // ============================================================================
 
 import type { DiscoveredAccount, Evidence } from "./types";
@@ -63,6 +82,7 @@ import type {
   UsernameCandidate,
 } from "./graphTypes";
 import { verifyChesscom, verifyLichess, type VerifiedProfile } from "./verify";
+import { pool, politeFetch, lichessSlot } from "./net";
 import {
   nameSimilarity,
   nameMatchWeight,
@@ -73,42 +93,25 @@ import {
 } from "./confidence";
 
 // ---------------------------------------------------------------------------
-// Tuning — pacing only. There are deliberately NO request-count caps: the
-// search must be able to grind through every tournament and every player
-// without stopping. The default budget is effectively "run until exhausted";
-// the UI's abort signal (or an explicit budgetMs, e.g. from the CLI) is the
-// only real stop.
+// Tuning — agent counts and pacing only. There are deliberately NO
+// request-count caps: the search must be able to grind through every
+// tournament and every player without stopping. The default budget is
+// effectively "run until exhausted"; the UI's abort signal (or an explicit
+// budgetMs, e.g. from the CLI) is the only real stop. The agent counts decide
+// how much of that work happens AT THE SAME TIME.
 // ---------------------------------------------------------------------------
 
 const DEFAULT_BUDGET_MS = 6 * 60 * 60_000; // effectively unbounded (6 h)
 const EVENT_MIN_MS = 30_000; // minimum slice each event gets before moving on
-const SEED_BATCH = 4; // seed candidates resolved in parallel when starving
+const EVENT_AGENTS = 4; // events worked concurrently
+const TRACE_AGENTS = 3; // pairing tracers per event (frontier drained in parallel)
+const SEED_AGENTS = 6; // seed scouts per event (members resolved in parallel)
+const VERIFY_POOL = 8; // concurrent candidate verifications per scan
+const DEEP_AGENTS = 3; // opponents expanded concurrently in the deep phase
+const DISCOVER_LOOKAHEAD = 2; // upcoming events whose flyer search is prefetched
 const DAY = 86_400_000;
 
 export type OnlinePlatform = "chesscom" | "lichess";
-
-// ---------------------------------------------------------------------------
-// Small utilities
-// ---------------------------------------------------------------------------
-
-/** Bounded-concurrency map — our pool of "agents". Stops feeding on abort. */
-async function pool<T>(
-  items: T[],
-  limit: number,
-  fn: (t: T, i: number) => Promise<void>,
-  stop?: () => boolean
-): Promise<void> {
-  let i = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (i < items.length) {
-        const idx = i++;
-        if (stop?.()) return;
-        await fn(items[idx], idx);
-      }
-    })
-  );
-}
 
 /** Generate plausible Chess.com/Lichess handles from a real name. */
 export function guessHandles(name: string): string[] {
@@ -312,17 +315,6 @@ function monthsBetween(startMs: number, endMs: number): { y: number; m: number }
   return out;
 }
 
-// Lichess enforces per-IP rate limits and answers bursts with 429s (or a
-// temporary ban). Space its calls out — Chess.com's CDN-backed pub API copes
-// with the engine's modest parallelism as-is.
-let lichessNextSlot = 0;
-async function lichessThrottle(): Promise<void> {
-  const now = Date.now();
-  const wait = Math.max(0, lichessNextSlot - now);
-  lichessNextSlot = Math.max(now, lichessNextSlot) + 250;
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-}
-
 const CC_DRAW_CODES = new Set(["agreed", "repetition", "stalemate", "insufficient", "50move", "timevsinsufficient"]);
 
 function chesscomOutcome(myResult?: string, oppResult?: string): Outcome | undefined {
@@ -332,22 +324,37 @@ function chesscomOutcome(myResult?: string, oppResult?: string): Outcome | undef
   return undefined;
 }
 
-/** Chess.com: pull monthly archives spanning the window, keep in-window games. */
-async function chesscomWindowGames(username: string, startMs: number, endMs: number, signal?: AbortSignal): Promise<ArchiveGame[]> {
+/** One player's full Chess.com archive for one month, memoized in `cache` so
+ *  overlapping event windows never refetch the same month. A failed month is
+ *  evicted from the cache (a later window gets a fresh chance) — a silently
+ *  cached miss would break pairing chains. */
+function chesscomMonthGames(
+  username: string,
+  y: number,
+  m: number,
+  cache: Map<string, Promise<ArchiveGame[]>>,
+  signal?: AbortSignal
+): Promise<ArchiveGame[]> {
   const uLower = username.toLowerCase();
-  const out: ArchiveGame[] = [];
-  for (const { y, m } of monthsBetween(startMs, endMs)) {
-    if (signal?.aborted) break;
+  const key = `${uLower}:${y}:${m}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const p = (async (): Promise<ArchiveGame[]> => {
     try {
-      const res = await fetch(`https://api.chess.com/pub/player/${uLower}/games/${y}/${String(m).padStart(2, "0")}`, {
-        headers: { Accept: "application/json" },
-        signal,
-      });
-      if (!res.ok) continue;
+      const res = await politeFetch(
+        `https://api.chess.com/pub/player/${uLower}/games/${y}/${String(m).padStart(2, "0")}`,
+        { headers: { Accept: "application/json" }, signal },
+        "chesscom",
+        20_000
+      );
+      if (!res.ok) {
+        if (res.status !== 404) cache.delete(key);
+        return [];
+      }
       const data = await res.json();
+      const out: ArchiveGame[] = [];
       for (const g of Array.isArray(data.games) ? data.games : []) {
         const endT = (g.end_time || 0) * 1000;
-        if (endT < startMs || endT > endMs) continue;
         const wU = g.white?.username?.toLowerCase();
         const sourceColor: "white" | "black" = wU === uLower ? "white" : "black";
         const me = sourceColor === "white" ? g.white : g.black;
@@ -365,11 +372,31 @@ async function chesscomWindowGames(username: string, startMs: number, endMs: num
           chesscomTournament: typeof g.tournament === "string" ? g.tournament : undefined,
         });
       }
+      return out;
     } catch {
-      /* skip this month */
+      cache.delete(key);
+      return [];
     }
-  }
-  return out;
+  })();
+  cache.set(key, p);
+  return p;
+}
+
+/** Chess.com: pull the monthly archives spanning the window IN PARALLEL (they
+ *  are independent GETs behind the global gate), keep in-window games. */
+async function chesscomWindowGames(
+  username: string,
+  startMs: number,
+  endMs: number,
+  monthCache: Map<string, Promise<ArchiveGame[]>>,
+  signal?: AbortSignal
+): Promise<ArchiveGame[]> {
+  const months = monthsBetween(startMs, endMs);
+  const perMonth = await Promise.all(months.map(({ y, m }) => chesscomMonthGames(username, y, m, monthCache, signal)));
+  return perMonth
+    .flat()
+    .filter((g) => g.endMs >= startMs && g.endMs <= endMs)
+    .sort((a, b) => a.endMs - b.endMs);
 }
 
 /** Lichess: pull games in the [since, until] window as NDJSON. */
@@ -380,15 +407,10 @@ async function lichessWindowGames(username: string, startMs: number, endMs: numb
     const url = `https://lichess.org/api/games/user/${encodeURIComponent(username)}?since=${Math.floor(startMs)}&until=${Math.ceil(
       endMs
     )}&max=300&pgnInJson=false&clocks=false&evals=false&opening=false`;
-    await lichessThrottle();
-    let res = await fetch(url, { headers: { Accept: "application/x-ndjson" }, signal });
-    // A 429 means "slow down", never "no games" — losing games here silently
-    // breaks the traversal, so back off hard and keep retrying.
-    for (let attempt = 0; res.status === 429 && attempt < 4 && !signal?.aborted; attempt++) {
-      await new Promise((r) => setTimeout(r, 2500 * (attempt + 1)));
-      await lichessThrottle();
-      res = await fetch(url, { headers: { Accept: "application/x-ndjson" }, signal });
-    }
+    // politeFetch paces the call and retries 429s with hard backoff — a 429
+    // means "slow down", never "no games"; losing games here silently breaks
+    // the traversal.
+    const res = await politeFetch(url, { headers: { Accept: "application/x-ndjson" }, signal }, "lichess", 20_000);
     if (!res.ok) return out;
     const text = await res.text();
     for (const line of text.split("\n")) {
@@ -426,7 +448,7 @@ async function lichessWindowGames(username: string, startMs: number, endMs: numb
   } catch {
     /* rate-limited or blocked — degrade */
   }
-  return out;
+  return out.sort((a, b) => a.endMs - b.endMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -459,15 +481,14 @@ function fetchRoster(link: EventLink, signal?: AbortSignal): Promise<string[]> {
     try {
       if (link.kind === "chesscom-tournament") {
         const url = link.id.startsWith("http") ? link.id : `https://api.chess.com/pub/tournament/${link.id}`;
-        const res = await fetch(url, { headers: { Accept: "application/json" }, signal });
+        const res = await politeFetch(url, { headers: { Accept: "application/json" }, signal }, "chesscom", 20_000);
         if (!res.ok) return [];
         const data = await res.json();
         const players = Array.isArray(data.players) ? data.players : [];
         return players.map((p: { username?: string }) => String(p.username)).filter(Boolean);
       }
       const path = link.kind === "lichess-swiss" ? `swiss/${link.id}/results` : `tournament/${link.id}/results`;
-      await lichessThrottle();
-      const res = await fetch(`https://lichess.org/api/${path}?nb=400`, { headers: { Accept: "application/x-ndjson" }, signal });
+      const res = await politeFetch(`https://lichess.org/api/${path}?nb=400`, { headers: { Accept: "application/x-ndjson" }, signal }, "lichess", 20_000);
       if (!res.ok) return [];
       const text = await res.text();
       const out: string[] = [];
@@ -524,11 +545,11 @@ function gameInLink(g: ArchiveGame, link: EventLink): boolean {
 
 async function lichessAutocomplete(term: string, signal?: AbortSignal): Promise<string[]> {
   try {
-    await lichessThrottle();
-    const res = await fetch(`https://lichess.org/api/player/autocomplete?term=${encodeURIComponent(term)}&object=true`, {
-      headers: { Accept: "application/json" },
-      signal,
-    });
+    const res = await politeFetch(
+      `https://lichess.org/api/player/autocomplete?term=${encodeURIComponent(term)}&object=true`,
+      { headers: { Accept: "application/json" }, signal },
+      "lichess"
+    );
     if (!res.ok) return [];
     const data = await res.json();
     const arr = Array.isArray(data?.result) ? data.result : [];
@@ -598,6 +619,20 @@ export interface TraversalHooks {
   findUsernames?: (req: UsernameSearchRequest) => Promise<UsernameCandidate[] | null>;
 }
 
+/** Caches shared across the whole search — including deep-phase
+ *  sub-traversals — so an expensive fetch (profile verify, game archive,
+ *  monthly Chess.com archive, Google search) never runs twice for one key. */
+export interface SharedCaches {
+  verify: Map<string, Promise<VerifiedProfile | null>>;
+  games: Map<string, Promise<ArchiveGame[]>>;
+  ccMonths: Map<string, Promise<ArchiveGame[]>>;
+  google: Map<string, Promise<UsernameCandidate[]>>;
+}
+
+export function makeSharedCaches(): SharedCaches {
+  return { verify: new Map(), games: new Map(), ccMonths: new Map(), google: new Map() };
+}
+
 export interface TraversalOptions {
   targetName: string;
   /** The target's USCF online rating (or approx rating), for corroboration. */
@@ -611,6 +646,11 @@ export interface TraversalOptions {
   hooks?: TraversalHooks;
   /** Internal recursion depth (deep opponent expansion runs at depth 0 only). */
   depth?: number;
+  /** Internal: fetch caches handed down to deep-phase sub-traversals. */
+  shared?: SharedCaches;
+  /** Internal: lets a parent traversal stand a sub-traversal down the moment
+   *  the parent's own target is found. */
+  stopWhen?: () => boolean;
 }
 
 export interface TraversalResult {
@@ -641,13 +681,20 @@ interface Appearance {
 export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalOptions): Promise<TraversalResult> {
   const { targetName, signal, log, hooks = {} } = opts;
   const depth = opts.depth ?? 0;
+  const shared = opts.shared ?? makeSharedCaches();
   const deadline = Date.now() + (opts.budgetMs ?? DEFAULT_BUDGET_MS);
-  const outOfTime = (localDeadline?: number) => Date.now() > (localDeadline ?? deadline) || !!signal?.aborted;
+  const outOfTime = (localDeadline?: number) =>
+    Date.now() > (localDeadline ?? deadline) || !!signal?.aborted || !!opts.stopWhen?.();
 
   const targetId = graph.rootUscfId;
   const targetFideId = digits(opts.targetFideId) || undefined;
   const notes: string[] = [];
   const accounts: DiscoveredAccount[] = [];
+
+  // Set when the target is structurally confirmed anywhere — every agent in
+  // every event checks it so the whole fleet stands down together.
+  let found = false;
+  const stopNow = (localDeadline?: number) => found || outOfTime(localDeadline);
 
   // --- Indices over the whole online mesh ------------------------------------
   const memberName = new Map<string, string>();
@@ -680,28 +727,27 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     for (const r of app.rounds) if (r.opponentUscfId !== targetId) directOpponents.add(r.opponentUscfId);
   }
 
-  // --- Shared caches ----------------------------------------------------------
-  const verifyCache = new Map<string, Promise<VerifiedProfile | null>>();
+  // --- Shared caches (search-wide, incl. deep-phase sub-traversals) -----------
+  const verifyCache = shared.verify;
   const verifyOn = (platform: OnlinePlatform, handle: string): Promise<VerifiedProfile | null> => {
     const key = `${platform}:${handle.toLowerCase()}`;
     const hit = verifyCache.get(key);
     if (hit) return hit;
-    const p =
-      platform === "chesscom"
-        ? verifyChesscom(handle, signal)
-        : lichessThrottle().then(() => verifyLichess(handle, signal));
+    // verifyLichess paces itself through the global Lichess slot machine;
+    // verifyChesscom runs behind the global Chess.com gate.
+    const p = platform === "chesscom" ? verifyChesscom(handle, signal) : verifyLichess(handle, signal);
     verifyCache.set(key, p);
     return p;
   };
 
-  const gamesCache = new Map<string, Promise<ArchiveGame[]>>();
+  const gamesCache = shared.games;
   const windowGames = (platform: OnlinePlatform, handle: string, startMs: number, endMs: number): Promise<ArchiveGame[]> => {
     const key = `${platform}:${handle.toLowerCase()}:${Math.round(startMs / DAY)}:${Math.round(endMs / DAY)}`;
     const hit = gamesCache.get(key);
     if (hit) return hit;
     const p =
       platform === "chesscom"
-        ? chesscomWindowGames(handle, startMs, endMs, signal)
+        ? chesscomWindowGames(handle, startMs, endMs, shared.ccMonths, signal)
         : lichessWindowGames(handle, startMs, endMs, signal);
     gamesCache.set(key, p);
     return p;
@@ -728,10 +774,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // --- Google-index username discovery (the PRIMARY name→handle route) -------
   // One index search per person (memoized): the answer doesn't change between
   // events. Candidates are only ACCEPTED per event, once date-verified there.
-  const googleCandidatesCache = new Map<string, Promise<UsernameCandidate[]>>();
+  // The cache is search-wide (shared with sub-traversals); target-grade
+  // lookups (state + FIDE-enriched queries) are keyed apart from seed-grade
+  // ones so a deep dive's own target still gets its full sharpened ladder.
+  const googleCandidatesCache = shared.google;
   const googleCandidatesFor = (memberId: string, ev: GraphEvent): Promise<UsernameCandidate[]> => {
     if (!hooks.findUsernames) return Promise.resolve([]);
-    const hit = googleCandidatesCache.get(memberId);
+    const cacheKey = `${memberId}:${memberId === targetId ? "t" : "s"}`;
+    const hit = googleCandidatesCache.get(cacheKey);
     if (hit) return hit;
     const name = memberName.get(memberId) || "";
     if (!name) return Promise.resolve([]);
@@ -747,7 +797,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       .findUsernames(req)
       .then((r) => r || [])
       .catch(() => [] as UsernameCandidate[]);
-    googleCandidatesCache.set(memberId, p);
+    googleCandidatesCache.set(cacheKey, p);
     return p;
   };
 
@@ -899,13 +949,13 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
       // 1. PRIMARY: the Google index — never settle for the first hit.
       const leads = candidatesForPlatform(await googleCandidatesFor(memberId, ev), platform);
-      if (leads.length && !outOfTime()) {
+      if (leads.length && !stopNow()) {
         const scored: { cand: UsernameCandidate; prof: VerifiedProfile; score: number }[] = [];
         await pool(
           leads,
-          4,
+          VERIFY_POOL,
           async (cand) => {
-            if (outOfTime()) return;
+            if (stopNow()) return;
             if (dudHandles.has(`${platform}:${cand.username.toLowerCase()}`)) return;
             const prof = await verifyOn(platform, cand.username);
             if (!prof || dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) return;
@@ -913,7 +963,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             if (!attr) return; // account created after the event — impossible
             scored.push({ cand, prof, score: attr.score });
           },
-          () => outOfTime()
+          () => stopNow()
         );
         scored.sort((a, b) => b.score - a.score);
         if (scored.length) {
@@ -924,10 +974,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           );
         }
 
+        // Prefetch every shortlisted lead's window games at once (windowGames
+        // is memoized, so this is pure overlap), then JUDGE them strictly
+        // best-attribute-first — identical accept order to the serial scan.
+        const shortlist = scored.filter((s) => s.score >= ATTR_SHORTLIST);
+        for (const s of shortlist) void windowGames(platform, s.prof.username, win.startMs, win.endMs);
+
         let fallback: VerifiedProfile | null = null;
-        for (const { prof, score } of scored) {
-          if (outOfTime()) break;
-          if (score < ATTR_SHORTLIST) break; // sorted — the rest are worse
+        for (const { prof, score } of shortlist) {
+          if (stopNow()) break;
           const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
           if (!games.length) {
             log(
@@ -964,15 +1019,26 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       // 2. ABSOLUTE LAST RESORT: platform-side guessing (only after Google).
       // The profile must show a matching REAL name — a username that looks
       // like the player's name is meaningless (namesakes, not identities).
+      // Every guess is verified CONCURRENTLY, then judged in guess order —
+      // deterministic: the same handle wins as in a serial scan.
       const gate = (prof: VerifiedProfile): boolean =>
         !!prof.displayName && nameSimilarity(name, prof.displayName) >= 0.72;
-      for (const h of guessHandles(name)) {
-        if (outOfTime()) return null;
-        if (dudHandles.has(`${platform}:${h.toLowerCase()}`)) continue;
-        const prof = await verifyOn(platform, h);
+      const guesses = guessHandles(name).filter((h) => !dudHandles.has(`${platform}:${h.toLowerCase()}`));
+      const guessProfs = new Map<string, VerifiedProfile | null>();
+      await pool(
+        guesses,
+        6,
+        async (h) => {
+          if (stopNow()) return;
+          guessProfs.set(h, await verifyOn(platform, h));
+        },
+        () => stopNow()
+      );
+      for (const h of guesses) {
+        const prof = guessProfs.get(h);
         if (prof && gate(prof) && !dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) return prof;
       }
-      if (platform === "lichess") {
+      if (platform === "lichess" && !stopNow()) {
         // Lichess offers autocomplete — still only a SEED finder for opponents.
         const t = name.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
         const terms = new Set<string>();
@@ -980,12 +1046,20 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         const last = t[t.length - 1];
         if (last && last.length >= 4) terms.add(last);
         for (const term of terms) {
-          if (outOfTime()) return null;
-          const handles = (await lichessAutocomplete(term, signal)).slice(0, 5);
+          if (stopNow()) return null;
+          const handles = (await lichessAutocomplete(term, signal)).slice(0, 5).filter((h) => !dudHandles.has(`lichess:${h.toLowerCase()}`));
+          const acProfs = new Map<string, VerifiedProfile | null>();
+          await pool(
+            handles,
+            4,
+            async (h) => {
+              if (stopNow()) return;
+              acProfs.set(h, await verifyOn("lichess", h));
+            },
+            () => stopNow()
+          );
           for (const h of handles) {
-            if (outOfTime()) return null;
-            if (dudHandles.has(`lichess:${h.toLowerCase()}`)) continue;
-            const prof = await verifyOn("lichess", h);
+            const prof = acProfs.get(h);
             if (prof && prof.displayName && nameSimilarity(name, prof.displayName) >= 0.78) return prof;
           }
         }
@@ -1218,6 +1292,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       confidence: scoreFromEvidence(evidence, -0.5),
       evidence,
     };
+
+    // A structural identification ends the whole hunt — flip the global flag
+    // the MOMENT it lands so every in-flight agent (rosters mid-verification,
+    // seed scouts, sibling event agents, deep dives) stands down immediately
+    // instead of finishing now-pointless work. A capped "google-lead" is not
+    // an identification, so it keeps the search running.
+    if (via.method !== "google-lead") found = true;
+
     if (foundKeys.has(key)) {
       // Already recorded — keep whichever evidence trail is stronger (a
       // google-lead upgraded by a later structural proof, or vice versa).
@@ -1283,12 +1365,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       }
     }
 
-    let found = false;
+    let rosterHit = false;
     await pool(
       handles,
-      5,
+      VERIFY_POOL,
       async (handle) => {
-        if (found || outOfTime(localDeadline)) return;
+        if (rosterHit || stopNow(localDeadline)) return;
         if (handleClaimed.has(handle.toLowerCase())) return;
         const prof = await verifyOn(link.platform, handle);
         if (!prof?.displayName) return;
@@ -1303,7 +1385,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         }
         if (!best || bestSim < 0.78) return;
         if (best.uscfId === targetId) {
-          if (recordTarget(link.platform, prof, { method: "roster-name", event: ev, link })) found = true;
+          if (recordTarget(link.platform, prof, { method: "roster-name", event: ev, link })) rosterHit = true;
           return;
         }
         memberClaimed.add(best.uscfId);
@@ -1312,9 +1394,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         // Roster-matched members are prime pairing-BFS fuel.
         if (state) enqueue(state, { memberId: best.uscfId, platform: link.platform, mapping: mapped.get(best.uscfId)!.get(link.platform)! });
       },
-      () => found || outOfTime(localDeadline)
+      () => rosterHit || stopNow(localDeadline)
     );
-    if (found) return true;
+    if (rosterHit) return true;
 
     // Elimination: every crosstable player except the target matched a
     // participant, and exactly one participant handle is unclaimed.
@@ -1418,39 +1500,48 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       log(
         `Aligned @${handle}'s ${alignment.pairs.length} event games to ${srcName}'s crosstable rounds (${alignment.checked} results verified) — reading the other side of each board…`
       );
-      for (const { round, game } of alignment.pairs) {
-        if (outOfTime(localDeadline)) break;
-        const oppId = round.opponentUscfId;
-        const prof = await verifyOn(platform, game.oppHandle);
-        if (!prof) continue;
-        if (oppId === targetId) {
-          if (
-            recordTarget(platform, prof, {
-              method: "pairing",
-              event: ev,
-              link: viaLink,
-              chain: mapping.chain.concat(srcName),
-              viaName: srcName,
-              viaHandle: handle,
-              round: round.round,
-              checkedRounds: alignment.checked,
-              totalRounds: app.rounds.length,
-              game,
-            })
-          )
-            return true;
-          continue;
-        }
-        if (!mapped.get(oppId)?.has(platform)) {
-          setMapping(oppId, platform, { profile: prof, how: "pairing", chain: mapping.chain.concat(srcName) });
-          enqueue(state, { memberId: oppId, platform, mapping: mapped.get(oppId)!.get(platform)! });
-          log(
-            `Pairing chain: round ${round.round} maps ${memberName.get(oppId) || oppId} to @${prof.username}${
-              directOpponents.has(oppId) ? ` — they played ${targetName}; tracing them FIRST.` : " — following them next."
-            }`
-          );
-        }
-      }
+      // Verify the other side of every aligned board CONCURRENTLY — each hit
+      // maps one more crosstable player (or IS the target).
+      let pairingHit = false;
+      await pool(
+        alignment.pairs,
+        VERIFY_POOL,
+        async ({ round, game }) => {
+          if (pairingHit || stopNow(localDeadline)) return;
+          const oppId = round.opponentUscfId;
+          const prof = await verifyOn(platform, game.oppHandle);
+          if (!prof) return;
+          if (oppId === targetId) {
+            if (
+              recordTarget(platform, prof, {
+                method: "pairing",
+                event: ev,
+                link: viaLink,
+                chain: mapping.chain.concat(srcName),
+                viaName: srcName,
+                viaHandle: handle,
+                round: round.round,
+                checkedRounds: alignment.checked,
+                totalRounds: app.rounds.length,
+                game,
+              })
+            )
+              pairingHit = true;
+            return;
+          }
+          if (!mapped.get(oppId)?.has(platform)) {
+            setMapping(oppId, platform, { profile: prof, how: "pairing", chain: mapping.chain.concat(srcName) });
+            enqueue(state, { memberId: oppId, platform, mapping: mapped.get(oppId)!.get(platform)! });
+            log(
+              `Pairing chain: round ${round.round} maps ${memberName.get(oppId) || oppId} to @${prof.username}${
+                directOpponents.has(oppId) ? ` — they played ${targetName}; tracing them FIRST.` : " — following them next."
+              }`
+            );
+          }
+        },
+        () => pairingHit || stopNow(localDeadline)
+      );
+      if (pairingHit) return true;
     }
 
     // (c) Name-scan the same games: the target's own account may show a real
@@ -1486,12 +1577,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     for (const k of scopedKeys) state.oppSeen.set(k, (state.oppSeen.get(k) || 0) + 1);
 
     const roster = ev.players;
-    let found = false;
+    let scanHit = false;
     await pool(
       candidates,
-      5,
+      VERIFY_POOL,
       async (g) => {
-        if (found || outOfTime(localDeadline)) return;
+        if (scanHit || stopNow(localDeadline)) return;
         const prof = await verifyOn(platform, g.oppHandle);
         if (!prof) return;
         // Only a REAL name on the profile counts — a username that merely
@@ -1564,111 +1655,121 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       log(`Google index produced ${cands.length} username lead(s) for ${targetName} — verifying each against "${ev.name}"'s dates…`);
     }
 
-    for (const platform of platforms) {
-      // Verify and attribute-score EVERY candidate first (real name, rating
-      // offset, country, state/location, account age, activity), then work the
-      // shortlist best-first — the first Google hit is often a namesake.
-      const scored: { cand: UsernameCandidate; prof: VerifiedProfile; score: number }[] = [];
-      await pool(
-        candidatesForPlatform(cands, platform),
-        4,
-        async (cand) => {
-          if (outOfTime(localDeadline)) return;
-          const rejectKey = `${platform}:${cand.username.toLowerCase()}`;
-          if (googleTargetRejects.has(rejectKey)) return;
-          const prof = await verifyOn(platform, cand.username);
-          if (!prof) return;
-          if (targetFideId && prof.fideId && digits(prof.fideId) !== targetFideId) {
-            googleTargetRejects.add(rejectKey);
-            log(`Google lead @${prof.username} links FIDE ID ${prof.fideId} — contradicts ${targetName}'s (${targetFideId}); rejected.`);
-            return;
-          }
-          const attr = attributeMatch(targetName, effTargetRating, graph.rootState, prof, cand, app.startMs, app.endMs);
-          if (!attr) {
-            googleTargetRejects.add(rejectKey);
-            log(`Google lead @${prof.username} was created after "${ev.name}" ended — impossible; rejected.`);
-            return;
-          }
-          scored.push({ cand, prof, score: attr.score });
-        },
-        () => outOfTime(localDeadline)
-      );
-      scored.sort((a, b) => b.score - a.score);
-      if (phase === "early" && scored.length) {
-        log(
-          `${targetName}: ${scored.length} Google lead(s) on ${platformLabel(platform)} — attribute scores: ${scored
-            .slice(0, 4)
-            .map((s) => `@${s.prof.username} ${Math.round(s.score * 100)}%`)
-            .join(", ")}${scored.length > 4 ? ", …" : ""}.`
+    // Both platforms are worked CONCURRENTLY (their verifications never
+    // contend — different APIs); within each, candidates are still judged
+    // strictly best-attribute-first.
+    const platformHits = await Promise.all(
+      platforms.map(async (platform): Promise<boolean> => {
+        // Verify and attribute-score EVERY candidate first (real name, rating
+        // offset, country, state/location, account age, activity), then work
+        // the shortlist best-first — the first Google hit is often a namesake.
+        const scored: { cand: UsernameCandidate; prof: VerifiedProfile; score: number }[] = [];
+        await pool(
+          candidatesForPlatform(cands, platform),
+          VERIFY_POOL,
+          async (cand) => {
+            if (stopNow(localDeadline)) return;
+            const rejectKey = `${platform}:${cand.username.toLowerCase()}`;
+            if (googleTargetRejects.has(rejectKey)) return;
+            const prof = await verifyOn(platform, cand.username);
+            if (!prof) return;
+            if (targetFideId && prof.fideId && digits(prof.fideId) !== targetFideId) {
+              googleTargetRejects.add(rejectKey);
+              log(`Google lead @${prof.username} links FIDE ID ${prof.fideId} — contradicts ${targetName}'s (${targetFideId}); rejected.`);
+              return;
+            }
+            const attr = attributeMatch(targetName, effTargetRating, graph.rootState, prof, cand, app.startMs, app.endMs);
+            if (!attr) {
+              googleTargetRejects.add(rejectKey);
+              log(`Google lead @${prof.username} was created after "${ev.name}" ended — impossible; rejected.`);
+              return;
+            }
+            scored.push({ cand, prof, score: attr.score });
+          },
+          () => stopNow(localDeadline)
         );
-      }
+        scored.sort((a, b) => b.score - a.score);
+        if (phase === "early" && scored.length) {
+          log(
+            `${targetName}: ${scored.length} Google lead(s) on ${platformLabel(platform)} — attribute scores: ${scored
+              .slice(0, 4)
+              .map((s) => `@${s.prof.username} ${Math.round(s.score * 100)}%`)
+              .join(", ")}${scored.length > 4 ? ", …" : ""}.`
+          );
+        }
 
-      for (const { cand, prof, score } of scored) {
-        if (outOfTime(localDeadline)) return false;
-        if (score < ATTR_SHORTLIST) break; // sorted — the rest are worse
-        const games = await windowGames(platform, prof.username, app.startMs, app.endMs);
-        if (!games.length) {
-          if (phase === "early") {
-            log(
-              `Google lead @${prof.username} (${Math.round(score * 100)}% attributes) played no ${platformLabel(
-                platform
-              )} games during "${ev.name}" — not the right username for this event; continuing the search.`
-            );
+        // Prefetch the whole shortlist's window games in one burst, then judge
+        // best-first — the exact same accept order as a serial scan.
+        const shortlist = scored.filter((s) => s.score >= ATTR_SHORTLIST);
+        for (const s of shortlist) void windowGames(platform, s.prof.username, app.startMs, app.endMs);
+
+        for (const { cand, prof, score } of shortlist) {
+          if (stopNow(localDeadline)) return false;
+          const games = await windowGames(platform, prof.username, app.startMs, app.endMs);
+          if (!games.length) {
+            if (phase === "early") {
+              log(
+                `Google lead @${prof.username} (${Math.round(score * 100)}% attributes) played no ${platformLabel(
+                  platform
+                )} games during "${ev.name}" — not the right username for this event; continuing the search.`
+              );
+            }
+            continue;
           }
-          continue;
-        }
-        // The lead's own games can reveal the event's tournament link — free
-        // fuel for the roster/elimination path even if the lead is wrong.
-        for (const link of linksFromGames(games)) {
-          if (!state.links.has(linkKey(link))) state.links.set(linkKey(link), link);
-        }
-        const { scoped, viaLink } = scopeToEvent(games, state.links, platform, ev);
-        const alignment = alignWithRetry(app.rounds, scoped, !!viaLink);
-        // Do the lead's in-window opponents include handles already proven to
-        // be section players?
-        const knownSectionHandles = new Set<string>();
-        for (const p of ev.players) {
-          const m = mapped.get(p.uscfId)?.get(platform);
-          if (m) knownSectionHandles.add(m.profile.username.toLowerCase());
-        }
-        const overlap = scoped.filter(
-          (g) => knownSectionHandles.has(g.oppHandle.toLowerCase()) || (state.oppSeen.get(g.oppHandle.toLowerCase()) || 0) > 0
-        ).length;
+          // The lead's own games can reveal the event's tournament link — free
+          // fuel for the roster/elimination path even if the lead is wrong.
+          for (const link of linksFromGames(games)) {
+            if (!state.links.has(linkKey(link))) state.links.set(linkKey(link), link);
+          }
+          const { scoped, viaLink } = scopeToEvent(games, state.links, platform, ev);
+          const alignment = alignWithRetry(app.rounds, scoped, !!viaLink);
+          // Do the lead's in-window opponents include handles already proven to
+          // be section players?
+          const knownSectionHandles = new Set<string>();
+          for (const p of ev.players) {
+            const m = mapped.get(p.uscfId)?.get(platform);
+            if (m) knownSectionHandles.add(m.profile.username.toLowerCase());
+          }
+          const overlap = scoped.filter(
+            (g) => knownSectionHandles.has(g.oppHandle.toLowerCase()) || (state.oppSeen.get(g.oppHandle.toLowerCase()) || 0) > 0
+          ).length;
 
-        if (alignment || viaLink || overlap > 0) {
-          // Structural proof (round alignment / the linked tournament / games
-          // against confirmed section players) settles it outright.
-          if (
+          if (alignment || viaLink || overlap > 0) {
+            // Structural proof (round alignment / the linked tournament / games
+            // against confirmed section players) settles it outright.
+            if (
+              recordTarget(platform, prof, {
+                method: "google",
+                event: ev,
+                link: viaLink,
+                game: scoped[0] || games[0],
+                checkedRounds: alignment?.checked,
+                totalRounds: app.rounds.length,
+                sourceUrl: cand.sourceUrl,
+                sectionOverlap: overlap || undefined,
+                attrScore: score,
+              })
+            )
+              return true;
+            continue;
+          }
+          // Games in the window but no structural tie yet: only an attribute
+          // score past the acceptance bar earns a capped "lead" record; the late
+          // phase re-tests once links and mapped handles are richer.
+          if (score >= ATTR_ACCEPT) {
             recordTarget(platform, prof, {
-              method: "google",
+              method: "google-lead",
               event: ev,
-              link: viaLink,
               game: scoped[0] || games[0],
-              checkedRounds: alignment?.checked,
-              totalRounds: app.rounds.length,
               sourceUrl: cand.sourceUrl,
-              sectionOverlap: overlap || undefined,
               attrScore: score,
-            })
-          )
-            return true;
-          continue;
+            });
+          }
         }
-        // Games in the window but no structural tie yet: only an attribute
-        // score past the acceptance bar earns a capped "lead" record; the late
-        // phase re-tests once links and mapped handles are richer.
-        if (score >= ATTR_ACCEPT) {
-          recordTarget(platform, prof, {
-            method: "google-lead",
-            event: ev,
-            game: scoped[0] || games[0],
-            sourceUrl: cand.sourceUrl,
-            attrScore: score,
-          });
-        }
-      }
-    }
-    return false;
+        return false;
+      })
+    );
+    return platformHits.some(Boolean);
   };
 
   // ---------------------------------------------------------------------------
@@ -1749,9 +1850,18 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     ws.platforms = platforms;
 
     // 2. Flyer-derived rosters first — they can end the search outright.
-    for (const link of Array.from(state.links.values())) {
-      if (outOfTime(localDeadline)) return false;
-      if (await tryRoster(ev, link, localDeadline, state)) return true;
+    {
+      let rosterHit = false;
+      await pool(
+        Array.from(state.links.values()),
+        3,
+        async (link) => {
+          if (rosterHit || stopNow(localDeadline)) return;
+          if (await tryRoster(ev, link, localDeadline, state)) rosterHit = true;
+        },
+        () => rosterHit || stopNow(localDeadline)
+      );
+      if (rosterHit) return true;
     }
 
     // 2b. The target straight from the Google index — the cheapest possible
@@ -1791,67 +1901,121 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       log(`Back to "${ev.name}" with time to spare — resuming where we left off.`);
     }
 
-    // 4. BFS with lazy seeding. No seed caps: every section player is fair
-    // game until the event is genuinely exhausted.
-    while (!outOfTime(localDeadline)) {
-      if (!state.frontier.length) {
-        // Starving — resolve the next batch of seed candidates (Google-first).
-        // When a finite deadline is set, keep a reserve for TRACING the seeds.
-        if (isFinite(localDeadline) && localDeadline - Date.now() < 20_000) break;
-        const batch: string[] = [];
-        while (batch.length < SEED_BATCH && ws.seedIdx < ws.seedOrder.length) {
-          const memberId = ws.seedOrder[ws.seedIdx++];
-          if (platforms.some((p) => !mapped.get(memberId)?.has(p))) batch.push(memberId);
+    // 4. BFS run by parallel agents. No seed caps: every section player is
+    // fair game until the event is genuinely exhausted. SEED SCOUTS resolve
+    // section players (Google-first) continuously while PAIRING TRACERS drain
+    // the frontier — a fresh mapping is traced the moment it lands, and the
+    // frontier never starves waiting on a single slow seed.
+    const order = [...platforms].sort((a, b) => (a === "chesscom" ? -1 : 0) - (b === "chesscom" ? -1 : 0));
+    let eventFound = false;
+    const stopEv = () => eventFound || stopNow(localDeadline);
+
+    /** Next seed candidate still unmapped on some platform (consuming). */
+    const nextSeedId = (): string | undefined => {
+      while (ws.seedIdx < ws.seedOrder.length) {
+        const id = ws.seedOrder[ws.seedIdx++];
+        if (platforms.some((p) => !mapped.get(id)?.has(p))) return id;
+      }
+      return undefined;
+    };
+    /** Non-consuming peek: is there any seed candidate left at all? */
+    const seedsRemain = (): boolean => {
+      for (let j = ws.seedIdx; j < ws.seedOrder.length; j++) {
+        if (platforms.some((p) => !mapped.get(ws.seedOrder[j])?.has(p))) return true;
+      }
+      return false;
+    };
+
+    const runAgents = async (seedScouts: boolean): Promise<boolean> => {
+      let tracing = 0;
+      let seeding = 0;
+      const running = new Set<Promise<void>>();
+      const launch = (task: () => Promise<void>) => {
+        const p = task()
+          .catch(() => {})
+          .finally(() => void running.delete(p));
+        running.add(p);
+      };
+
+      while (!stopEv()) {
+        // Tracer agents: pull mapped sources off the frontier.
+        while (tracing < TRACE_AGENTS && state.frontier.length && !stopEv()) {
+          const src = state.frontier.shift()!;
+          const vkey = `${src.memberId}:${src.platform}`;
+          if (state.visited.has(vkey)) continue;
+          state.visited.add(vkey);
+          tracing++;
+          launch(async () => {
+            try {
+              if (await traceFromSource(ev, state, src.memberId, src.platform, src.mapping, localDeadline)) eventFound = true;
+            } finally {
+              tracing--;
+            }
+          });
         }
-        if (!batch.length) {
-          // No seeds left AND nothing queued — this event has nothing more to give.
-          ws.exhausted = true;
+        // Seed scouts: keep resolutions in flight (Google-first, sharpest
+        // names first). When a finite deadline is set, keep a reserve for
+        // TRACING the seeds we already have.
+        if (seedScouts && !(isFinite(localDeadline) && localDeadline - Date.now() < 20_000)) {
+          while (seeding < SEED_AGENTS && !stopEv()) {
+            const memberId = nextSeedId();
+            if (!memberId) break;
+            seeding++;
+            launch(async () => {
+              try {
+                // Chess.com first (fast, parallel-friendly); Lichess when it fails.
+                for (const platform of order) {
+                  if (stopEv()) return;
+                  if (mapped.get(memberId)?.has(platform)) continue;
+                  const prof = await resolveMemberOn(memberId, platform, ev, state);
+                  if (prof) {
+                    setMapping(memberId, platform, { profile: prof, how: "seed", chain: [] });
+                    enqueue(state, { memberId, platform, mapping: mapped.get(memberId)!.get(platform)! });
+                    log(`Found ${platformLabel(platform)} @${prof.username} for section player ${memberName.get(memberId)} — tracing their event games…`);
+                    return; // one platform is enough for a seed
+                  }
+                }
+              } finally {
+                seeding--;
+              }
+            });
+          }
+        }
+        if (!running.size) {
+          // Nothing in flight and nothing startable. If the event truly has
+          // nothing left (vs. merely hitting the deadline reserve), mark it.
+          if (seedScouts && !state.frontier.length && !seedsRemain()) ws.exhausted = true;
           break;
         }
-        const order = [...platforms].sort((a, b) => (a === "chesscom" ? -1 : 0) - (b === "chesscom" ? -1 : 0));
-        await Promise.all(
-          batch.map(async (memberId) => {
-            // Chess.com first (fast, parallel-friendly); Lichess when it fails.
-            for (const platform of order) {
-              if (outOfTime(localDeadline)) return;
-              if (mapped.get(memberId)?.has(platform)) continue;
-              const prof = await resolveMemberOn(memberId, platform, ev, state);
-              if (prof) {
-                setMapping(memberId, platform, { profile: prof, how: "seed", chain: [] });
-                enqueue(state, { memberId, platform, mapping: mapped.get(memberId)!.get(platform)! });
-                log(`Found ${platformLabel(platform)} @${prof.username} for section player ${memberName.get(memberId)} — tracing their event games…`);
-                return; // one platform is enough for a seed
-              }
-            }
-          })
-        );
-        continue;
+        await Promise.race(running);
       }
+      // Let in-flight agents finish (they observe the deadline themselves and
+      // wind down fast) so a trace that was mid-flight when time ran out still
+      // gets its result honored — exactly like the serial engine did.
+      while (running.size) await Promise.all(Array.from(running));
+      return eventFound;
+    };
 
-      const src = state.frontier.shift()!;
-      const vkey = `${src.memberId}:${src.platform}`;
-      if (state.visited.has(vkey)) continue;
-      state.visited.add(vkey);
-      if (await traceFromSource(ev, state, src.memberId, src.platform, src.mapping, localDeadline)) return true;
-    }
+    if (await runAgents(true)) return true;
 
     // Last chance for this event: if the flyer search never ran (the platform
     // was already guessed), run it now — a flyer can hand us the exact
     // tournament page even when no seed could be resolved from names.
-    if (!outOfTime(localDeadline) && hooks.discoverPlatform && !discoverCache.has(ev.eventId)) {
+    if (!stopNow(localDeadline) && hooks.discoverPlatform && !discoverCache.has(ev.eventId)) {
       await collectFlyerLinks();
-      for (const link of Array.from(state.links.values())) {
-        if (outOfTime(localDeadline)) break;
-        if (await tryRoster(ev, link, localDeadline, state)) return true;
-      }
+      let rosterHit = false;
+      await pool(
+        Array.from(state.links.values()),
+        3,
+        async (link) => {
+          if (rosterHit || stopNow(localDeadline)) return;
+          if (await tryRoster(ev, link, localDeadline, state)) rosterHit = true;
+        },
+        () => rosterHit || stopNow(localDeadline)
+      );
+      if (rosterHit) return true;
       // The roster may have mapped fresh sources — drain the pairing frontier.
-      while (!outOfTime(localDeadline) && state.frontier.length) {
-        const src = state.frontier.shift()!;
-        const vkey = `${src.memberId}:${src.platform}`;
-        if (state.visited.has(vkey)) continue;
-        state.visited.add(vkey);
-        if (await traceFromSource(ev, state, src.memberId, src.platform, src.mapping, localDeadline)) return true;
-      }
+      if (state.frontier.length && (await runAgents(false))) return true;
     }
 
     // Re-test the target's Google leads now that this event's links, rosters
@@ -1861,7 +2025,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   };
 
   // ---------------------------------------------------------------------------
-  // Main loop: every online event, one by one, in the most promising order.
+  // Main loop: every online event, worked by a pool of EVENT AGENTS in the
+  // most promising order — several events get the full treatment at once.
   // ---------------------------------------------------------------------------
   const events = [...graph.onlineEvents].sort((a, b) => {
     // Traceable platform first (icc/chesskid have no public API), then small
@@ -1877,14 +2042,32 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     return (b.startDate || "").localeCompare(a.startDate || "");
   });
 
+  /** Fire the flyer/web search for upcoming unknown-platform events NOW so an
+   *  event never has to sit and wait for it when its turn comes (memoized —
+   *  this is the same search the event would run anyway). */
+  const prefetchDiscover = (list: GraphEvent[], from: number, count: number) => {
+    if (!hooks.discoverPlatform) return;
+    for (let j = from; j < Math.min(list.length, from + count); j++) {
+      const e = list[j];
+      const g = (e.platformGuess || "").toLowerCase();
+      if (g === "chesscom" || g === "lichess" || g === "icc" || g === "chesskid") continue;
+      void discover(e);
+    }
+  };
+
+  // The target's own Google-index search is the single highest-value lookup —
+  // start it immediately so its leads are ready when the first event asks.
+  if (hooks.findUsernames && events.length && (appearances.get(targetId) || []).length) {
+    void googleCandidatesFor(targetId, events[0]);
+  }
+
   const totalOpp = directOpponents.size;
   log(
     `Tournament-first search for ${targetName}: ${events.length} online event${events.length === 1 ? "" : "s"}, ${totalOpp} direct opponent${
       totalOpp === 1 ? "" : "s"
-    } to work with. Names resolve through the Google index and get date-verified; platform name search stays OFF unless the index has nothing.`
+    } to work with — ${Math.min(EVENT_AGENTS, Math.max(1, events.length))} event agent(s), each running seed scouts and pairing tracers in parallel. Names resolve through the Google index and get date-verified; platform name search stays OFF unless the index has nothing.`
   );
 
-  let found = false;
   for (let pass = 0; pass < 4 && !found && !outOfTime(); pass++) {
     const pending = events.filter((e) => !workStates.get(e.eventId)?.exhausted);
     if (!pending.length) break;
@@ -1894,17 +2077,27 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         `${pending.length} event(s) still have open leads — going back in${secsLeft < 3600 ? ` (${secsLeft}s left on the clock)` : ""}.`
       );
     }
-    for (let i = 0; i < pending.length && !found; i++) {
-      if (outOfTime()) break;
-      const remaining = deadline - Date.now();
-      const slice = Math.max(EVENT_MIN_MS, Math.floor(remaining / (pending.length - i)));
-      found = await workEvent(pending[i], Math.min(deadline, Date.now() + slice));
-      if (!found && !outOfTime() && pass === 0) log(`"${pending[i].name}" didn't give up the username yet — moving on for now.`);
-    }
+    prefetchDiscover(pending, 0, EVENT_AGENTS + DISCOVER_LOOKAHEAD);
+    let nextIdx = 0;
+    const eventAgent = async () => {
+      while (!found && !outOfTime()) {
+        const i = nextIdx++;
+        if (i >= pending.length) return;
+        prefetchDiscover(pending, i + EVENT_AGENTS, DISCOVER_LOOKAHEAD);
+        const remaining = deadline - Date.now();
+        const batchesLeft = Math.max(1, Math.ceil((pending.length - i) / EVENT_AGENTS));
+        const slice = Math.max(EVENT_MIN_MS, Math.floor(remaining / batchesLeft));
+        if (await workEvent(pending[i], Math.min(deadline, Date.now() + slice))) found = true;
+        else if (!found && !outOfTime() && pass === 0) log(`"${pending[i].name}" didn't give up the username yet — moving on for now.`);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(EVENT_AGENTS, pending.length) }, eventAgent));
   }
 
   // ---------------------------------------------------------------------------
-  // Deep phase: recurse into direct opponents' own online histories.
+  // Deep phase: recurse into direct opponents' own online histories — several
+  // opponents expanded AT ONCE, each sub-traversal reusing the search-wide
+  // fetch caches so nothing already verified or downloaded is fetched again.
   // ---------------------------------------------------------------------------
   if (!found && depth === 0 && hooks.expandMember && deadline - Date.now() > 35_000) {
     // Every unmapped direct opponent is worth a deep dive — most-present first.
@@ -1912,48 +2105,59 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       .filter((id) => !mapped.has(id))
       .sort((a, b) => (appearances.get(b)?.length || 0) - (appearances.get(a)?.length || 0));
     if (oppByPresence.length) {
-      log(`Still nothing — going deeper: exploring ${oppByPresence.length} opponents' own tournament histories to pin their usernames first.`);
+      log(
+        `Still nothing — going deeper: exploring ${oppByPresence.length} opponents' own tournament histories (${DEEP_AGENTS} at a time) to pin their usernames first.`
+      );
     }
-    for (const oppId of oppByPresence) {
-      if (found || outOfTime() || deadline - Date.now() < 25_000) break;
-      const oppName = memberName.get(oppId) || "opponent";
-      const sub = await hooks.expandMember(oppId).catch(() => null);
-      if (!sub || !sub.onlineEvents.length) continue;
-      log(`Deep dive: ${oppName} played ${sub.onlineEvents.length} online event(s) of their own — tracing those…`);
-      const subResult = await runGraphTraversal(sub, {
-        targetName: oppName,
-        targetRating: memberRating.get(oppId),
-        signal,
-        log,
-        budgetMs: Math.min(300_000, Math.max(60_000, deadline - Date.now() - 15_000)),
-        // Google-index + flyer search stay available; no further expansion.
-        hooks: { discoverPlatform: hooks.discoverPlatform, findUsernames: hooks.findUsernames },
-        depth: 1,
-      });
-      for (const acc of subResult.accounts) {
-        if (found) break;
-        if (acc.confidence < 0.5 || (acc.platform !== "chesscom" && acc.platform !== "lichess")) continue;
-        const platform = acc.platform as OnlinePlatform;
-        const prof = await verifyOn(platform, acc.username);
-        if (!prof) continue;
-        setMapping(oppId, platform, { profile: prof, how: "deep", chain: [] });
-        // Trace the shared events from this hard-won seed.
-        for (const app of appearances.get(oppId) || []) {
-          if (found || outOfTime()) break;
-          if (!(appearances.get(targetId) || []).some((ta) => ta.event.eventId === app.event.eventId)) continue;
-          const state: EventState = { links: new Map(), frontier: [], visited: new Set(), oppSeen: new Map() };
-          found = await traceFromSource(app.event, state, oppId, platform, mapped.get(oppId)!.get(platform)!, deadline);
-          // Follow any frontier the trace opened up.
-          while (!found && state.frontier.length && !outOfTime()) {
-            const nxt = state.frontier.shift()!;
-            const vkey = `${nxt.memberId}:${nxt.platform}`;
-            if (state.visited.has(vkey)) continue;
-            state.visited.add(vkey);
-            found = await traceFromSource(app.event, state, nxt.memberId, nxt.platform, nxt.mapping, deadline);
+    const deepStop = () => found || outOfTime() || deadline - Date.now() < 25_000;
+    await pool(
+      oppByPresence,
+      DEEP_AGENTS,
+      async (oppId) => {
+        if (deepStop()) return;
+        const oppName = memberName.get(oppId) || "opponent";
+        const sub = await hooks.expandMember!(oppId).catch(() => null);
+        if (!sub || !sub.onlineEvents.length || deepStop()) return;
+        log(`Deep dive: ${oppName} played ${sub.onlineEvents.length} online event(s) of their own — tracing those…`);
+        const subResult = await runGraphTraversal(sub, {
+          targetName: oppName,
+          targetRating: memberRating.get(oppId),
+          signal,
+          log,
+          budgetMs: Math.min(300_000, Math.max(60_000, deadline - Date.now() - 15_000)),
+          // Google-index + flyer search stay available; no further expansion.
+          hooks: { discoverPlatform: hooks.discoverPlatform, findUsernames: hooks.findUsernames },
+          depth: 1,
+          shared,
+          // The moment ANY deep dive finds the real target, siblings stand down.
+          stopWhen: () => found,
+        });
+        for (const acc of subResult.accounts) {
+          if (found) break;
+          if (acc.confidence < 0.5 || (acc.platform !== "chesscom" && acc.platform !== "lichess")) continue;
+          const platform = acc.platform as OnlinePlatform;
+          const prof = await verifyOn(platform, acc.username);
+          if (!prof) continue;
+          setMapping(oppId, platform, { profile: prof, how: "deep", chain: [] });
+          // Trace the shared events from this hard-won seed.
+          for (const app of appearances.get(oppId) || []) {
+            if (found || outOfTime()) break;
+            if (!(appearances.get(targetId) || []).some((ta) => ta.event.eventId === app.event.eventId)) continue;
+            const state: EventState = { links: new Map(), frontier: [], visited: new Set(), oppSeen: new Map() };
+            if (await traceFromSource(app.event, state, oppId, platform, mapped.get(oppId)!.get(platform)!, deadline)) found = true;
+            // Follow any frontier the trace opened up.
+            while (!found && state.frontier.length && !outOfTime()) {
+              const nxt = state.frontier.shift()!;
+              const vkey = `${nxt.memberId}:${nxt.platform}`;
+              if (state.visited.has(vkey)) continue;
+              state.visited.add(vkey);
+              if (await traceFromSource(app.event, state, nxt.memberId, nxt.platform, nxt.mapping, deadline)) found = true;
+            }
           }
         }
-      }
-    }
+      },
+      deepStop
+    );
   }
 
   accounts.sort((a, b) => b.confidence - a.confidence);

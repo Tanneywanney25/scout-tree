@@ -53,6 +53,7 @@ import {
   normalizeName,
 } from "./confidence";
 import { verifyAccount } from "./verify";
+import { pool as runPool } from "./net";
 
 export interface ResolveOptions {
   signal?: AbortSignal;
@@ -330,16 +331,17 @@ export async function resolveIdentity(
   let hintStrong = false;
   if (hintHandles.length && !signal?.aborted) {
     emit(`Checking the username hint (${hintHandles.map((h) => `"${h}"`).join(", ")})…`, "running");
-    for (const h of hintHandles) {
-      for (const platform of ["chesscom", "lichess"] as Platform[]) {
-        if (signal?.aborted) break;
-        const acc = await verifyCandidate(platform, h, { hinted: true });
-        if (!acc) continue;
-        addToPool(acc, query.name);
-        const sim = nameSimilarity(query.name, acc.displayName || "");
-        const fideMatch = !!(targetFideId && acc.fideId && idDigits(acc.fideId) === targetFideId);
-        if (fideMatch || sim >= 0.92) hintStrong = true;
-      }
+    // Every handle × platform combination verified concurrently.
+    const combos = hintHandles.flatMap((h) => (["chesscom", "lichess"] as Platform[]).map((platform) => ({ h, platform })));
+    const verified = await Promise.all(
+      combos.map(({ h, platform }) => (signal?.aborted ? null : verifyCandidate(platform, h, { hinted: true })))
+    );
+    for (const acc of verified) {
+      if (!acc) continue;
+      addToPool(acc, query.name);
+      const sim = nameSimilarity(query.name, acc.displayName || "");
+      const fideMatch = !!(targetFideId && acc.fideId && idDigits(acc.fideId) === targetFideId);
+      if (fideMatch || sim >= 0.92) hintStrong = true;
     }
     if (hintStrong) emit("The user-supplied handle checks out against the player's identity.", "done");
   }
@@ -425,10 +427,20 @@ export async function resolveIdentity(
       );
       if (leads.length) {
         emit(`Google index returned ${leads.length} candidate handle(s) — verifying against the live platforms…`, "running");
-        for (const lead of leads) {
-          if (signal?.aborted) break;
-          const acc = await verifyCandidate(lead.platform, lead.username, { attachName: query.name });
-          if (!acc) continue;
+        // Verify every lead concurrently, then add them in the index's own
+        // order so downstream clustering sees the same sequence as before.
+        const verified = new Array<Awaited<ReturnType<typeof verifyCandidate>>>(leads.length);
+        await runPool(
+          leads,
+          10,
+          async (lead, i) => {
+            verified[i] = await verifyCandidate(lead.platform, lead.username, { attachName: query.name });
+          },
+          () => !!signal?.aborted
+        );
+        leads.forEach((lead, i) => {
+          const acc = verified[i];
+          if (!acc) return;
           const evidence: Evidence[] = [
             ...acc.evidence,
             {
@@ -449,7 +461,7 @@ export async function resolveIdentity(
             query.name
           );
           googleVerified++;
-        }
+        });
         if (googleVerified) emit(`Verified ${googleVerified} Google-indexed handle(s).`, "done");
       }
     } catch {
@@ -493,18 +505,21 @@ export async function resolveIdentity(
 
       if (suggestions.length) {
         emit(`Verifying ${suggestions.length} suggested handle(s) against the live platforms…`, "running");
-        const CONCURRENCY = 4;
-        for (let i = 0; i < suggestions.length; i += CONCURRENCY) {
-          if (signal?.aborted) break;
-          const batch = suggestions.slice(i, i + CONCURRENCY);
-          const verified = await Promise.all(
-            batch.map(async (s) => await verifyCandidate(s.platform, s.username, { attachName: s.attachName }))
-          );
-          batch.forEach((s, j) => {
-            const acc = verified[j];
-            if (acc) addToPool(demote(acc), s.attachName);
-          });
-        }
+        // One worker pool instead of lock-step batches — a slow lookup no
+        // longer stalls the other verifications in its batch.
+        const verified = new Array<Awaited<ReturnType<typeof verifyCandidate>>>(suggestions.length);
+        await runPool(
+          suggestions,
+          10,
+          async (s, i) => {
+            verified[i] = await verifyCandidate(s.platform, s.username, { attachName: s.attachName });
+          },
+          () => !!signal?.aborted
+        );
+        suggestions.forEach((s, i) => {
+          const acc = verified[i];
+          if (acc) addToPool(demote(acc), s.attachName);
+        });
       }
     } else if (googleVerified > 0) {
       for (const p of NAME_FALLBACK_PROVIDERS) {
