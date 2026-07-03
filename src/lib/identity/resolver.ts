@@ -44,7 +44,7 @@ import type {
 } from "./types";
 import { PROVIDERS, NAME_FALLBACK_PROVIDERS } from "./providers";
 import { getTournamentGraph, findUsernameCandidates } from "./providers/edgeClient";
-import { runGraphTraversal } from "./providers/uscfGraph";
+import { runGraphTraversal, type TraversalResult } from "./providers/uscfGraph";
 import {
   scoreFromEvidence,
   nameSimilarity,
@@ -358,17 +358,60 @@ export async function resolveIdentity(
     if (graph && graph.graphTraversalReady && graph.onlineEvents.length) {
       graphAvailable = true;
       emit("Tracing the player's USCF online events to uncover their real usernames…", "running", "uscf-graph");
-      let traversal;
+
+      // The traversal must NEVER leave the search hanging on one step. Three
+      // layers guarantee it always concludes and the search moves on to the
+      // fallbacks + final results:
+      //   1. an explicit time budget (the engine's own default is effectively
+      //      unbounded — fine for the CLI, not for a user staring at a spinner);
+      //   2. a stall watchdog — if the engine emits NO log line for a while
+      //      (a wedged step, a silent retry loop), it is stood down gracefully
+      //      via stopWhen, keeping any accounts it already traced;
+      //   3. a hard race as the last-ditch backstop, in case the engine somehow
+      //      never returns at all.
+      const TRAVERSAL_BUDGET_MS = 240_000; // 4 min of thorough tracing, max
+      const TRAVERSAL_STALL_MS = 60_000; // no log line for 60s = wedged
+      let lastLogAt = Date.now();
+      let abandoned = false;
+      let stallAnnounced = false;
+      const stalledOrAbandoned = () => {
+        if (abandoned) return true;
+        if (Date.now() - lastLogAt <= TRAVERSAL_STALL_MS) return false;
+        if (!stallAnnounced) {
+          stallAnnounced = true;
+          emit("The tournament trace went quiet — standing it down and moving on to fallback discovery.", "info", "uscf-graph");
+        }
+        return true;
+      };
+
+      let traversal: TraversalResult;
+      let hardTimer: ReturnType<typeof setTimeout> | undefined;
       try {
-        traversal = await runGraphTraversal(graph, {
-          targetName: graph.rootName || query.name,
-          targetRating,
-          targetFideId,
-          signal,
-          log: (m) => emit(m, "running", "uscf-graph"),
-        });
+        traversal = await Promise.race([
+          runGraphTraversal(graph, {
+            targetName: graph.rootName || query.name,
+            targetRating,
+            targetFideId,
+            signal,
+            budgetMs: TRAVERSAL_BUDGET_MS,
+            stopWhen: stalledOrAbandoned,
+            log: (m) => {
+              lastLogAt = Date.now();
+              emit(m, "running", "uscf-graph");
+            },
+          }),
+          new Promise<TraversalResult>((resolve) => {
+            hardTimer = setTimeout(() => {
+              abandoned = true; // stands the still-running engine down too
+              emit("The tournament trace ran out of time — moving on to fallback discovery.", "info", "uscf-graph");
+              resolve({ accounts: [], notes: ["Traversal exceeded its hard time limit."], found: false });
+            }, TRAVERSAL_BUDGET_MS + 30_000);
+          }),
+        ]);
       } catch {
         traversal = { accounts: [], notes: ["Tournament-graph traversal failed."], found: false };
+      } finally {
+        if (hardTimer !== undefined) clearTimeout(hardTimer);
       }
       providerStatus.push({ name: "uscf-graph", label: "Tournament graph", available: true, notes: traversal.notes });
 

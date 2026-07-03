@@ -1,12 +1,14 @@
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Header from "@/components/Header";
 import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { Search, Sparkles, Telescope } from "lucide-react";
+import { ScrollText, Search, Sparkles, Telescope } from "lucide-react";
 import PlayerSearchForm from "@/components/findplayer/PlayerSearchForm";
 import SearchExperience from "@/components/findplayer/SearchExperience";
 import IdentityResults from "@/components/findplayer/IdentityResults";
+import SearchLogDialog from "@/components/findplayer/SearchLogDialog";
 import {
   resolveIdentity,
   buildHandoff,
@@ -38,12 +40,21 @@ const FindPlayer = () => {
   const [result, setResult] = useState<ResolutionResult | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // The FULL, unabridged log — every event ever emitted, unlike the bounded
+  // `events` tail above. Kept in a ref so appending is O(1) and never triggers
+  // a re-render; the View Log dialog reads it on demand (and live-refreshes on
+  // its own timer while the search runs).
+  const fullLogRef = useRef<SearchEvent[]>([]);
+  const [logOpen, setLogOpen] = useState(false);
+  const getFullLog = useCallback(() => fullLogRef.current, []);
+
   const handleSearch = async (query: PlayerQuery) => {
     setActiveQuery(query);
     setEvents([]);
     setProviderStatus({});
     setMatched(false);
     setResult(null);
+    fullLogRef.current = [];
     setPhase("searching");
 
     abortRef.current?.abort();
@@ -59,6 +70,7 @@ const FindPlayer = () => {
         resolveIdentity(query, {
           signal: controller.signal,
           onEvent: (event) => {
+            fullLogRef.current.push(event); // full log, never trimmed
             setEvents((prev) =>
               prev.length >= EVENT_TAIL_TRIM_AT ? [...prev.slice(prev.length - EVENT_TAIL_KEPT), event] : [...prev, event]
             );
@@ -110,8 +122,16 @@ const FindPlayer = () => {
       <Header />
 
       {phase === "searching" && activeQuery && (
-        <SearchExperience query={activeQuery} events={events} providerStatus={providerStatus} matched={matched} />
+        <SearchExperience
+          query={activeQuery}
+          events={events}
+          providerStatus={providerStatus}
+          matched={matched}
+          onViewLog={() => setLogOpen(true)}
+        />
       )}
+
+      <SearchLogDialog open={logOpen} onOpenChange={setLogOpen} getLog={getFullLog} live={phase === "searching"} />
 
       <main className="flex-1 py-10 sm:py-14">
         <div className="container mx-auto px-4 max-w-3xl">
@@ -161,7 +181,15 @@ const FindPlayer = () => {
           )}
 
           {phase === "results" && result && (
-            <IdentityResults result={result} onGenerate={handleGenerate} onReset={handleReset} />
+            <>
+              <div className="mb-4 flex justify-end">
+                <Button variant="outline" size="sm" onClick={() => setLogOpen(true)}>
+                  <ScrollText className="mr-2 h-3.5 w-3.5" />
+                  View search log
+                </Button>
+              </div>
+              <IdentityResults result={result} onGenerate={handleGenerate} onReset={handleReset} />
+            </>
           )}
         </div>
       </main>

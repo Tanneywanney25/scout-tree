@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Crown, Check, Loader2, Search } from "lucide-react";
+import { Crown, Check, Loader2, ScrollText, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { PlayerQuery, SearchEvent } from "@/lib/identity";
 
@@ -12,6 +12,8 @@ interface SearchExperienceProps {
   providerStatus?: Record<string, "running" | "done">;
   /** Sticky "a match was found" flag (a match line may leave the bounded tail). */
   matched?: boolean;
+  /** Opens the full, unabridged search log (every step, not just the tail). */
+  onViewLog?: () => void;
 }
 
 // The orbiting source nodes. `match` decides which provider event lights them up.
@@ -42,7 +44,7 @@ const AMBIENT_LINES = [
   "Building confidence graph…",
 ];
 
-export function SearchExperience({ query, events, providerStatus: providerStatusProp, matched: matchedProp }: SearchExperienceProps) {
+export function SearchExperience({ query, events, providerStatus: providerStatusProp, matched: matchedProp, onViewLog }: SearchExperienceProps) {
   const [ambientIdx, setAmbientIdx] = useState(0);
   const feedRef = useRef<HTMLDivElement>(null);
   const startRef = useRef(Date.now());
@@ -224,6 +226,20 @@ export function SearchExperience({ query, events, providerStatus: providerStatus
             ))}
           </div>
         </div>
+
+        {/* --- Full log access: the feed above only shows the newest lines --- */}
+        {onViewLog && (
+          <div className="mt-3 flex justify-center">
+            <button
+              type="button"
+              onClick={onViewLog}
+              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background/70 px-3 py-1.5 text-xs font-medium text-muted-foreground backdrop-blur transition-colors hover:text-foreground hover:border-primary/40"
+            >
+              <ScrollText className="h-3.5 w-3.5" />
+              View full log
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
