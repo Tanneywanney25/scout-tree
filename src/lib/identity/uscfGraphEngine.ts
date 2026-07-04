@@ -1240,6 +1240,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     sectionOverlap?: number;
     /** 0..1 attribute-match score (profile vs USCF record), when computed. */
     attrScore?: number;
+    /** How many DIFFERENT direct opponents' games independently named this handle
+     *  as their round-vs-target opponent (cross-corroborated single-edge reveal). */
+    crossVotes?: number;
   }
 
   const foundKeys = new Set<string>();
@@ -1261,10 +1264,18 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       case "pairing":
         evidence.push({
           kind: "shared-opponent",
-          weight: graphDiscoveryWeight(true, 1),
+          weight: graphDiscoveryWeight(true, via.crossVotes || 1),
           label: `Round ${via.round}: the crosstable pairs ${targetName} with ${via.viaName}, and @${via.viaHandle}'s game that round was against @${profile.username}`,
           source: "uscf-graph",
         });
+        if (via.crossVotes && via.crossVotes >= 2) {
+          evidence.push({
+            kind: "shared-opponent",
+            weight: Math.min(2.0, 0.9 * via.crossVotes),
+            label: `${via.crossVotes} of ${targetName}'s crosstable opponents independently played @${profile.username} in the exact round they faced ${targetName}`,
+            source: "uscf-graph",
+          });
+        }
         if (via.checkedRounds) {
           evidence.push({
             kind: "cross-reference",
@@ -1577,6 +1588,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
      *  a handle seen from several section players is almost surely a section
      *  player itself, so it gets verified first. */
     oppSeen: Map<string, number>;
+    /** Cross-corroboration ledger for the TARGET's handle: lowercased handle →
+     *  the set of DIFFERENT direct opponents whose round-vs-target game named it,
+     *  plus a representative game. Two independent voters (or a FIDE match)
+     *  clinches the target even when no single opponent fully aligned. */
+    targetEdgeVotes?: Map<string, { voters: Set<string>; game: ArchiveGame; viaName: string; viaHandle: string; round: number }>;
     /** Seed queue (present on real event states; duds get requeued here). */
     seedOrder?: string[];
   }
@@ -1654,8 +1670,19 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       );
     }
     if (alignment) {
+      // A board may name the TARGET only when the assignment is UNAMBIGUOUS: the
+      // opponent is FULLY aligned (every crosstable round matched a game, so the
+      // round they played the target maps to exactly one game) OR the games were
+      // scoped by a real tournament link (no casual pool to confuse the round).
+      // A PARTIAL alignment leaves the unpinned target round free to lock onto a
+      // stray casual game (observed: a 3-of-11 alignment mislabelled the target).
+      // Partial alignments still map section players (BFS fuel) and feed the
+      // cross-corroboration vote below — they just can't crown the target alone.
+      const targetReadable = alignment.pairs.length >= app.rounds.length || !!viaLink;
       log(
-        `Aligned @${handle}'s ${alignment.pairs.length} event games to ${srcName}'s crosstable rounds (${alignment.checked} results verified) — reading the other side of each board…`
+        `Aligned @${handle}'s ${alignment.pairs.length} of ${srcName}'s ${app.rounds.length} crosstable rounds (${alignment.checked} results verified)${
+          targetReadable ? "" : " — partial, so it can map opponents but not crown the target alone"
+        } — reading the other side of each board…`
       );
       // Verify the other side of every aligned board CONCURRENTLY — each hit
       // maps one more crosstable player (or IS the target).
@@ -1670,6 +1697,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           if (!prof) return;
           if (oppId === targetId) {
             if (
+              targetReadable &&
               recordTarget(platform, prof, {
                 method: "pairing",
                 event: ev,
@@ -1699,6 +1727,68 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         () => pairingHit || stopNow(localDeadline)
       );
       if (pairingHit) return true;
+    }
+
+    // (b2) Cross-corroborated TARGET edge. This source is a direct opponent of
+    // the target; the crosstable says which round they faced. If (b) above didn't
+    // already resolve the target from a fully-aligned board, that same round's
+    // game STILL names the target on the other side — but one loosely-aligned
+    // game is not proof (any casual game can share a W/L/D), so we require
+    // CORROBORATION: the identical handle named by ≥2 DIFFERENT direct opponents
+    // in the exact round each played the target, or a FIDE-id match. A single
+    // outcome-only game with no such anchor is never accepted. (A fully-aligned
+    // opponent already resolves the target through (b); this closes the gap for
+    // partial / unaligned opponents — the @brilliant_knight case.)
+    if (!found && !stopNow(localDeadline)) {
+      const tr = app.rounds.find((r) => r.opponentUscfId === targetId);
+      if (tr) {
+        // Handles this source's OTHER rounds already account for (aligned boards
+        // + any already-mapped section-mate on this platform) can't be the target.
+        const claimed = new Set<string>();
+        if (alignment) for (const p of alignment.pairs) claimed.add(p.game.oppHandle.toLowerCase());
+        for (const per of mapped.values()) {
+          const h = per.get(platform)?.profile.username;
+          if (h) claimed.add(h.toLowerCase());
+        }
+        // The target's game this source played: outcome MUST be known and match
+        // this source's crosstable result vs the target (the anchor); colour must
+        // agree when both know it; opponent must be otherwise unaccounted-for.
+        const cands = targetEdgeCandidates(tr, scoped, handle.toLowerCase(), claimed);
+        // Only an UNAMBIGUOUS single candidate is this source's vote — two equally
+        // plausible games mean we can't tell which board was the target's.
+        if (cands.length === 1) {
+          const votes = (state.targetEdgeVotes ??= new Map());
+          const k = cands[0].oppHandle.toLowerCase();
+          const entry =
+            votes.get(k) || { voters: new Set<string>(), game: cands[0], viaName: srcName, viaHandle: handle, round: tr.round };
+          entry.voters.add(memberId);
+          votes.set(k, entry);
+          if (entry.voters.size >= 2 || targetFideId) {
+            const prof = await verifyOn(platform, cands[0].oppHandle);
+            const fideOk = !!(prof?.fideId && targetFideId && digits(prof.fideId) === targetFideId);
+            if (prof && (entry.voters.size >= 2 || fideOk)) {
+              if (
+                recordTarget(platform, prof, {
+                  method: "pairing",
+                  event: ev,
+                  link: viaLink && gameInLink(entry.game, viaLink) ? viaLink : undefined,
+                  chain: mapping.chain.concat(srcName),
+                  viaName: entry.viaName,
+                  viaHandle: entry.viaHandle,
+                  round: entry.round,
+                  game: entry.game,
+                  crossVotes: entry.voters.size,
+                })
+              )
+                return true;
+            }
+          } else {
+            log(
+              `@${cands[0].oppHandle} looks like ${targetName}'s round-${tr.round} opponent from ${srcName}'s game, but one edge isn't proof — holding for a second opponent to corroborate.`
+            );
+          }
+        }
+      }
     }
 
     // (c) Name-scan the same games: the target's own account may show a real
