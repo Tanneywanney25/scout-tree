@@ -275,6 +275,13 @@ function AccountCard({
   onToggle: () => void;
 }) {
   const lastActive = account.lastActive ? new Date(account.lastActive) : null;
+  // The green shield means "this account is confirmed to be THIS player", not
+  // merely "this account exists". Every live account has verified === true (the
+  // platform API answered), so the shield must NOT key off that alone — a
+  // name-search / Google fallback lead can be a same-name stranger. Those carry
+  // an explicit namesake caveat in their evidence; withhold the shield for them.
+  const possibleNamesake = account.evidence?.some((e) => /namesake/i.test(e.label));
+  const identityConfirmed = account.verified && !possibleNamesake;
   return (
     <div
       className={cn(
@@ -289,7 +296,13 @@ function AccountCard({
           <span className="min-w-0">
             <span className="flex items-center gap-1.5">
               <span className="font-semibold text-foreground truncate">@{account.username}</span>
-              {account.verified && <ShieldCheck className="w-3.5 h-3.5 text-confidence-high shrink-0" />}
+              {identityConfirmed ? (
+                <ShieldCheck className="w-3.5 h-3.5 text-confidence-high shrink-0" aria-label="Identity confirmed through tournament games" />
+              ) : possibleNamesake ? (
+                <span className="text-[10px] font-medium text-confidence-low shrink-0" title="Same-name match from a name/Google search — not confirmed through this player's tournament games. Could be a different person.">
+                  unconfirmed
+                </span>
+              ) : null}
             </span>
             <span className="block text-xs text-muted-foreground">{platformLabel[account.platform]}</span>
           </span>
