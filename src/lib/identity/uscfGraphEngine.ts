@@ -1011,8 +1011,17 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     return { score: scoreFromEvidence(evi, 0), evidence: evi };
   };
 
-  /** Scope archive games to an event: known tournament links first, else the
-   *  event's expected time classes. */
+  /** Scope archive games to an event: the best-fitting known tournament link,
+   *  else the event's expected time classes.
+   *
+   *  A games-derived "link" is only the event if the player played SEVERAL of
+   *  their games there. A single game tagged with a tournament id is almost
+   *  always a giant public arena the player dipped into once (empirically: a
+   *  "1|0 Bullet" arena of 25 strangers matched a 26-player scholastic
+   *  crosstable at 0 overlap) — scoping to it strands the real games. So we pick
+   *  the platform link that explains the MOST of the player's games and only
+   *  trust a games-derived link that carries ≥2 of them; a flyer-sourced link is
+   *  the event by construction and is trusted even at one game. */
   const scopeToEvent = (
     games: ArchiveGame[],
     links: Map<string, EventLink> | undefined,
@@ -1020,10 +1029,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     ev: GraphEvent
   ): { scoped: ArchiveGame[]; viaLink?: EventLink } => {
     if (links) {
+      let best: { link: EventLink; inLink: ArchiveGame[] } | null = null;
       for (const link of links.values()) {
         if (link.platform !== platform) continue;
         const inLink = games.filter((g) => gameInLink(g, link));
-        if (inLink.length) return { scoped: inLink, viaLink: link };
+        if (inLink.length && (!best || inLink.length > best.inLink.length)) best = { link, inLink };
+      }
+      if (best && (best.link.source === "flyer" || best.inLink.length >= 2)) {
+        return { scoped: best.inLink, viaLink: best.link };
       }
     }
     // Manually-paired USCF events were usually played as UNRATED casual
@@ -1617,11 +1630,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       return false;
     }
 
-    // (a) New tournament linkage revealed by the source's games?
+    // (a) New tournament linkage revealed by the source's games? A link the
+    // source played only ONE game in is almost always a public arena they
+    // dipped into once, not the USCF event — registering it (and worse, fetching
+    // its whole roster to name-match) burns the budget on strangers. Only chase
+    // a games-derived link the source actually played several games in.
     for (const link of linksFromGames(games)) {
       if (outOfTime(localDeadline)) break;
       if (state.links.has(linkKey(link))) continue;
       state.links.set(linkKey(link), link);
+      if (games.filter((g) => gameInLink(g, link)).length < 2) continue;
       if (await tryRoster(ev, link, localDeadline, state)) return true;
     }
 
