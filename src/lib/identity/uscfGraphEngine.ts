@@ -569,36 +569,156 @@ interface AlignedPair {
 }
 
 /**
- * Align a player's crosstable rounds with their event-scoped archive games by
- * playing order, validating the win/loss/draw sequence (and colours when the
- * crosstable knows them). Returns null unless the alignment is trustworthy.
+ * The archive games a direct-opponent source could have played the TARGET in,
+ * for the cross-corroborated single-edge reveal. The source's crosstable result
+ * vs the target is the anchor: a candidate game's outcome MUST be known and equal
+ * it, its colour must agree when both sides know it, and its opponent must not be
+ * the source itself or an already-accounted-for handle (an aligned board or a
+ * known section-mate). Returning exactly ONE game means this source
+ * unambiguously names that handle as the target; 0 or ≥2 means it can't vote.
  */
-function alignRounds(rounds: RoundGame[], scoped: ArchiveGame[], viaLinkage: boolean): { pairs: AlignedPair[]; checked: number } | null {
-  if (!rounds.length || rounds.length !== scoped.length) return null;
-  if (!viaLinkage && rounds.length < 3) return null; // too little signal without a tournament link
-  const games = [...scoped].sort((a, b) => a.endMs - b.endMs);
+export function targetEdgeCandidates(
+  targetRound: { outcome: Outcome; color: GraphGame["color"] },
+  scoped: ArchiveGame[],
+  sourceHandleLower: string,
+  claimed: Set<string>
+): ArchiveGame[] {
+  return scoped.filter((g) => {
+    const k = g.oppHandle.toLowerCase();
+    if (k === sourceHandleLower || claimed.has(k)) return false;
+    if (!g.sourceOutcome || g.sourceOutcome !== targetRound.outcome) return false;
+    if (
+      (targetRound.color === "white" || targetRound.color === "black") &&
+      (g.sourceColor === "white" || g.sourceColor === "black") &&
+      g.sourceColor !== targetRound.color
+    )
+      return false;
+    return true;
+  });
+}
 
-  let mismatches = 0;
-  let checked = 0;
-  const pairs: AlignedPair[] = [];
-  for (let i = 0; i < rounds.length; i++) {
+/**
+ * Align a player's crosstable rounds with their event-scoped archive games,
+ * validating the win/loss/draw sequence (and colours + already-known opponent
+ * handles when available).
+ *
+ * A real archive almost NEVER has exactly one game per crosstable round: there
+ * is usually a warm-up game, an extra casual game in the same time class, or a
+ * round that never made it to the archive (a bye, a forfeit, a game played on a
+ * second account). The old implementation demanded `rounds.length ===
+ * scoped.length` and matched positionally — so a single spare game discarded the
+ * WHOLE edge (empirically the norm: 10-vs-9, 12-vs-4, 1-vs-4 all threw away
+ * perfectly recoverable pairings). We instead find the best ORDERED SUBSEQUENCE
+ * match, skipping spare games (and, where forced, unmatched rounds). Because
+ * tournament rounds are played in time order, the games that correspond to the
+ * rounds form an increasing subsequence of the (time-sorted) archive.
+ *
+ * `roundPins` maps an opponent's USCF id → the lowercased handle we ALREADY
+ * mapped them to on this platform. Those are hard constraints that anchor the
+ * alignment (a pinned round can only match its known handle, and that handle
+ * can't be used for any other round), which both sharpens accuracy and makes it
+ * safe to align even a loose game pool.
+ *
+ * Returns null unless the surviving alignment is trustworthy.
+ */
+export function alignRounds(
+  rounds: RoundGame[],
+  scoped: ArchiveGame[],
+  viaLinkage: boolean,
+  roundPins?: Map<string, string>
+): { pairs: AlignedPair[]; checked: number } | null {
+  const n = rounds.length;
+  if (!n) return null;
+  if (!viaLinkage && n < 3) return null; // too little signal without a tournament link
+  const games = [...scoped].sort((a, b) => a.endMs - b.endMs);
+  const m = games.length;
+  if (!m) return null;
+
+  // Handles we already know belong to a specific round of THIS player — they
+  // pin the alignment. `anchors` is how many spare games are so pinned.
+  const pinnedHandles = new Set<string>();
+  if (roundPins) for (const h of roundPins.values()) pinnedHandles.add(h.toLowerCase());
+  const anchors = pinnedHandles.size
+    ? games.filter((g) => pinnedHandles.has(g.oppHandle.toLowerCase())).length
+    : 0;
+  // Without a trusted tournament link, a game pool much larger than the round
+  // count makes the outcome checksum meaningless — many DIFFERENT subsequences
+  // fit the same short W/L/D shape, so the matcher can lock a round onto a random
+  // casual opponent (observed: a rated bullet game stole the round a player
+  // actually spent against the target). Bail unless the alignment is WELL
+  // anchored — i.e. at least half the rounds are already pinned to known handles,
+  // which collapses the ambiguity. One or two stray pins are NOT enough licence
+  // to align a big mixed pool.
+  const wellAnchored = anchors >= Math.ceil(n / 2);
+  if (!viaLinkage && !wellAnchored && m > 2 * n + 2) return null;
+
+  const BIG = 1e6;
+  // Cost of matching round i to game j. BIG = forbidden (result/colour
+  // contradiction, or a pin violation). Negative = a pinned (known-handle)
+  // match, strongly preferred. 0 = checked & consistent. 0.4 = allowed but the
+  // game carries no verifiable result, so it does not corroborate.
+  const cost = (i: number, j: number): number => {
     const r = rounds[i];
-    const g = games[i];
-    let bad = false;
-    if (g.sourceOutcome) {
-      checked++;
-      if (g.sourceOutcome !== r.outcome) bad = true;
+    const g = games[j];
+    const oppLower = g.oppHandle.toLowerCase();
+    const pin = roundPins?.get(r.opponentUscfId);
+    if (pin) {
+      if (oppLower !== pin.toLowerCase()) return BIG; // this round's opponent is known — must be that handle
+    } else if (pinnedHandles.has(oppLower)) {
+      return BIG; // this handle is a DIFFERENT known round's opponent
     }
-    if (r.color === "white" || r.color === "black") {
-      if (g.sourceColor !== r.color) bad = true;
+    if ((r.color === "white" || r.color === "black") && (g.sourceColor === "white" || g.sourceColor === "black")) {
+      if (g.sourceColor !== r.color) return BIG;
     }
-    if (bad) mismatches++;
-    else pairs.push({ round: r, game: g });
+    if (g.sourceOutcome) return g.sourceOutcome === r.outcome ? (pin ? -0.5 : 0) : BIG;
+    return pin ? -0.5 : 0.4;
+  };
+
+  // DP over (rounds[i..], games[j..]) → best (matched count, penalty), maximise
+  // matched then minimise penalty. move: 0=match i&j, 1=skip round i, 2=skip
+  // game j.
+  type Cell = { matched: number; pen: number; move: 0 | 1 | 2 };
+  const f: Cell[][] = Array.from({ length: n + 1 }, () => new Array<Cell>(m + 1));
+  for (let j = 0; j <= m; j++) f[n][j] = { matched: 0, pen: 0, move: 2 };
+  for (let i = 0; i < n; i++) f[i][m] = { matched: 0, pen: 0, move: 1 };
+  const better = (a: Cell, b: Cell) => (a.matched !== b.matched ? a.matched > b.matched : a.pen <= b.pen);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      const skipRound: Cell = { matched: f[i + 1][j].matched, pen: f[i + 1][j].pen, move: 1 };
+      const skipGame: Cell = { matched: f[i][j + 1].matched, pen: f[i][j + 1].pen, move: 2 };
+      let best = better(skipRound, skipGame) ? skipRound : skipGame;
+      const c = cost(i, j);
+      if (c < BIG) {
+        const nxt = f[i + 1][j + 1];
+        const matchCell: Cell = { matched: nxt.matched + 1, pen: nxt.pen + c, move: 0 };
+        if (better(matchCell, best)) best = matchCell;
+      }
+      f[i][j] = best;
+    }
   }
 
-  const allowed = viaLinkage && rounds.length >= 6 ? 1 : 0;
-  if (mismatches > allowed) return null;
-  if (!viaLinkage && checked < 3) return null; // outcome checksum must actually bite
+  // Reconstruct the chosen pairs.
+  const pairs: AlignedPair[] = [];
+  let checked = 0;
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    const move = f[i][j].move;
+    if (move === 0) {
+      pairs.push({ round: rounds[i], game: games[j] });
+      if (games[j].sourceOutcome) checked++;
+      i++;
+      j++;
+    } else if (move === 1) i++;
+    else j++;
+  }
+
+  const matched = pairs.length;
+  // Enough of the player's rounds must be explained to trust the edge.
+  const minMatched = viaLinkage ? Math.min(n, 2) : Math.min(n, 3);
+  if (matched < minMatched) return null;
+  // The outcome checksum must actually bite (a tournament link is its own proof).
+  if (!viaLinkage && checked < 3) return null;
   return { pairs, checked };
 }
 
@@ -912,14 +1032,33 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     return { scoped: games.filter((g) => !g.timeClass || classes.has(g.timeClass)) };
   };
 
-  /** Round alignment incl. the unrated-only retry for manually-paired events. */
-  const alignWithRetry = (rounds: RoundGame[], scoped: ArchiveGame[], viaLink: boolean) => {
-    let alignment = alignRounds(rounds, scoped, viaLink);
-    if (!alignment && !viaLink) {
-      const unrated = scoped.filter((g) => !g.rated);
-      if (unrated.length && unrated.length !== scoped.length) alignment = alignRounds(rounds, unrated, false);
+  /** Already-mapped opponents of a player in an event → their handles, keyed by
+   *  the opponent's USCF id. These anchor `alignRounds` (a round whose opponent
+   *  we already know can only match that handle). */
+  const roundPinsFor = (rounds: RoundGame[], platform: OnlinePlatform): Map<string, string> | undefined => {
+    let pins: Map<string, string> | undefined;
+    for (const r of rounds) {
+      const h = mapped.get(r.opponentUscfId)?.get(platform)?.profile.username;
+      if (h) (pins ??= new Map()).set(r.opponentUscfId, h.toLowerCase());
     }
-    return alignment;
+    return pins;
+  };
+
+  /** Round alignment. For manually-paired (link-less) events the games were
+   *  UNRATED challenges, while the player's rated casual games sit in the same
+   *  time class — a mixed pool lets the matcher pick a wrong same-shaped
+   *  subsequence (a rated bullet game stealing the round played against the
+   *  target). So when a substantial unrated subset exists, align on IT FIRST;
+   *  only fall back to the whole pool if the unrated slice doesn't line up. */
+  const alignWithRetry = (rounds: RoundGame[], scoped: ArchiveGame[], viaLink: boolean, platform: OnlinePlatform) => {
+    const pins = roundPinsFor(rounds, platform);
+    if (viaLink) return alignRounds(rounds, scoped, true, pins);
+    const unrated = scoped.filter((g) => !g.rated);
+    if (unrated.length >= Math.min(rounds.length, 3) && unrated.length < scoped.length) {
+      const a = alignRounds(rounds, unrated, false, pins);
+      if (a) return a;
+    }
+    return alignRounds(rounds, scoped, false, pins);
   };
 
   const seedCache = new Map<string, Promise<VerifiedProfile | null>>();
@@ -995,7 +1134,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           // Crosstable check: do the in-window games line up with the member's
           // actual rounds (result sequence + tournament linkage)?
           const { scoped, viaLink } = scopeToEvent(games, state?.links, platform, ev);
-          const alignment = app ? alignWithRetry(app.rounds, scoped, !!viaLink) : null;
+          const alignment = app ? alignWithRetry(app.rounds, scoped, !!viaLink, platform) : null;
           if (alignment) {
             log(
               `Google index: ${name} → @${prof.username} (${platformLabel(platform)}) — ${Math.round(
@@ -1488,7 +1627,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
     // (b) Pairing alignment: source's crosstable rounds ↔ event-scoped games.
     const { scoped, viaLink } = scopeToEvent(games, state.links, platform, ev);
-    const alignment = alignWithRetry(app.rounds, scoped, !!viaLink);
+    const alignment = alignWithRetry(app.rounds, scoped, !!viaLink, platform);
     if (!alignment && app.rounds.length) {
       log(
         `Couldn't align @${handle}'s ${scoped.length} in-window game(s) with ${srcName}'s ${app.rounds.length} crosstable rounds${
@@ -1722,7 +1861,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             if (!state.links.has(linkKey(link))) state.links.set(linkKey(link), link);
           }
           const { scoped, viaLink } = scopeToEvent(games, state.links, platform, ev);
-          const alignment = alignWithRetry(app.rounds, scoped, !!viaLink);
+          const alignment = alignWithRetry(app.rounds, scoped, !!viaLink, platform);
           // Do the lead's in-window opponents include handles already proven to
           // be section players?
           const knownSectionHandles = new Set<string>();
