@@ -778,6 +778,11 @@ export interface TraversalResult {
   notes: string[];
   /** Whether at least one online account was traced back to the target. */
   found: boolean;
+  /** How many of the target's tournament opponents we DID resolve to a handle,
+   *  even when the target's own account never fell out. Lets the caller say
+   *  "mapped N of your opponents but couldn't confirm you" instead of silently
+   *  presenting a same-name guess as if it were the answer. */
+  mappedOpponents: number;
 }
 
 interface Mapping {
@@ -1639,8 +1644,19 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         }
         mapped.get(memberId)?.delete(platform);
         if (directOpponents.has(memberId)) {
-          state.seedOrder?.push(memberId);
-          log(`Retrying ${srcName} with their remaining Google leads and handle guesses…`);
+          // Retrying is worth it only when there's a genuinely fresh lead to try.
+          // A member the Google index has candidates for may have their REAL
+          // account deeper in that list — keep going. But when the only source
+          // was name-shaped handle GUESSING (no Google leads), each retry just
+          // surfaces the next same-name stranger, so don't re-derive past the
+          // first miss — that is pure budget burn with no path to the answer.
+          const hadGoogleLeads = (await googleCandidatesFor(memberId, ev)).length > 0;
+          if (hadGoogleLeads || (dudCount.get(memberId) || 0) < 2) {
+            state.seedOrder?.push(memberId);
+            log(`Retrying ${srcName} with their remaining ${hadGoogleLeads ? "Google leads and " : ""}handle guesses…`);
+          } else {
+            log(`${srcName}'s name-guess accounts keep coming up empty here and the index has no lead — not re-deriving further.`);
+          }
         }
       }
       return false;
@@ -2408,8 +2424,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   }
 
   accounts.sort((a, b) => b.confidence - a.confidence);
+  const mappedOpponents = Array.from(mapped.values()).filter((per) => per.size > 0).length;
   if (accounts.length) {
     notes.push(`Traced ${accounts.length} online account(s) through the tournament graph.`);
+  } else if (mappedOpponents > 0) {
+    // We proved out N of the target's opponents' accounts but never closed the
+    // last hop to the target — say so plainly rather than fall silent.
+    notes.push(
+      `Resolved ${mappedOpponents} of ${targetName}'s tournament opponent(s) to online accounts, but none of their games named ${targetName}'s own handle — their account may be on an untraceable platform (e.g. ChessKid) or a second account.`
+    );
+    if (depth === 0) log(`Mapped ${mappedOpponents} of ${targetName}'s opponents but couldn't confirm ${targetName}'s own account from their games.`);
   } else if (outOfTime() && !signal?.aborted) {
     notes.push("Tournament-graph traversal reached its time budget without a confident online match.");
     log("Reached the time budget — every avenue tried so far came up empty.");
@@ -2418,5 +2442,5 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (depth === 0) log("Exhausted every online event without a confident match.");
   }
 
-  return { accounts, notes, found: accounts.length > 0 };
+  return { accounts, notes, found: accounts.length > 0, mappedOpponents };
 }

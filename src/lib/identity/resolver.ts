@@ -353,6 +353,7 @@ export async function resolveIdentity(
   // Name-based platform search stays OFF unless all of this comes up empty.
   let traversalFound = false;
   let graphAvailable = false;
+  let partialOpponents = 0;
   if (!hintStrong && !signal?.aborted) {
     const graph = await getTournamentGraph(query, signal).catch(() => null);
     if (graph && graph.graphTraversalReady && graph.onlineEvents.length) {
@@ -404,12 +405,12 @@ export async function resolveIdentity(
             hardTimer = setTimeout(() => {
               abandoned = true; // stands the still-running engine down too
               emit("The tournament trace ran out of time — moving on to fallback discovery.", "info", "uscf-graph");
-              resolve({ accounts: [], notes: ["Traversal exceeded its hard time limit."], found: false });
+              resolve({ accounts: [], notes: ["Traversal exceeded its hard time limit."], found: false, mappedOpponents: 0 });
             }, TRAVERSAL_BUDGET_MS + 30_000);
           }),
         ]);
       } catch {
-        traversal = { accounts: [], notes: ["Tournament-graph traversal failed."], found: false };
+        traversal = { accounts: [], notes: ["Tournament-graph traversal failed."], found: false, mappedOpponents: 0 };
       } finally {
         if (hardTimer !== undefined) clearTimeout(hardTimer);
       }
@@ -419,6 +420,15 @@ export async function resolveIdentity(
       traversalFound = traversal.accounts.length > 0;
       if (traversalFound) {
         emit(`Traced ${traversal.accounts.length} online account(s) through the player's own tournaments.`, "done", "uscf-graph");
+      } else if (traversal.mappedOpponents > 0) {
+        // Honest partial progress: we proved out opponents but not the target.
+        // Anything the fallbacks surface below is a same-name lead, not this.
+        partialOpponents = traversal.mappedOpponents;
+        emit(
+          `Mapped ${traversal.mappedOpponents} of ${query.name}'s tournament opponents, but their games never named ${query.name}'s own account — it may be on an untraceable platform. Any handle below is a same-name guess, not a tournament-confirmed match.`,
+          "info",
+          "uscf-graph"
+        );
       }
     } else {
       emit("No online USCF tournament history to trace for this player.", "info", "uscf-graph");
@@ -689,6 +699,12 @@ export async function resolveIdentity(
     identities: top,
     providerStatus,
     elapsedMs: Math.round(performance.now() - start),
+    // Only flag partial-progress when we truly never confirmed the target: if a
+    // later fallback DID produce a verified-identity account, drop the warning.
+    partialOpponents:
+      partialOpponents > 0 && !top.some((id) => id.accounts.some((a) => a.verified && !a.evidence?.some((e) => /namesake/i.test(e.label))))
+        ? partialOpponents
+        : undefined,
   };
 }
 

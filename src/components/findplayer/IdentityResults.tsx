@@ -16,6 +16,7 @@ import {
   RotateCcw,
   ShieldCheck,
   Users,
+  AlertTriangle,
 } from "lucide-react";
 import { ConfidenceBadge } from "./ConfidenceBadge";
 import type { DiscoveredAccount, Platform, ResolutionResult, ResolvedIdentity } from "@/lib/identity";
@@ -62,6 +63,19 @@ export function IdentityResults({ result, onGenerate, onReset }: IdentityResults
           New search
         </Button>
       </div>
+
+      {result.partialOpponents ? (
+        <div className="flex items-start gap-2.5 rounded-xl border border-confidence-low/40 bg-confidence-low/5 p-3.5 text-sm">
+          <AlertTriangle className="w-4 h-4 text-confidence-low mt-0.5 shrink-0" />
+          <p className="text-muted-foreground">
+            We traced <span className="font-semibold text-foreground">{result.partialOpponents}</span> of{" "}
+            {result.query.name}'s tournament opponents to online accounts, but none of their games named{" "}
+            {result.query.name}'s own handle — their account may be on an untraceable platform (e.g. ChessKid) or a second
+            account. Any account below is a <span className="font-semibold text-foreground">same-name guess</span>, not a
+            tournament-confirmed match — verify it before generating a report.
+          </p>
+        </div>
+      ) : null}
 
       <div className="space-y-4">
         {identities.map((identity) => (
