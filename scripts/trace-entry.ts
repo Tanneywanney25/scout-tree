@@ -34,10 +34,12 @@ interface Args {
   state?: string;
   budget: number;
   list: boolean;
+  /** TEST: pre-seed member→handle mappings, e.g. --seed 16091791:davit_gabunia4[:chesscom] */
+  seeds: { memberId: string; platform: "chesscom" | "lichess"; username: string }[];
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { budget: 300, list: false };
+  const args: Args = { budget: 300, list: false, seeds: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--id") args.id = argv[++i];
@@ -45,6 +47,10 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--state") args.state = argv[++i];
     else if (a === "--budget") args.budget = Number(argv[++i] ?? "300");
     else if (a === "--list") args.list = true;
+    else if (a === "--seed") {
+      const [memberId, username, platform] = String(argv[++i] ?? "").split(":");
+      if (memberId && username) args.seeds.push({ memberId, username, platform: platform === "lichess" ? "lichess" : "chesscom" });
+    }
   }
   return args;
 }
@@ -208,12 +214,14 @@ async function main() {
   const unlimited = !args.budget || args.budget <= 0;
   console.log(`\n=== Tracing (${unlimited ? "no time limit — runs until exhausted" : `budget ${args.budget}s`}) ===\n`);
   const t0 = Date.now();
+  if (args.seeds.length) console.log(`Injecting ${args.seeds.length} test seed(s): ${args.seeds.map((s) => `#${s.memberId}=@${s.username}`).join(", ")}`);
   const result = await runGraphTraversal(graph, {
     targetName: member.name,
     targetRating,
     targetFideId: member.fideId,
     ...(unlimited ? {} : { budgetMs: args.budget * 1000 }),
     hooks,
+    seedMappings: args.seeds,
     log: (m) => console.log(`  ${m}`),
   });
 

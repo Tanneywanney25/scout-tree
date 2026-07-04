@@ -26,10 +26,20 @@ import {
 
 export type { TraversalOptions, TraversalResult } from "../uscfGraphEngine";
 
-/** Run the traversal with the app's server-backed hooks pre-wired. */
+/** Run the traversal with the app's server-backed hooks pre-wired.
+ *
+ * SAFETY GUARD: `seedMappings` is a TEST-ONLY affordance (pre-seed known
+ * member→handle pairs to validate pairing/target-reveal without live
+ * discovery). This wrapper is the app's production entry point — the browser
+ * resolver calls it, and its opts are built from the user's PlayerQuery, which
+ * has no such field. We nonetheless strip `seedMappings` here so that even a
+ * future mis-wiring cannot inject seeds through the production path: the ONLY
+ * way to seed is to bypass this wrapper and call the engine directly, which
+ * only the offline CLI harness (scripts/trace-entry.ts) does. */
 export function runGraphTraversal(graph: TournamentGraph, opts: TraversalOptions): Promise<TraversalResult> {
+  const { seedMappings: _testOnlySeeds, ...safe } = opts;
   return runEngine(graph, {
-    ...opts,
+    ...safe,
     hooks: {
       discoverPlatform: (ev) => discoverEventPlatform(ev, opts.signal),
       expandMember: (memberId) => expandMemberGraph(memberId, opts.signal),

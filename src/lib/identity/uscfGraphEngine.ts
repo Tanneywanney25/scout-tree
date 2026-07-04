@@ -771,6 +771,11 @@ export interface TraversalOptions {
   /** Internal: lets a parent traversal stand a sub-traversal down the moment
    *  the parent's own target is found. */
   stopWhen?: () => boolean;
+  /** TEST/DEBUG affordance (not used in production): pre-seed known member→handle
+   *  mappings so the pairing/target-reveal logic can be validated end-to-end
+   *  without depending on live Google seed discovery. Each is verified and
+   *  mapped as a "seed" before the main loop. */
+  seedMappings?: { memberId: string; platform: OnlinePlatform; username: string }[];
 }
 
 export interface TraversalResult {
@@ -2330,6 +2335,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       totalOpp === 1 ? "" : "s"
     } to work with — ${Math.min(EVENT_AGENTS, Math.max(1, events.length))} event agent(s), each running seed scouts and pairing tracers in parallel. Names resolve through the Google index and get date-verified; platform name search stays OFF unless the index has nothing.`
   );
+
+  // TEST/DEBUG: pre-seed injected member→handle mappings (no-op in production).
+  for (const s of opts.seedMappings || []) {
+    if (s.memberId === targetId) continue; // never seed the target itself
+    const prof = await verifyOn(s.platform, s.username);
+    if (prof) {
+      setMapping(s.memberId, s.platform, { profile: prof, how: "seed", chain: [] });
+      log(`Injected seed: ${memberName.get(s.memberId) || s.memberId} → @${prof.username} (${platformLabel(s.platform)}).`);
+    }
+  }
 
   for (let pass = 0; pass < 4 && !found && !outOfTime(); pass++) {
     const pending = events.filter((e) => !workStates.get(e.eventId)?.exhausted);
