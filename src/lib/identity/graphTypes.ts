@@ -19,6 +19,9 @@ export interface GraphPlayer {
   uscfId: string;
   name: string;
   rating?: number;
+  /** The player's USCF state of record (MUIR stateRep) — lets candidate
+   *  profiles be location-checked for EVERY section player, not just the target. */
+  state?: string;
   isTarget?: boolean;
   games: GraphGame[];
 }

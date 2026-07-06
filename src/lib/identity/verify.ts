@@ -30,6 +30,11 @@ export interface VerifiedProfile {
   fideId?: string;
   uscfRating?: number;
   fideRating?: number;
+  /** USCF member ID the account owner published on their profile (Lichess
+   *  bio/links only — Chess.com's public API exposes no bio). An exact match
+   *  against a crosstable player is near-conclusive; a different valid ID is
+   *  near-fatal. */
+  uscfId?: string;
   lastActiveMs?: number;
   /** When the account was created — an account younger than the tournament
    *  cannot be the player who appeared in it. */
@@ -44,7 +49,25 @@ function plausibleFideId(v: unknown): string | undefined {
   return digits.length >= 5 && Number(digits) >= 10000 ? digits : undefined;
 }
 
+/** A USCF member ID the profile owner published in free text (bio, links).
+ *  Only trust a number that sits in an unmistakably-USCF context: a uschess.org
+ *  member URL, or within a few words of "USCF" / "US Chess" — a bare 8-digit
+ *  number is far too often a FIDE ID or noise. */
+export function uscfIdFromText(text: string): string | undefined {
+  if (!text) return undefined;
+  const url = /uschess\.org\/(?:msa\/MbrDtlMain\.php\?|player\/|members?\/)(\d{8})/i.exec(text);
+  if (url) return url[1];
+  const near = /\b(?:uscf|us\s*chess)\b[^0-9]{0,24}(\d{8})\b/i.exec(text);
+  return near ? near[1] : undefined;
+}
+
 const LICHESS_FORMAT_PRIORITY = ["rapid", "blitz", "classical", "bullet"];
+
+/** Keep only flags that actually claim a country ("US", "CA", "GB-ENG"). */
+function realCountry(v: unknown): string | undefined {
+  const s = typeof v === "string" ? v.trim() : "";
+  return s && !s.startsWith("_") ? s : undefined;
+}
 
 // All verification calls go through the shared network discipline in net.ts:
 // the global Chess.com concurrency gate / Lichess pacer, per-attempt timeouts,
@@ -85,7 +108,14 @@ export async function verifyLichess(
     }
 
     const profile = data.profile || {};
-    const realName = [profile.firstName, profile.lastName].filter(Boolean).join(" ").trim();
+    // Lichess renamed its profile fields (firstName/lastName → realName,
+    // country → flag); read the current names first and keep the old ones as
+    // fallback so archived fixtures still parse.
+    const realName = (
+      (typeof profile.realName === "string" && profile.realName) ||
+      [profile.firstName, profile.lastName].filter(Boolean).join(" ")
+    ).trim();
+    const freeText = [profile.bio, profile.links].filter((s: unknown) => typeof s === "string").join("\n");
 
     return {
       platform: "lichess",
@@ -94,9 +124,12 @@ export async function verifyLichess(
       title: data.title || undefined,
       rating,
       ratings: Object.keys(ratings).length ? ratings : undefined,
-      country: profile.country || undefined,
+      // Lichess "flags" include fantasy ones (_earth, _pirate…) that claim no
+      // country at all — only a real code may feed the country evidence.
+      country: realCountry(profile.flag) || realCountry(profile.country),
       location: typeof profile.location === "string" && profile.location.trim() ? profile.location.trim() : undefined,
       fideId: plausibleFideId(profile.fideId),
+      uscfId: uscfIdFromText(freeText),
       fideRating: typeof profile.fideRating === "number" ? profile.fideRating : undefined,
       uscfRating: typeof profile.uscfRating === "number" ? profile.uscfRating : undefined,
       lastActiveMs: typeof data.seenAt === "number" ? data.seenAt : undefined,

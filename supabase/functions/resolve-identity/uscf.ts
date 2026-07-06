@@ -87,6 +87,8 @@ export interface UscfSectionPlayer {
   uscfId: string;
   name: string;
   rating?: number; // pre-event rating in this section's system
+  /** USCF state of record (stateRep) — location signal for candidate profiles. */
+  state?: string;
   isTarget?: boolean;
   games: UscfGame[];
 }
@@ -385,6 +387,7 @@ async function fetchSectionPlayers(eventId: string, number: number, rootId: stri
       uscfId,
       name: fullName(row.firstName, row.lastName),
       rating,
+      state: typeof row.stateRep === "string" && row.stateRep.trim() ? row.stateRep.trim().toUpperCase() : undefined,
       isTarget: uscfId === rootId,
       games,
     });
