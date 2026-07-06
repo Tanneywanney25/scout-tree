@@ -2905,69 +2905,138 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   }
 
   // ---------------------------------------------------------------------------
-  // Deep phase: recurse into direct opponents' own online histories — several
-  // opponents expanded AT ONCE, each sub-traversal reusing the search-wide
-  // fetch caches so nothing already verified or downloaded is fetched again.
+  // OPPONENT-PIVOT phase: the target's own account never fell out of their
+  // events directly. Before any caller falls back to a platform name search
+  // (the namesake trap), do what a careful human does by hand: rank the OTHER
+  // players in the target's tournaments by how much online tournament history
+  // of their OWN they have (most online events = most likely to have a
+  // discoverable, well-connected account), resolve the strongest one's
+  // username with the full engine, then read the target off the other side of
+  // their shared event games. Direct opponents first (their games contain the
+  // target directly); other section players second (their chains still reach
+  // the target through the pairing frontier).
   // ---------------------------------------------------------------------------
   if (!found && depth === 0 && hooks.expandMember && deadline - Date.now() > 35_000) {
-    // Every unmapped direct opponent is worth a deep dive — most-present first.
-    const oppByPresence = Array.from(directOpponents)
-      .filter((id) => !mapped.has(id))
-      .sort((a, b) => (appearances.get(b)?.length || 0) - (appearances.get(a)?.length || 0));
-    if (oppByPresence.length) {
-      log(
-        `Still nothing — going deeper: exploring ${oppByPresence.length} opponents' own tournament histories (${DEEP_AGENTS} at a time) to pin their usernames first.`
-      );
-    }
     const deepStop = () => found || outOfTime() || deadline - Date.now() < 25_000;
-    await pool(
-      oppByPresence,
-      DEEP_AGENTS,
-      async (oppId) => {
-        if (deepStop()) return;
-        const oppName = memberName.get(oppId) || "opponent";
-        const sub = await hooks.expandMember!(oppId).catch(() => null);
-        if (!sub || !sub.onlineEvents.length || deepStop()) return;
-        log(`Deep dive: ${oppName} played ${sub.onlineEvents.length} online event(s) of their own — tracing those…`);
-        const subResult = await runGraphTraversal(sub, {
-          targetName: oppName,
-          targetRating: memberRating.get(oppId),
-          signal,
-          log,
-          budgetMs: Math.min(300_000, Math.max(60_000, deadline - Date.now() - 15_000)),
-          // Google-index + flyer search stay available; no further expansion.
-          hooks: { discoverPlatform: hooks.discoverPlatform, findUsernames: hooks.findUsernames },
-          depth: 1,
-          shared,
-          // The moment ANY deep dive finds the real target, siblings stand down.
-          stopWhen: () => found,
-        });
-        for (const acc of subResult.accounts) {
-          if (found) break;
-          if (acc.confidence < 0.5 || (acc.platform !== "chesscom" && acc.platform !== "lichess")) continue;
-          const platform = acc.platform as OnlinePlatform;
-          const prof = await verifyOn(platform, acc.username);
-          if (!prof) continue;
-          setMapping(oppId, platform, { profile: prof, how: "deep", chain: [] });
-          // Trace the shared events from this hard-won seed.
-          for (const app of appearances.get(oppId) || []) {
-            if (found || outOfTime()) break;
-            if (!(appearances.get(targetId) || []).some((ta) => ta.event.eventId === app.event.eventId)) continue;
-            const state: EventState = { links: new Map(), frontier: [], visited: new Set(), oppSeen: new Map() };
-            if (await traceFromSource(app.event, state, oppId, platform, mapped.get(oppId)!.get(platform)!, deadline)) found = true;
-            // Follow any frontier the trace opened up.
-            while (!found && state.frontier.length && !outOfTime()) {
-              const nxt = state.frontier.shift()!;
-              const vkey = `${nxt.memberId}:${nxt.platform}`;
-              if (state.visited.has(vkey)) continue;
-              state.visited.add(vkey);
-              if (await traceFromSource(app.event, state, nxt.memberId, nxt.platform, nxt.mapping, deadline)) found = true;
-            }
+    const RANK_WINDOW = 12; // graphs fetched per ranking window (MUIR-paced)
+
+    /** Resolve one pivot candidate's own username, then trace shared events. */
+    const divePivot = async (oppId: string, sub: TournamentGraph, ownEvents: number): Promise<void> => {
+      const oppName = memberName.get(oppId) || "opponent";
+      log(`Pivot: resolving ${oppName}'s own account first (${ownEvents} online event(s) of their own)…`);
+      const subResult = await runGraphTraversal(sub, {
+        targetName: oppName,
+        targetRating: memberRating.get(oppId),
+        signal,
+        log,
+        budgetMs: Math.min(300_000, Math.max(60_000, deadline - Date.now() - 15_000)),
+        // Google-index + flyer search stay available; no further expansion.
+        hooks: { discoverPlatform: hooks.discoverPlatform, findUsernames: hooks.findUsernames },
+        depth: 1,
+        shared,
+        // The moment ANY pivot dive finds the real target, siblings stand down.
+        stopWhen: () => found,
+      });
+      for (const acc of subResult.accounts) {
+        if (found) break;
+        // Only a structurally-proven account may pivot — a capped google-lead
+        // is namesake-grade, and pivoting through it would launder that
+        // uncertainty into "confirmed" pairing evidence for the target.
+        if (acc.confidence < 0.7 || (acc.platform !== "chesscom" && acc.platform !== "lichess")) continue;
+        const platform = acc.platform as OnlinePlatform;
+        const prof = await verifyOn(platform, acc.username);
+        if (!prof) continue;
+        setMapping(oppId, platform, { profile: prof, how: "deep", chain: [] });
+        // Trace the shared events from this hard-won seed.
+        for (const app of appearances.get(oppId) || []) {
+          if (found || outOfTime()) break;
+          if (!(appearances.get(targetId) || []).some((ta) => ta.event.eventId === app.event.eventId)) continue;
+          const state: EventState = { links: new Map(), frontier: [], visited: new Set(), oppSeen: new Map() };
+          if (await traceFromSource(app.event, state, oppId, platform, mapped.get(oppId)!.get(platform)!, deadline)) found = true;
+          // Follow any frontier the trace opened up.
+          while (!found && state.frontier.length && !outOfTime()) {
+            const nxt = state.frontier.shift()!;
+            const vkey = `${nxt.memberId}:${nxt.platform}`;
+            if (state.visited.has(vkey)) continue;
+            state.visited.add(vkey);
+            if (await traceFromSource(app.event, state, nxt.memberId, nxt.platform, nxt.mapping, deadline)) found = true;
           }
         }
-      },
-      deepStop
-    );
+      }
+    };
+
+    /** Rank a candidate ring by REAL online volume (own graphs, windowed so a
+     *  long list doesn't fetch everything before the first dive), dive best
+     *  first. */
+    const pivotRing = async (candidates: string[], ring: string): Promise<void> => {
+      for (let w = 0; w < candidates.length && !deepStop(); w += RANK_WINDOW) {
+        const windowIds = candidates.slice(w, w + RANK_WINDOW);
+        const graphs = new Map<string, TournamentGraph | null>();
+        await pool(
+          windowIds,
+          DEEP_AGENTS,
+          async (id) => {
+            if (deepStop()) return;
+            graphs.set(id, await hooks.expandMember!(id).catch(() => null));
+          },
+          deepStop
+        );
+        const ranked = windowIds
+          .map((id) => {
+            const g = graphs.get(id) || null;
+            const events = g?.onlineEvents.length || 0;
+            const rounds = g
+              ? g.onlineEvents.reduce(
+                  (n, e) => n + e.players.reduce((m, p) => (p.uscfId === id ? m + p.games.length : m), 0),
+                  0
+                )
+              : 0;
+            return { id, g, events, rounds };
+          })
+          .filter((r): r is typeof r & { g: TournamentGraph } => !!r.g && r.events > 0)
+          .sort((a, b) => b.events - a.events || b.rounds - a.rounds);
+        if (!ranked.length) continue;
+        log(
+          `Pivot ranking (${ring}): ${ranked
+            .slice(0, 5)
+            .map((r) => `${memberName.get(r.id) || r.id} — ${r.events} event(s)/${r.rounds} game(s)`)
+            .join("; ")}${ranked.length > 5 ? "; …" : ""} — working the best-connected first.`
+        );
+        await pool(
+          ranked,
+          DEEP_AGENTS,
+          async ({ id, g, events }) => {
+            if (deepStop()) return;
+            await divePivot(id, g, events);
+          },
+          deepStop
+        );
+      }
+    };
+
+    // Ring 1: unresolved direct opponents — their own games name the target.
+    const ring1 = Array.from(directOpponents)
+      .filter((id) => !mapped.has(id))
+      .sort((a, b) => (appearances.get(b)?.length || 0) - (appearances.get(a)?.length || 0));
+    if (ring1.length) {
+      log(
+        `Still nothing — pivoting through ${targetName}'s opponents: ranking ${ring1.length} unresolved direct opponent(s) by their own online tournament history.`
+      );
+      await pivotRing(ring1, "direct opponents");
+    }
+    // Ring 2: other unresolved section players (bounded) — their chains reach
+    // the target through the shared-event pairing frontier. Only when the
+    // direct ring genuinely exhausted with time to spare.
+    if (!found && !deepStop() && deadline - Date.now() > 60_000) {
+      const ring2 = Array.from(memberName.keys())
+        .filter((id) => id !== targetId && !directOpponents.has(id) && !mapped.has(id))
+        .sort((a, b) => (appearances.get(b)?.length || 0) - (appearances.get(a)?.length || 0))
+        .slice(0, 24);
+      if (ring2.length) {
+        log(`Direct-opponent pivots exhausted — extending the pivot to ${ring2.length} other section player(s).`);
+        await pivotRing(ring2, "section players");
+      }
+    }
   }
 
   accounts.sort((a, b) => b.confidence - a.confidence);
