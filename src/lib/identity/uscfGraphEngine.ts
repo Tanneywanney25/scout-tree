@@ -238,6 +238,111 @@ function strictStateOf(location: string): string | null {
   return null;
 }
 
+// A profile's country claim, normalised. Lichess flags can be regional
+// ("GB-ENG") and include fantasy flags (filtered in verify.ts); chess.com uses
+// clean ISO-2 plus a few specials. "XX" (international) claims nothing.
+const US_LIKE_COUNTRIES = new Set(["US", "PR", "GU", "VI", "AS", "MP"]);
+function countryClaimOf(country?: string): string | undefined {
+  const m = /^([A-Za-z]{2})/.exec((country || "").trim());
+  const code = m ? m[1].toUpperCase() : undefined;
+  return code && code !== "XX" ? code : undefined;
+}
+const isUsCountry = (c?: string) => {
+  const k = countryClaimOf(c);
+  return !!k && US_LIKE_COUNTRIES.has(k);
+};
+/** The profile CONFIDENTLY claims a non-US country — strong negative evidence
+ *  for a US Chess member (though never absolute proof: a verified WA junior's
+ *  account was observed flying a Canada flag). */
+const isForeignCountry = (c?: string) => {
+  const k = countryClaimOf(c);
+  return !!k && !US_LIKE_COUNTRIES.has(k);
+};
+
+// ---------------------------------------------------------------------------
+// Club membership — a club tied to the event's organiser or region is the kind
+// of corroboration a careful human looks for (e.g. "PNWCC - Masters" on a
+// candidate for a PNWCC event; "Washington Chess Federation" for a WA player).
+// ---------------------------------------------------------------------------
+
+const GENERIC_CLUB_TOKENS = new Set([
+  "chess", "club", "clubs", "online", "open", "team", "the", "and", "of", "for", "not", "with",
+  "tournament", "tournaments", "league", "center", "centre", "academy", "school", "federation",
+  "association", "kids", "junior", "juniors", "scholastic", "group", "community", "official",
+  "fan", "fans", "blitz", "bullet", "rapid", "daily", "classical", "live", "arena", "swiss",
+  "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+]);
+
+const isLetterSubsequence = (needle: string, hay: string): boolean => {
+  let i = 0;
+  for (const ch of hay) if (ch === needle[i] && ++i === needle.length) return true;
+  return needle.length === 0;
+};
+
+/** Why a club/team name ties an account to this event or its region — or null. */
+export function clubEventTie(clubName: string, eventName: string, states: (string | undefined)[]): string | null {
+  const clubLower = clubName.toLowerCase();
+  for (const st of states) {
+    const full = st ? US_STATE_NAMES[st.trim().toUpperCase()] : undefined;
+    if (full && clubLower.includes(full)) return `club "${clubName}" names ${st}`;
+  }
+  const clubTokens = clubLower.split(/[^a-z0-9]+/).filter(Boolean);
+  const clubSpecific = new Set(clubTokens.filter((t) => t.length >= 3 && !GENERIC_CLUB_TOKENS.has(t)));
+  const evTokens = eventName.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  for (const t of evTokens) {
+    if (t.length >= 3 && !GENERIC_CLUB_TOKENS.has(t) && !/^\d+$/.test(t) && clubSpecific.has(t)) {
+      return `club "${clubName}" shares "${t}" with the event`;
+    }
+  }
+  // Organiser acronyms ("PNWCC" ⊆ "Pacific Northwest Chess Center"): an
+  // acronym-shaped event token (4-6 letters, at most one vowel — real words
+  // don't qualify) whose letters appear in order through the club name,
+  // starting at its first letter.
+  const squished = clubLower.replace(/[^a-z0-9]/g, "");
+  for (const t of evTokens) {
+    if (t.length < 4 || t.length > 6 || GENERIC_CLUB_TOKENS.has(t) || /^\d+$/.test(t)) continue;
+    if ((t.match(/[aeiou]/g) || []).length > 1) continue;
+    if (clubTokens.length >= 2 && t[0] === squished[0] && isLetterSubsequence(t, squished)) {
+      return `club "${clubName}" matches the event's "${t.toUpperCase()}"`;
+    }
+  }
+  return null;
+}
+
+/** Club/team names an account belongs to, memoized per handle. Fails soft. */
+const clubsCache = new Map<string, Promise<string[]>>();
+function fetchClubs(platform: OnlinePlatform, username: string, signal?: AbortSignal): Promise<string[]> {
+  const key = `${platform}:${username.toLowerCase()}`;
+  const hit = clubsCache.get(key);
+  if (hit) return hit;
+  const p = (async (): Promise<string[]> => {
+    try {
+      if (platform === "chesscom") {
+        const res = await politeFetch(
+          `https://api.chess.com/pub/player/${encodeURIComponent(username.toLowerCase())}/clubs`,
+          { headers: { Accept: "application/json" }, signal },
+          "chesscom"
+        );
+        if (!res.ok) return [];
+        const data = await res.json();
+        return (Array.isArray(data?.clubs) ? data.clubs : []).map((c: { name?: string }) => String(c?.name || "")).filter(Boolean);
+      }
+      const res = await politeFetch(
+        `https://lichess.org/api/team/of/${encodeURIComponent(username)}`,
+        { headers: { Accept: "application/json" }, signal },
+        "lichess"
+      );
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (Array.isArray(data) ? data : []).map((t: { name?: string }) => String(t?.name || "")).filter(Boolean);
+    } catch {
+      return [];
+    }
+  })();
+  clubsCache.set(key, p);
+  return p;
+}
+
 /** Event date window in ms, generously padded (online events can run weekly). */
 function windowFor(ev: GraphEvent): { startMs: number; endMs: number } {
   const start = ev.startDate ? Date.parse(ev.startDate) : NaN;
@@ -908,12 +1013,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // --- Indices over the whole online mesh ------------------------------------
   const memberName = new Map<string, string>();
   const memberRating = new Map<string, number>();
+  const memberState = new Map<string, string>();
+  if (graph.rootState) memberState.set(targetId, graph.rootState.trim().toUpperCase());
   const appearances = new Map<string, Appearance[]>();
   for (const ev of graph.onlineEvents) {
     const { startMs, endMs } = windowFor(ev);
     for (const p of ev.players) {
       if (!memberName.has(p.uscfId)) memberName.set(p.uscfId, p.name);
       if (p.rating && !memberRating.has(p.uscfId)) memberRating.set(p.uscfId, p.rating);
+      if (p.state && !memberState.has(p.uscfId)) memberState.set(p.uscfId, p.state);
       const list = appearances.get(p.uscfId) || [];
       list.push({ event: ev, startMs, endMs, rounds: playedRounds(p.games) });
       appearances.set(p.uscfId, list);
@@ -1038,7 +1146,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const req: UsernameSearchRequest = {
       name,
       uscfRating: memberRating.get(memberId),
-      state: memberId === targetId ? graph.rootState : undefined,
+      // MUIR gives every section player a state of record — it sharpens seed
+      // queries and disambiguation, not just the target's.
+      state: memberState.get(memberId),
       fideId: memberId === targetId ? targetFideId : undefined,
       eventName: ev.name,
       eventDate: ev.startDate,
@@ -1088,7 +1198,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     evidence: Evidence[];
   }
 
-  /** null = hard reject: the account was created after the event ended. */
+  /** null = hard reject: the account was created after the event ended, or it
+   *  publishes a USCF member ID that belongs to somebody else. */
   const attributeMatch = (
     name: string,
     rating: number | undefined,
@@ -1096,12 +1207,19 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     prof: VerifiedProfile,
     viaGoogle: UsernameCandidate | null,
     startMs: number,
-    endMs: number
+    endMs: number,
+    memberUscfId?: string
   ): AttrResult | null => {
     if (prof.joinedMs && prof.joinedMs > endMs + DAY) return null;
+    const profUscfId = digits(prof.uscfId);
+    if (profUscfId && memberUscfId && profUscfId !== memberUscfId) return null;
     const evi: Evidence[] = [];
     const push = (weight: number, label: string) =>
       evi.push({ kind: "cross-reference", weight, label, source: "uscf-graph" });
+
+    if (profUscfId && memberUscfId && profUscfId === memberUscfId) {
+      push(3.0, `Profile publishes USCF ID ${prof.uscfId} — exact match`);
+    }
 
     if (viaGoogle) {
       push(
@@ -1127,9 +1245,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (rating && prof.uscfRating && Math.abs(prof.uscfRating - rating) <= 200) {
       push(0.8, `Profile lists USCF rating ${prof.uscfRating} (player ~${rating})`);
     }
-    if (prof.country) {
-      const isUs = prof.country.trim().slice(-2).toUpperCase() === "US";
-      push(isUs ? 0.3 : -0.5, isUs ? "Profile country US matches US Chess" : `Profile country ${prof.country} for a US Chess member`);
+    if (isUsCountry(prof.country)) {
+      push(0.3, "Profile country US matches US Chess");
+    } else if (isForeignCountry(prof.country)) {
+      // A confident foreign-country claim on a candidate for a US federation
+      // member is how a wrong-person account slips in (observed live: an
+      // Adelaide, Australia account accepted as a WA tournament player). A
+      // heavy strike — but not fatal, since joke/heritage flags exist.
+      push(-0.9, `Profile claims country ${prof.country} for a US Chess member`);
     }
     if (state && prof.location) {
       if (locationMatchesState(prof.location, state)) {
@@ -1227,6 +1350,58 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     return alignRounds(rounds, scoped, false, pins);
   };
 
+  /**
+   * The corroboration bar for accepting "this account IS crosstable player X"
+   * from a PARTIAL pairing alignment. A fully-determined alignment (every board
+   * unambiguous) is structural proof and passes outright. Anything looser gets
+   * judged like a careful human would: an account whose own claims CONTRADICT
+   * the USCF record (a confident foreign country, a location in the wrong
+   * state, a clearly different real name, someone else's published USCF ID)
+   * is NOT that player unless a strong corroborator (matching name, location,
+   * listed USCF rating, or a club tied to the event/region) vouches for it.
+   * Observed live: an "Adelaide, Australia" account was accepted as a WA
+   * tournament player off one same-TC same-date game — this bar rejects that.
+   * Accounts that claim nothing (no name, no flag) still map: the checksum is
+   * the only signal they offer, and it now runs on TC-scoped pools.
+   */
+  const mapGate = async (
+    memberId: string,
+    prof: VerifiedProfile,
+    platform: OnlinePlatform,
+    ev: GraphEvent,
+    structural: boolean
+  ): Promise<{ ok: boolean; why?: string }> => {
+    const profUscfId = digits(prof.uscfId);
+    if (profUscfId) {
+      if (profUscfId === memberId) return { ok: true };
+      return { ok: false, why: `the profile publishes USCF ID ${prof.uscfId}, which belongs to a different member` };
+    }
+    if (structural) return { ok: true };
+    const name = memberName.get(memberId) || "";
+    const st = memberState.get(memberId);
+    const rating = memberRating.get(memberId);
+
+    const contradictions: string[] = [];
+    if (isForeignCountry(prof.country)) contradictions.push(`claims country ${prof.country}`);
+    if (st && prof.location && !locationMatchesState(prof.location, st)) {
+      const other = strictStateOf(prof.location);
+      if (other && other !== st.trim().toUpperCase()) contradictions.push(`locates itself in ${other}, not ${st}`);
+    }
+    if (prof.displayName && nameSimilarity(name, prof.displayName) < 0.3) {
+      contradictions.push(`shows real name "${prof.displayName}"`);
+    }
+    if (!contradictions.length) return { ok: true };
+
+    if (prof.displayName && nameSimilarity(name, prof.displayName) >= 0.72) return { ok: true };
+    if (st && prof.location && locationMatchesState(prof.location, st)) return { ok: true };
+    if (rating && prof.uscfRating && Math.abs(prof.uscfRating - rating) <= 250) return { ok: true };
+    const clubs = await fetchClubs(platform, prof.username, signal);
+    for (const club of clubs) {
+      if (clubEventTie(club, ev.name, [st, graph.rootState])) return { ok: true };
+    }
+    return { ok: false, why: `it ${contradictions.join(" and ")} with no corroborating name/location/rating/club` };
+  };
+
   const seedCache = new Map<string, Promise<VerifiedProfile | null>>();
 
   /** Resolve a NON-target member's account. PRIMARY: the Google index —
@@ -1264,8 +1439,17 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             if (dudHandles.has(`${platform}:${cand.username.toLowerCase()}`)) return;
             const prof = await verifyOn(platform, cand.username);
             if (!prof || dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) return;
-            const attr = attributeMatch(name, memberRating.get(memberId), undefined, prof, cand, win.startMs, win.endMs);
-            if (!attr) return; // account created after the event — impossible
+            const attr = attributeMatch(
+              name,
+              memberRating.get(memberId),
+              memberState.get(memberId),
+              prof,
+              cand,
+              win.startMs,
+              win.endMs,
+              memberId
+            );
+            if (!attr) return; // created after the event, or publishes someone else's USCF ID
             scored.push({ cand, prof, score: attr.score });
           },
           () => stopNow()
@@ -1410,11 +1594,17 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
   const foundKeys = new Set<string>();
 
-  const recordTarget = (platform: OnlinePlatform, profile: VerifiedProfile, via: FoundVia): boolean => {
+  const recordTarget = async (platform: OnlinePlatform, profile: VerifiedProfile, via: FoundVia): Promise<boolean> => {
     // FIDE-ID gate: a linked FIDE ID that contradicts the target's rejects the
     // candidate outright; a match is near-decisive.
     if (targetFideId && profile.fideId && digits(profile.fideId) !== targetFideId) {
       log(`Rejected @${profile.username}: profile links FIDE ID ${profile.fideId}, but ${targetName}'s is ${targetFideId}.`);
+      return false;
+    }
+    // USCF-ID gate: same logic for a USCF member ID the owner published on the
+    // profile — an exact match is near-conclusive, someone else's ID is fatal.
+    if (digits(profile.uscfId) && digits(profile.uscfId) !== targetId) {
+      log(`Rejected @${profile.username}: profile publishes USCF ID ${profile.uscfId}, but ${targetName} is #${targetId}.`);
       return false;
     }
     // One handle = one person. An account already mapped to a DIFFERENT
@@ -1585,6 +1775,47 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (targetFideId && profile.fideId && digits(profile.fideId) === targetFideId) {
       evidence.push({ kind: "fide-id-match", weight: 4.0, label: `Profile links FIDE ID ${profile.fideId} — exact match`, source: "uscf-graph" });
     }
+    if (digits(profile.uscfId) === targetId) {
+      evidence.push({
+        kind: "uscf-id-match",
+        weight: 4.0,
+        label: `Profile publishes USCF ID ${profile.uscfId} — exact match`,
+        source: "uscf-graph",
+      });
+    }
+    // Location vs the target's USCF state of record: naming the right state
+    // corroborates; confidently naming a DIFFERENT one is namesake-shaped.
+    if (graph.rootState && profile.location) {
+      if (locationMatchesState(profile.location, graph.rootState)) {
+        evidence.push({
+          kind: "state-match",
+          weight: 0.6,
+          label: `Profile location "${profile.location}" matches the player's ${graph.rootState}`,
+          source: "uscf-graph",
+        });
+      } else {
+        const other = strictStateOf(profile.location);
+        if (other && other !== graph.rootState.trim().toUpperCase()) {
+          evidence.push({
+            kind: "state-match",
+            weight: -0.9,
+            label: `Profile location "${profile.location}" is in ${other}, not the player's ${graph.rootState}`,
+            source: "uscf-graph",
+          });
+        }
+      }
+    }
+    // Club membership tied to the event's organiser or region — the kind of
+    // corroboration a careful human checks (e.g. a PNWCC club member playing
+    // a PNWCC event).
+    const clubs = await fetchClubs(platform, profile.username, signal);
+    for (const club of clubs) {
+      const tie = clubEventTie(club, ev.name, [graph.rootState]);
+      if (tie) {
+        evidence.push({ kind: "cross-reference", weight: 0.9, label: `Account's ${tie}`, source: "uscf-graph" });
+        break;
+      }
+    }
     if (effTargetRating && profile.uscfRating && Math.abs(profile.uscfRating - effTargetRating) <= 200) {
       evidence.push({
         kind: "cross-reference",
@@ -1594,16 +1825,22 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       });
     }
     // Country sanity: a USCF (US federation) member's account normally flies a
-    // US flag or none at all — a different flag is a mild strike, never fatal
-    // (dual-federation players exist).
-    if (profile.country) {
-      const isUs = profile.country.trim().slice(-2).toUpperCase() === "US";
+    // US flag or none at all. A confident foreign flag is a HEAVY strike — it
+    // is how wrong-person accounts sneak in — but never fatal on its own,
+    // because structural proof must be able to overrule it (a verified WA
+    // junior's account was observed flying a Canada flag).
+    if (isUsCountry(profile.country)) {
       evidence.push({
         kind: "country-match",
-        weight: isUs ? 0.3 : -0.35,
-        label: isUs
-          ? "Profile country US matches the US Chess federation"
-          : `Profile lists country ${profile.country} for a US Chess member`,
+        weight: 0.3,
+        label: "Profile country US matches the US Chess federation",
+        source: "uscf-graph",
+      });
+    } else if (isForeignCountry(profile.country)) {
+      evidence.push({
+        kind: "country-match",
+        weight: -0.9,
+        label: `Profile claims country ${profile.country} for a US Chess member`,
         source: "uscf-graph",
       });
     }
@@ -1733,8 +1970,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           }
         }
         if (!best || bestSim < 0.78) return;
+        if (digits(prof.uscfId) && digits(prof.uscfId) !== best.uscfId) return; // publishes someone else's USCF ID
         if (best.uscfId === targetId) {
-          if (recordTarget(link.platform, prof, { method: "roster-name", event: ev, link })) rosterHit = true;
+          if (await recordTarget(link.platform, prof, { method: "roster-name", event: ev, link })) rosterHit = true;
           return;
         }
         memberClaimed.add(best.uscfId);
@@ -1753,7 +1991,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const unclaimed = handles.filter((h) => !handleClaimed.has(h.toLowerCase()));
     if (unmatchedMembers.length === 0 && unclaimed.length === 1) {
       const prof = await verifyOn(link.platform, unclaimed[0]);
-      if (prof && recordTarget(link.platform, prof, { method: "elimination", event: ev, link })) return true;
+      if (prof && (await recordTarget(link.platform, prof, { method: "elimination", event: ev, link }))) return true;
     } else if (memberClaimed.size) {
       log(
         `Roster matched ${memberClaimed.size}/${roster.length - 1} crosstable players so far (${unclaimed.length} participant handles unclaimed) — continuing with pairing analysis.`
@@ -1901,7 +2139,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           if (oppId === targetId) {
             if (
               targetReadable &&
-              recordTarget(platform, prof, {
+              (await recordTarget(platform, prof, {
                 method: "pairing",
                 event: ev,
                 link: viaLink,
@@ -1912,12 +2150,22 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
                 checkedRounds: alignment.checked,
                 totalRounds: app.rounds.length,
                 game,
-              })
+              }))
             )
               pairingHit = true;
             return;
           }
           if (!mapped.get(oppId)?.has(platform)) {
+            // A board from a PARTIAL alignment may only name a player when the
+            // account doesn't contradict the USCF record (or a corroborator
+            // vouches for it) — a fully-determined alignment is its own proof.
+            const gate = await mapGate(oppId, prof, platform, ev, targetReadable);
+            if (!gate.ok) {
+              log(
+                `NOT mapping ${memberName.get(oppId) || oppId} to @${prof.username} from a partial alignment: ${gate.why}.`
+              );
+              return;
+            }
             setMapping(oppId, platform, { profile: prof, how: "pairing", chain: mapping.chain.concat(srcName) });
             enqueue(state, { memberId: oppId, platform, mapping: mapped.get(oppId)!.get(platform)! });
             log(
@@ -1971,7 +2219,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             const fideOk = !!(prof?.fideId && targetFideId && digits(prof.fideId) === targetFideId);
             if (prof && (entry.voters.size >= 2 || fideOk)) {
               if (
-                recordTarget(platform, prof, {
+                await recordTarget(platform, prof, {
                   method: "pairing",
                   event: ev,
                   link: viaLink && gameInLink(entry.game, viaLink) ? viaLink : undefined,
@@ -2040,7 +2288,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         const simTarget = prof.displayName ? nameSimilarity(targetName, prof.displayName) : 0;
         if (prof.displayName && simTarget >= 0.78) {
           if (
-            recordTarget(platform, prof, {
+            await recordTarget(platform, prof, {
               method: "opponent-archive",
               event: ev,
               // Only claim tournament membership if THIS game was in the link.
@@ -2058,6 +2306,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         if (prof.displayName) {
           for (const m of roster) {
             if (m.uscfId === targetId || mapped.get(m.uscfId)?.has(platform)) continue;
+            if (digits(prof.uscfId) && digits(prof.uscfId) !== m.uscfId) continue; // publishes someone else's USCF ID
             if (nameSimilarity(m.name, prof.displayName) >= 0.82) {
               setMapping(m.uscfId, platform, { profile: prof, how: "pairing", chain: mapping.chain.concat(srcName) });
               enqueue(state, { memberId: m.uscfId, platform, mapping: mapped.get(m.uscfId)!.get(platform)! });
@@ -2128,10 +2377,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
               log(`Google lead @${prof.username} links FIDE ID ${prof.fideId} — contradicts ${targetName}'s (${targetFideId}); rejected.`);
               return;
             }
-            const attr = attributeMatch(targetName, effTargetRating, graph.rootState, prof, cand, app.startMs, app.endMs);
+            const attr = attributeMatch(targetName, effTargetRating, graph.rootState, prof, cand, app.startMs, app.endMs, targetId);
             if (!attr) {
               googleTargetRejects.add(rejectKey);
-              log(`Google lead @${prof.username} was created after "${ev.name}" ended — impossible; rejected.`);
+              log(
+                `Google lead @${prof.username} is impossible for "${ev.name}" (created after it ended, or publishes a different USCF ID) — rejected.`
+              );
               return;
             }
             scored.push({ cand, prof, score: attr.score });
@@ -2194,7 +2445,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             // Structural proof (round alignment / the linked tournament / games
             // against confirmed section players) settles it outright.
             if (
-              recordTarget(platform, prof, {
+              await recordTarget(platform, prof, {
                 method: "google",
                 event: ev,
                 link: viaLink,
@@ -2224,7 +2475,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             continue;
           }
           if (score >= ATTR_ACCEPT) {
-            recordTarget(platform, prof, {
+            await recordTarget(platform, prof, {
               method: "google-lead",
               event: ev,
               game: scoped[0] || games[0],
