@@ -36,6 +36,9 @@ interface Args {
   list: boolean;
   /** TEST: pre-seed member→handle mappings, e.g. --seed 16091791:davit_gabunia4[:chesscom] */
   seeds: { memberId: string; platform: "chesscom" | "lichess"; username: string }[];
+  /** TEST: restrict the graph to specific event ids (isolates one leg of a
+   *  traversal, e.g. to force the opponent-pivot stage to fire). */
+  events?: Set<string>;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -50,6 +53,8 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--seed") {
       const [memberId, username, platform] = String(argv[++i] ?? "").split(":");
       if (memberId && username) args.seeds.push({ memberId, username, platform: platform === "lichess" ? "lichess" : "chesscom" });
+    } else if (a === "--events") {
+      args.events = new Set(String(argv[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
     }
   }
   return args;
@@ -112,6 +117,10 @@ async function main() {
     } catch {
       /* cache is best-effort */
     }
+  }
+  if (args.events?.size) {
+    sections = sections.filter((s) => args.events!.has(s.eventId));
+    console.log(`TEST: graph restricted to ${sections.length} section(s) via --events.`);
   }
   const graph: TournamentGraph = {
     rootUscfId: member.id,

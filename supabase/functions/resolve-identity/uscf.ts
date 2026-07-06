@@ -233,6 +233,13 @@ function bestRating(r: UscfRatings): number | undefined {
 const ONLINE_NAME_RE =
   /\b(online|virtual|lichess|chess\.?com|chesskid|icc|internet|pandemic|covid|quarantine|web)\b/i;
 
+/** MUIR event names are often underscore-styled ("PNWCC_G60_ONLINE___NOV_12"),
+ *  and `\b` treats `_` as a word character — so \bONLINE\b silently missed
+ *  them, dropping whole online events from the graph (observed: every
+ *  post-2022 PNWCC G60 online event a player had). Normalise before testing. */
+const nameForMatch = (s: string) => s.replace(/_/g, " ");
+const looksOnline = (name: string) => ONLINE_NAME_RE.test(nameForMatch(name));
+
 function platformGuess(text: string): string | undefined {
   if (/lichess/i.test(text)) return "lichess";
   if (/chess\.?com/i.test(text)) return "chesscom";
@@ -431,7 +438,7 @@ export async function buildOnlineGraphForMember(
   //      was online (they sit at the END of the newest-first era list, so a
   //      naive "newest N" scan misses them entirely),
   //   3. whatever else is newest.
-  const named = new Set(era.filter((e) => ONLINE_NAME_RE.test(e.name)));
+  const named = new Set(era.filter((e) => looksOnline(e.name)));
   const pandemicEra = new Set(
     era.filter((e) => !named.has(e) && (e.startDate || "") >= "2020-03-01" && (e.startDate || "") <= "2022-06-30")
   );
@@ -480,7 +487,7 @@ export async function buildOnlineGraphForMember(
       timeControl: meta.timeControl,
       roundCount: meta.roundCount,
       isBlitz: meta.isBlitz,
-      platformGuess: platformGuess(`${evName} ${section.name || ""}`),
+      platformGuess: platformGuess(nameForMatch(`${evName} ${section.name || ""}`)),
       players,
     };
   });

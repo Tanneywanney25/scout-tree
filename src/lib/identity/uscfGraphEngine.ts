@@ -1295,12 +1295,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     games: ArchiveGame[],
     links: Map<string, EventLink> | undefined,
     platform: OnlinePlatform,
-    ev: GraphEvent
+    ev: GraphEvent,
+    junkLinks?: Set<string>
   ): { scoped: ArchiveGame[]; viaLink?: EventLink; viaTc?: EventTc } => {
     if (links) {
       let best: { link: EventLink; inLink: ArchiveGame[] } | null = null;
       for (const link of links.values()) {
         if (link.platform !== platform) continue;
+        if (junkLinks?.has(linkKey(link))) continue; // a proven public pool, not this event
         const inLink = games.filter((g) => gameInLink(g, link));
         if (inLink.length && (!best || inLink.length > best.inLink.length)) best = { link, inLink };
       }
@@ -1489,7 +1491,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           }
           // Crosstable check: do the in-window games line up with the member's
           // actual rounds (result sequence + tournament linkage)?
-          const { scoped, viaLink, viaTc } = scopeToEvent(games, state?.links, platform, ev);
+          const { scoped, viaLink, viaTc } = scopeToEvent(games, state?.links, platform, ev, state?.junkLinks);
           const alignment = app ? alignWithRetry(app.rounds, scoped, !!viaLink, platform) : null;
           if (alignment) {
             log(
@@ -1550,7 +1552,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             if (stopNow()) return;
             const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
             if (!games.length) return; // provably not the account that played this event
-            const { scoped, viaLink, viaTc } = scopeToEvent(games, state?.links, platform, ev);
+            const { scoped, viaLink, viaTc } = scopeToEvent(games, state?.links, platform, ev, state?.junkLinks);
             const alignment = app ? alignWithRetry(app.rounds, scoped, !!viaLink, platform) : null;
             // "Name match + a same-TC same-date game" must NOT clear the bar
             // when the profile CONTRADICTS the USCF record (foreign country,
@@ -2016,6 +2018,20 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const handles = await fetchRoster(link, signal);
     if (!handles.length) return false;
     const roster = ev.players.map((p) => ({ uscfId: p.uscfId, name: p.name }));
+    // A roster VASTLY bigger than the crosstable is a public arena strangers
+    // pool, not this USCF event (observed: a 250-participant tournament
+    // "linked" to a 22-player section by two casual games). Name-matching 250
+    // strangers against 22 real names is a namesake factory, and scoping the
+    // game pool to that link discards the real event games — mark it junk.
+    if (handles.length >= 100 && handles.length > 4 * roster.length) {
+      state?.junkLinks.add(linkKey(link));
+      log(
+        `"${ev.name}": the linked ${platformLabel(link.platform)} ${
+          link.kind === "chesscom-tournament" ? "tournament" : link.kind.replace("lichess-", "")
+        } has ${handles.length} participants for a ${roster.length}-player crosstable — a public pool, not this event; ignoring the link.`
+      );
+      return false;
+    }
     log(
       `"${ev.name}" is linked to a ${platformLabel(link.platform)} ${
         link.kind === "chesscom-tournament" ? "tournament" : link.kind.replace("lichess-", "")
@@ -2088,6 +2104,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // ---------------------------------------------------------------------------
   interface EventState {
     links: Map<string, EventLink>;
+    /** Links whose fetched roster proved to be a giant public pool unrelated
+     *  to this crosstable (e.g. a 250-player arena vs a 22-player section) —
+     *  they must neither scope game pools nor feed roster name-matching. */
+    junkLinks: Set<string>;
     frontier: { memberId: string; platform: OnlinePlatform; mapping: Mapping }[];
     visited: Set<string>;
     /** How many sources' event-scoped games each opponent handle appeared in —
@@ -2177,7 +2197,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
 
     // (b) Pairing alignment: source's crosstable rounds ↔ event-scoped games.
-    const { scoped, viaLink, viaTc } = scopeToEvent(games, state.links, platform, ev);
+    const { scoped, viaLink, viaTc } = scopeToEvent(games, state.links, platform, ev, state.junkLinks);
     const alignment = alignWithRetry(app.rounds, scoped, !!viaLink, platform);
     if (!alignment && app.rounds.length) {
       log(
@@ -2504,7 +2524,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           for (const link of linksFromGames(games)) {
             if (!state.links.has(linkKey(link))) state.links.set(linkKey(link), link);
           }
-          const { scoped, viaLink, viaTc } = scopeToEvent(games, state.links, platform, ev);
+          const { scoped, viaLink, viaTc } = scopeToEvent(games, state.links, platform, ev, state.junkLinks);
           const alignment = alignWithRetry(app.rounds, scoped, !!viaLink, platform);
           // Do the lead's in-window opponents include handles already proven to
           // be section players? Only CONFIRMED (mapped) section handles count —
@@ -2594,6 +2614,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (!ws) {
       ws = {
         links: new Map(),
+        junkLinks: new Set(),
         frontier: [],
         visited: new Set(),
         oppSeen: new Map(),
@@ -2951,7 +2972,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         for (const app of appearances.get(oppId) || []) {
           if (found || outOfTime()) break;
           if (!(appearances.get(targetId) || []).some((ta) => ta.event.eventId === app.event.eventId)) continue;
-          const state: EventState = { links: new Map(), frontier: [], visited: new Set(), oppSeen: new Map() };
+          const state: EventState = { links: new Map(), junkLinks: new Set(), frontier: [], visited: new Set(), oppSeen: new Map() };
           if (await traceFromSource(app.event, state, oppId, platform, mapped.get(oppId)!.get(platform)!, deadline)) found = true;
           // Follow any frontier the trace opened up.
           while (!found && state.frontier.length && !outOfTime()) {
