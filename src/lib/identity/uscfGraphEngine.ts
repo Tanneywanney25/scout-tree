@@ -532,7 +532,21 @@ function chesscomMonthGames(
         20_000
       );
       if (!res.ok) {
-        if (res.status !== 404) cache.delete(key);
+        // A real 404 (month truly absent) may cache as empty. But chess.com's
+        // archive shards intermittently serve 404 with a 503 "internal error"
+        // BODY for months that exist (observed live: two accounts' 2020/11-12
+        // shards down while their profiles and other months answered 200) —
+        // caching that as "no games" silently breaks pairing chains.
+        let transient = res.status !== 404;
+        if (!transient) {
+          try {
+            const body = await res.text();
+            transient = /"code"\s*:\s*5\d\d|internal error/i.test(body);
+          } catch {
+            transient = true;
+          }
+        }
+        if (transient) cache.delete(key);
         return [];
       }
       const data = await res.json();
