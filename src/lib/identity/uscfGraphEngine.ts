@@ -1280,29 +1280,45 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     return { score: scoreFromEvidence(evi, 0), evidence: evi };
   };
 
-  /** Scope archive games to an event: the best-fitting known tournament link,
-   *  else the event's expected time classes.
+  /** Is this link PROVEN to be the event's own tournament? Flyer-sourced
+   *  links are, by construction. A games-derived link needs TWO distinct
+   *  crosstable members' window games tying to it: one source alone can be a
+   *  plausibly-sized same-weekend tournament that is NOT this event (observed
+   *  live: one seed's 25-player tournament cascaded five wrong mappings into
+   *  a 99% wrong crown of the target). */
+  const linkTrusted = (state: LinkState | undefined, link: EventLink): boolean =>
+    link.source === "flyer" || (state?.linkSources.get(linkKey(link))?.size ?? 0) >= 2;
+
+  /** The link-related slice of EventState that scoping needs. */
+  interface LinkState {
+    links: Map<string, EventLink>;
+    junkLinks: Set<string>;
+    linkSources: Map<string, Set<string>>;
+  }
+
+  /** Scope archive games to an event: the best-fitting TRUSTED tournament
+   *  link, else the event's exact time control, else its expected time
+   *  classes.
    *
    *  A games-derived "link" is only the event if the player played SEVERAL of
-   *  their games there. A single game tagged with a tournament id is almost
-   *  always a giant public arena the player dipped into once (empirically: a
-   *  "1|0 Bullet" arena of 25 strangers matched a 26-player scholastic
-   *  crosstable at 0 overlap) — scoping to it strands the real games. So we pick
-   *  the platform link that explains the MOST of the player's games and only
-   *  trust a games-derived link that carries ≥2 of them; a flyer-sourced link is
-   *  the event by construction and is trusted even at one game. */
+   *  their games there AND the link is trusted (see linkTrusted) — a single
+   *  game tagged with a tournament id is almost always a giant public arena
+   *  the player dipped into once (empirically: a "1|0 Bullet" arena of 25
+   *  strangers matched a 26-player scholastic crosstable at 0 overlap), and
+   *  even a multi-game link from ONE source can be the wrong tournament
+   *  entirely. Scoping to a wrong link strands the real event games. */
   const scopeToEvent = (
     games: ArchiveGame[],
-    links: Map<string, EventLink> | undefined,
+    state: LinkState | undefined,
     platform: OnlinePlatform,
-    ev: GraphEvent,
-    junkLinks?: Set<string>
+    ev: GraphEvent
   ): { scoped: ArchiveGame[]; viaLink?: EventLink; viaTc?: EventTc } => {
-    if (links) {
+    if (state) {
       let best: { link: EventLink; inLink: ArchiveGame[] } | null = null;
-      for (const link of links.values()) {
+      for (const link of state.links.values()) {
         if (link.platform !== platform) continue;
-        if (junkLinks?.has(linkKey(link))) continue; // a proven public pool, not this event
+        if (state.junkLinks.has(linkKey(link))) continue; // a proven public pool, not this event
+        if (!linkTrusted(state, link)) continue; // one source's tournament ≠ the event
         const inLink = games.filter((g) => gameInLink(g, link));
         if (inLink.length && (!best || inLink.length > best.inLink.length)) best = { link, inLink };
       }
@@ -1491,7 +1507,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           }
           // Crosstable check: do the in-window games line up with the member's
           // actual rounds (result sequence + tournament linkage)?
-          const { scoped, viaLink, viaTc } = scopeToEvent(games, state?.links, platform, ev, state?.junkLinks);
+          const { scoped, viaLink, viaTc } = scopeToEvent(games, state, platform, ev);
           const alignment = app ? alignWithRetry(app.rounds, scoped, !!viaLink, platform) : null;
           if (alignment) {
             log(
@@ -1552,7 +1568,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             if (stopNow()) return;
             const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
             if (!games.length) return; // provably not the account that played this event
-            const { scoped, viaLink, viaTc } = scopeToEvent(games, state?.links, platform, ev, state?.junkLinks);
+            const { scoped, viaLink, viaTc } = scopeToEvent(games, state, platform, ev);
             const alignment = app ? alignWithRetry(app.rounds, scoped, !!viaLink, platform) : null;
             // "Name match + a same-TC same-date game" must NOT clear the bar
             // when the profile CONTRADICTS the USCF record (foreign country,
@@ -1572,7 +1588,18 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
                 return;
               }
             }
-            judged.push({ prof, aligned: !!alignment, tcOk: !evTc || !!viaTc || !!viaLink, order });
+            const tcOk = !evTc || !!viaTc || !!viaLink;
+            // Window games that include NONE at the event's known control are
+            // the wrong account unless the crosstable alignment itself bites —
+            // same rule as the Google-lead path (observed: a namesake with
+            // same-class games in the window mapping a section player).
+            if (!tcOk && !alignment) {
+              log(
+                `Name-guess @${prof.username} (${name}) has ${games.length} in-window game(s) but none at the event's ${evTc!.label} control — likely the wrong account; skipping.`
+              );
+              return;
+            }
+            judged.push({ prof, aligned: !!alignment, tcOk, order });
           },
           () => stopNow()
         );
@@ -2011,7 +2038,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     localDeadline: number,
     state?: EventState
   ): Promise<boolean> => {
-    const key = `${ev.eventId}|${linkKey(link)}`;
+    // Trust decides how much a roster may do (see linkTrusted): an untrusted
+    // games-derived link only gets a TARGET scan — no member mapping, no
+    // elimination, no tournament evidence. Keyed per trust tier so a link
+    // that earns trust later gets its full matching pass then.
+    const trusted = linkTrusted(state, link);
+    const key = `${ev.eventId}|${linkKey(link)}|${trusted ? "t" : "u"}`;
     if (rosterTried.has(key)) return false;
     rosterTried.add(key);
 
@@ -2035,17 +2067,28 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     log(
       `"${ev.name}" is linked to a ${platformLabel(link.platform)} ${
         link.kind === "chesscom-tournament" ? "tournament" : link.kind.replace("lichess-", "")
-      } with ${handles.length} participants — matching them to the ${roster.length}-player crosstable…`
+      } with ${handles.length} participants — ${
+        trusted
+          ? `matching them to the ${roster.length}-player crosstable…`
+          : `only one section player ties to it so far, so it is NOT yet proven to be this event — scanning it for ${targetName} only.`
+      }`
     );
 
     const memberClaimed = new Set<string>();
     const handleClaimed = new Set<string>();
-    // Seed the bookkeeping with mappings we already trust.
+    // Seed the bookkeeping with mappings we already trust — and credit them to
+    // the link's trust ledger (a mapped section player among the participants
+    // ties the tournament to this crosstable).
     for (const [mid, per] of mapped) {
       const m = per.get(link.platform);
       if (m && handles.some((h) => h.toLowerCase() === m.profile.username.toLowerCase())) {
         memberClaimed.add(mid);
         handleClaimed.add(m.profile.username.toLowerCase());
+        if (state) {
+          const srcs = state.linkSources.get(linkKey(link)) || new Set<string>();
+          srcs.add(mid);
+          state.linkSources.set(linkKey(link), srcs);
+        }
       }
     }
 
@@ -2070,9 +2113,22 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         if (!best || bestSim < 0.78) return;
         if (digits(prof.uscfId) && digits(prof.uscfId) !== best.uscfId) return; // publishes someone else's USCF ID
         if (best.uscfId === targetId) {
-          if (await recordTarget(link.platform, prof, { method: "roster-name", event: ev, link })) rosterHit = true;
+          // The target's own REAL name on a participant profile is evidence in
+          // itself; the tournament tie only counts as evidence when trusted.
+          if (await recordTarget(link.platform, prof, { method: "roster-name", event: ev, link: trusted ? link : undefined }))
+            rosterHit = true;
           return;
         }
+        // A high-confidence name tie credits the trust ledger even before the
+        // link is trusted (two such ties promote it); MAPPING the member waits
+        // for the trusted pass — a 0.78 tie in a wrong-tournament roster is a
+        // namesake factory.
+        if (state && bestSim >= 0.86) {
+          const srcs = state.linkSources.get(linkKey(link)) || new Set<string>();
+          srcs.add(best.uscfId);
+          state.linkSources.set(linkKey(link), srcs);
+        }
+        if (!trusted) return;
         memberClaimed.add(best.uscfId);
         handleClaimed.add(handle.toLowerCase());
         setMapping(best.uscfId, link.platform, { profile: prof, how: "roster", chain: [] });
@@ -2083,8 +2139,17 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     );
     if (rosterHit) return true;
 
+    if (!trusted) {
+      // If the scan itself earned the link trust (≥2 strong name ties), run
+      // the full matching pass right away.
+      if (linkTrusted(state, link) && !stopNow(localDeadline)) return tryRoster(ev, link, localDeadline, state);
+      return false;
+    }
+
     // Elimination: every crosstable player except the target matched a
-    // participant, and exactly one participant handle is unclaimed.
+    // participant, and exactly one participant handle is unclaimed. Only a
+    // TRUSTED link may do this — elimination over a wrong tournament's roster
+    // would crown a total stranger.
     const unmatchedMembers = roster.filter((m) => m.uscfId !== targetId && !memberClaimed.has(m.uscfId));
     const unclaimed = handles.filter((h) => !handleClaimed.has(h.toLowerCase()));
     if (unmatchedMembers.length === 0 && unclaimed.length === 1) {
@@ -2108,6 +2173,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
      *  to this crosstable (e.g. a 250-player arena vs a 22-player section) —
      *  they must neither scope game pools nor feed roster name-matching. */
     junkLinks: Set<string>;
+    /** Which DISTINCT crosstable members' window games carry each link. A
+     *  games-derived link is only TRUSTED as "the event's tournament" once
+     *  TWO independent section players tie to it — a single source can be a
+     *  plausibly-sized same-weekend tournament that is NOT this event
+     *  (observed live: one seed's 25-player tournament cascaded five wrong
+     *  mappings into a 99% wrong crown). Until trusted, a games-derived link
+     *  never scopes pools, never relaxes alignment, never maps roster
+     *  members, never runs elimination and never counts as tournament
+     *  evidence. Flyer-sourced links are the event by construction. */
+    linkSources: Map<string, Set<string>>;
     frontier: { memberId: string; platform: OnlinePlatform; mapping: Mapping }[];
     visited: Set<string>;
     /** How many sources' event-scoped games each opponent handle appeared in —
@@ -2183,21 +2258,27 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       return false;
     }
 
-    // (a) New tournament linkage revealed by the source's games? A link the
+    // (a) New tournament linkage revealed by the source's games? Record this
+    // member in each link's trust ledger FIRST — a games-derived link is only
+    // trusted once two distinct crosstable members tie to it. A link the
     // source played only ONE game in is almost always a public arena they
     // dipped into once, not the USCF event — registering it (and worse, fetching
     // its whole roster to name-match) burns the budget on strangers. Only chase
     // a games-derived link the source actually played several games in.
     for (const link of linksFromGames(games)) {
       if (outOfTime(localDeadline)) break;
-      if (state.links.has(linkKey(link))) continue;
-      state.links.set(linkKey(link), link);
+      const lk = linkKey(link);
+      const srcs = state.linkSources.get(lk) || new Set<string>();
+      srcs.add(memberId);
+      state.linkSources.set(lk, srcs);
+      if (!state.links.has(lk)) state.links.set(lk, link);
+      if (state.junkLinks.has(lk)) continue;
       if (games.filter((g) => gameInLink(g, link)).length < 2) continue;
       if (await tryRoster(ev, link, localDeadline, state)) return true;
     }
 
     // (b) Pairing alignment: source's crosstable rounds ↔ event-scoped games.
-    const { scoped, viaLink, viaTc } = scopeToEvent(games, state.links, platform, ev, state.junkLinks);
+    const { scoped, viaLink, viaTc } = scopeToEvent(games, state, platform, ev);
     const alignment = alignWithRetry(app.rounds, scoped, !!viaLink, platform);
     if (!alignment && app.rounds.length) {
       log(
@@ -2524,7 +2605,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           for (const link of linksFromGames(games)) {
             if (!state.links.has(linkKey(link))) state.links.set(linkKey(link), link);
           }
-          const { scoped, viaLink, viaTc } = scopeToEvent(games, state.links, platform, ev, state.junkLinks);
+          const { scoped, viaLink, viaTc } = scopeToEvent(games, state, platform, ev);
           const alignment = alignWithRetry(app.rounds, scoped, !!viaLink, platform);
           // Do the lead's in-window opponents include handles already proven to
           // be section players? Only CONFIRMED (mapped) section handles count —
@@ -2615,6 +2696,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       ws = {
         links: new Map(),
         junkLinks: new Set(),
+        linkSources: new Map(),
         frontier: [],
         visited: new Set(),
         oppSeen: new Map(),
@@ -2972,7 +3054,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         for (const app of appearances.get(oppId) || []) {
           if (found || outOfTime()) break;
           if (!(appearances.get(targetId) || []).some((ta) => ta.event.eventId === app.event.eventId)) continue;
-          const state: EventState = { links: new Map(), junkLinks: new Set(), frontier: [], visited: new Set(), oppSeen: new Map() };
+          const state: EventState = { links: new Map(), junkLinks: new Set(), linkSources: new Map(), frontier: [], visited: new Set(), oppSeen: new Map() };
           if (await traceFromSource(app.event, state, oppId, platform, mapped.get(oppId)!.get(platform)!, deadline)) found = true;
           // Follow any frontier the trace opened up.
           while (!found && state.frontier.length && !outOfTime()) {
