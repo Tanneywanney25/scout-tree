@@ -895,10 +895,51 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
   // Confirmed member ↔ handle mappings (per platform). Never contains the target.
   const mapped = new Map<string, Map<OnlinePlatform, Mapping>>();
+  // Reverse index: which member(s) each handle has been mapped to. ONE handle
+  // can only be ONE person — when partial alignments in a big casual pool claim
+  // the same handle for several DIFFERENT crosstable players (observed: one
+  // hyperactive blitz account "mapped" to three section players), every one of
+  // those claims is junk. Contested handles keep feeding BFS (their games still
+  // reach real section players) but are permanently disqualified from naming or
+  // BEING the target.
+  const handleClaims = new Map<string, Set<string>>();
+  const contestedHandles = new Set<string>();
+  const claimKey = (platform: OnlinePlatform, username: string) => `${platform}:${username.toLowerCase()}`;
   const setMapping = (memberId: string, platform: OnlinePlatform, m: Mapping) => {
     const per = mapped.get(memberId) || new Map<OnlinePlatform, Mapping>();
-    if (!per.has(platform)) per.set(platform, m);
+    if (!per.has(platform)) {
+      per.set(platform, m);
+      const key = claimKey(platform, m.profile.username);
+      const claimants = handleClaims.get(key) || new Set<string>();
+      claimants.add(memberId);
+      handleClaims.set(key, claimants);
+      if (claimants.size === 2) {
+        contestedHandles.add(key);
+        log(
+          `⚠ @${m.profile.username} has now been mapped to ${claimants.size} different crosstable players — treating it as a busy casual account, not evidence.`
+        );
+      }
+    }
     mapped.set(memberId, per);
+  };
+  const unsetMapping = (memberId: string, platform: OnlinePlatform) => {
+    const m = mapped.get(memberId)?.get(platform);
+    if (!m) return;
+    mapped.get(memberId)!.delete(platform);
+    const key = claimKey(platform, m.profile.username);
+    const claimants = handleClaims.get(key);
+    claimants?.delete(memberId);
+    if (claimants && !claimants.size) handleClaims.delete(key);
+    // A contested mark stays — the ambiguity was observed, un-mapping one
+    // claimant doesn't make the account trustworthy again.
+  };
+  /** True when this handle is disqualified from being (or naming) the target:
+   *  it is contested, or it is already mapped to a DIFFERENT member. */
+  const handleDisqualified = (platform: OnlinePlatform, username: string): boolean => {
+    const key = claimKey(platform, username);
+    if (contestedHandles.has(key)) return true;
+    const claimants = handleClaims.get(key);
+    return !!claimants && [...claimants].some((id) => id !== targetId);
   };
 
   // --- Google-index username discovery (the PRIMARY name→handle route) -------
@@ -1262,6 +1303,17 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     // candidate outright; a match is near-decisive.
     if (targetFideId && profile.fideId && digits(profile.fideId) !== targetFideId) {
       log(`Rejected @${profile.username}: profile links FIDE ID ${profile.fideId}, but ${targetName}'s is ${targetFideId}.`);
+      return false;
+    }
+    // One handle = one person. An account already mapped to a DIFFERENT
+    // crosstable player (or claimed by several — a hyperactive casual account
+    // that partial alignments keep locking onto) cannot also be the target.
+    // Observed live: a 2/10 partial alignment crowned an account 99% that the
+    // same run had ALREADY mapped to another section player.
+    if (handleDisqualified(platform, profile.username)) {
+      log(
+        `Rejected @${profile.username} as ${targetName}: that account is already mapped to another crosstable player (or several) — a shared/casual account, not the target.`
+      );
       return false;
     }
     const key = `${platform}:${profile.username.toLowerCase()}`;
@@ -1647,7 +1699,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         for (const k of Array.from(seedCache.keys())) {
           if (k.startsWith(`${memberId}:${platform}:`)) seedCache.delete(k);
         }
-        mapped.get(memberId)?.delete(platform);
+        unsetMapping(memberId, platform);
         if (directOpponents.has(memberId)) {
           // Retrying is worth it only when there's a genuinely fresh lead to try.
           // A member the Google index has candidates for may have their REAL
@@ -1699,7 +1751,13 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       // stray casual game (observed: a 3-of-11 alignment mislabelled the target).
       // Partial alignments still map section players (BFS fuel) and feed the
       // cross-corroboration vote below — they just can't crown the target alone.
-      const targetReadable = alignment.pairs.length >= app.rounds.length || !!viaLink;
+      // A tournament link used to be enough licence on its own, but a SPARSE
+      // link-scoped alignment (observed: 2/10) still assigns round labels
+      // near-arbitrarily inside a busy arena pool and can crown a stranger —
+      // so even with a link the alignment must be complete up to one missing
+      // round (a bye/forfeit) before a board may name the target.
+      const nearlyFull = alignment.pairs.length >= app.rounds.length - 1;
+      const targetReadable = alignment.pairs.length >= app.rounds.length || (!!viaLink && nearlyFull);
       log(
         `Aligned @${handle}'s ${alignment.pairs.length} of ${srcName}'s ${app.rounds.length} crosstable rounds (${alignment.checked} results verified)${
           targetReadable ? "" : " — partial, so it can map opponents but not crown the target alone"
