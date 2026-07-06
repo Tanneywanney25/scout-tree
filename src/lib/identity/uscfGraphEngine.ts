@@ -1447,7 +1447,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         evidence.push({
           kind: "other",
           weight: -0.4,
-          label: `Has games during "${ev.name}" but none could be tied to the event itself yet`,
+          // "namesake" must appear verbatim: the UI withholds the confirmed
+          // shield from any account whose evidence carries that caveat.
+          label: `Has games during "${ev.name}" but none could be tied to the event itself yet — could still be a namesake`,
           source: "uscf-graph",
         });
         break;
