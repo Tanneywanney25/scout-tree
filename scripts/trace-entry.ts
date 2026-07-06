@@ -145,10 +145,13 @@ async function main() {
 
   // Same hooks the browser wires via the edge function — here they run
   // directly. Google-index discovery + flyer search need an AI/search key.
-  const hasAiKey = !!(readEnv("GEMINI_API_KEY") || readEnv("GOOGLE_API_KEY") || readEnv("ANTHROPIC_API_KEY"));
+  const hasAiKey = !!(
+    (readEnv("AI_PROXY_BASE_URL") && readEnv("AI_PROXY_API_KEY")) ||
+    readEnv("GEMINI_API_KEY") || readEnv("GOOGLE_API_KEY") || readEnv("ANTHROPIC_API_KEY")
+  );
   const hasCse = !!((readEnv("GOOGLE_CSE_KEY") || readEnv("GOOGLE_SEARCH_KEY")) && (readEnv("GOOGLE_CSE_ID") || readEnv("GOOGLE_SEARCH_CX")));
   if (!hasAiKey && !hasCse) {
-    console.log("NOTE: no GEMINI_API_KEY/ANTHROPIC_API_KEY (or GOOGLE_CSE_KEY+GOOGLE_CSE_ID) in env — Google-index username discovery and flyer search are OFF for this run.");
+    console.log("NOTE: no AI_PROXY_BASE_URL+AI_PROXY_API_KEY, GEMINI_API_KEY/ANTHROPIC_API_KEY (or GOOGLE_CSE_KEY+GOOGLE_CSE_ID) in env — Google-index username discovery and flyer search are OFF for this run.");
   }
   const expandCache = new Map<string, Promise<TournamentGraph | null>>();
   // Memoize the web-search hooks across the WHOLE run (the engine memoizes

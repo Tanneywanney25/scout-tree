@@ -435,13 +435,16 @@ async function handleFindUsername(body: Record<string, unknown>): Promise<Respon
   const result = await findUsernamesOnWeb(req, (m) => console.log("[resolve-identity] findUsername:", m));
   console.log(
     "[resolve-identity] findUsername:",
-    JSON.stringify({ name, backend: result.backend, found: result.candidates.length })
+    JSON.stringify({ name, backend: result.backend, found: result.candidates.length, quotaExhausted: result.quotaExhausted ?? false })
   );
   return json({
     available: result.backend !== "none",
     candidates: result.candidates,
     backend: result.backend,
     note: result.note,
+    // True when the empty answer means "search quota exhausted", NOT "the
+    // index has no match" — clients must not cache this as a definitive miss.
+    quotaExhausted: result.quotaExhausted ?? false,
   });
 }
 

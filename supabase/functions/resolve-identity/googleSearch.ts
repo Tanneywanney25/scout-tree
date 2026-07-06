@@ -28,7 +28,7 @@
 // trusting it. Runtime-agnostic: works in Deno (edge) and Node (CLI harness).
 // ============================================================================
 
-import { callAIWithSearch, readEnv } from "../_shared/ai.ts";
+import { callAIWithSearch, readEnv, geminiQuotaCoolingDown } from "../_shared/ai.ts";
 
 export type WebPlatform = "chesscom" | "lichess";
 
@@ -64,6 +64,10 @@ export interface UsernameSearchResult {
   backend: "google-cse" | "ai-search" | "none";
   queriesTried: number;
   note?: string;
+  /** True when discovery returned nothing because the AI search quota was
+   *  exhausted (429), NOT because the index had no match. Callers must treat
+   *  this differently from a clean empty result (retry later / lean on CSE). */
+  quotaExhausted?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,15 +165,23 @@ export function buildQueryLadder(req: UsernameSearchRequest): string[] {
 const LICHESS_PROFILE_RE = /lichess\.org\/@\/([A-Za-z0-9_-]{2,29})/gi;
 const CHESSCOM_PROFILE_RE = /chess\.com\/(?:member|members|player|players|stats\/live[a-z/]*)\/([A-Za-z0-9_-]{2,29})/gi;
 
-/** Path segments that regex-match a profile URL but are never usernames. */
+/** Path segments that regex-match a profile URL but are never usernames — plus
+ *  chess titles, which the AI backend sometimes emits as a bare "username"
+ *  (observed: it returned {"username":"GM A-Liang"} and {"username":"GM"}). */
 const NOT_USERNAMES = new Set([
   "chess", "chesscom", "lichess", "member", "members", "player", "players",
   "login", "signup", "register", "settings", "search", "stats", "live",
+  "gm", "im", "fm", "cm", "nm", "wgm", "wim", "wfm", "wcm",
 ]);
 
 function pushCandidate(out: UsernameCandidate[], seen: Set<string>, c: UsernameCandidate) {
   const uname = c.username.trim().replace(/^@+/, "");
   if (uname.length < 2 || uname.length > 29) return;
+  // Real Lichess/Chess.com handles are [A-Za-z0-9_-] only. The AI backend
+  // occasionally returns a display-name string ("GM A-Liang") as the username —
+  // a space (or any other char) means it isn't a handle, so drop it before it
+  // wastes a verification round-trip.
+  if (!/^[A-Za-z0-9_-]+$/.test(uname)) return;
   if (NOT_USERNAMES.has(uname.toLowerCase())) return;
   const key = `${c.platform}:${uname.toLowerCase()}`;
   if (seen.has(key)) return;
@@ -327,7 +339,7 @@ async function searchViaAi(
   req: UsernameSearchRequest,
   queries: string[],
   log?: (m: string) => void
-): Promise<{ candidates: UsernameCandidate[]; note?: string; ok: boolean }> {
+): Promise<{ candidates: UsernameCandidate[]; note?: string; ok: boolean; quota: boolean }> {
   const ai = await callAIWithSearch(
     "You are a research assistant who finds chess players' online usernames strictly from what Google-indexed web pages say. You never guess handles from a name. You output strict JSON only.",
     buildAiSearchPrompt(req, queries),
@@ -335,9 +347,10 @@ async function searchViaAi(
     { maxSearchUses: 8 }
   );
   if (!ai.ok) {
-    log?.(`AI web search unavailable (${ai.status}): ${ai.error || "no detail"}`);
-    return { candidates: [], ok: false };
+    log?.(`AI web search unavailable (${ai.status}, backend ${ai.backend || "?"}): ${ai.error || "no detail"}`);
+    return { candidates: [], ok: false, quota: ai.status === 429 };
   }
+  log?.(`AI web search served by ${ai.backend || "unknown backend"}`);
 
   const out: UsernameCandidate[] = [];
   const seen = new Set<string>();
@@ -371,7 +384,7 @@ async function searchViaAi(
   // Regex-scan the whole answer too — grounded replies often cite profile URLs
   // outside the JSON.
   for (const c of extractCandidatesFromText(ai.text, "Google index (cited URL)")) pushCandidate(out, seen, c);
-  return { candidates: out, note, ok: true };
+  return { candidates: out, note, ok: true, quota: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -388,13 +401,31 @@ export async function findUsernamesOnWeb(
   const cseKey = readEnv("GOOGLE_CSE_KEY") || readEnv("GOOGLE_SEARCH_KEY");
   const cseCx = readEnv("GOOGLE_CSE_ID") || readEnv("GOOGLE_SEARCH_CX");
 
+  // CSE FIRST — the literal index with its own (separate) quota. The AI
+  // backend is the escalation, not the default.
+  let cseCleanMiss = false; // CSE searched the whole ladder and found nothing
   if (cseKey && cseCx && Date.now() > cseCooldownUntil) {
     const cse = await searchViaCse(queries, cseKey, cseCx, log);
     if (cse.candidates.length) {
       return { candidates: rankForPlatforms(cse.candidates, req.platforms), backend: "google-cse", queriesTried: cse.queriesTried };
     }
+    cseCleanMiss = !cse.quotaHit;
     // Zero hits (or quota): escalate to AI search, which reads pages rather
     // than just result snippets and can follow context.
+  }
+
+  // Cooldown fast-fail: once the AI-search quota is PROVEN exhausted, don't
+  // re-hit the wall for every seed in the burst — fail fast and say WHY, so
+  // callers can distinguish "quota" from "the index has no match".
+  if (geminiQuotaCoolingDown()) {
+    log?.("AI web search cooling down after quota exhaustion — skipping (not a no-match).");
+    return {
+      candidates: [],
+      backend: "none",
+      queriesTried: 0,
+      quotaExhausted: !cseCleanMiss,
+      note: cseCleanMiss ? "CSE found no match; AI search quota exhausted" : "AI search quota exhausted (cooling down)",
+    };
   }
 
   const ai = await searchViaAi(req, queries, log);
@@ -403,6 +434,10 @@ export async function findUsernamesOnWeb(
     backend: ai.ok ? "ai-search" : "none",
     queriesTried: queries.length,
     note: ai.note,
+    // Honest empty-result semantics: only claim "no match" when a search
+    // actually completed. If the AI path died on quota AND CSE didn't cleanly
+    // cover the ladder, the truth is "couldn't search", not "not found".
+    quotaExhausted: !ai.ok && ai.quota && !cseCleanMiss ? true : undefined,
   };
 }
 
