@@ -221,6 +221,23 @@ function locationMatchesState(location: string, state: string): boolean {
   return !!full && location.toLowerCase().includes(full);
 }
 
+/** Which US state a free-text location CONFIDENTLY names, if any — a full
+ *  state name anywhere, or a two-letter code in the postal ", XX" position.
+ *  (Deliberately stricter than locationMatchesState: this feeds a NEGATIVE
+ *  signal, so words like "in"/"or" inside prose must not read as states.) */
+function strictStateOf(location: string): string | null {
+  const lower = location.toLowerCase();
+  for (const [code, full] of Object.entries(US_STATE_NAMES)) {
+    if (lower.includes(full)) return code;
+  }
+  const m = location.match(/,\s*([A-Za-z]{2})(?:[^A-Za-z]|$)/);
+  if (m) {
+    const code = m[1].toUpperCase();
+    if (US_STATE_NAMES[code]) return code;
+  }
+  return null;
+}
+
 /** Event date window in ms, generously padded (online events can run weekly). */
 function windowFor(ev: GraphEvent): { startMs: number; endMs: number } {
   const start = ev.startDate ? Date.parse(ev.startDate) : NaN;
@@ -1052,8 +1069,19 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       const isUs = prof.country.trim().slice(-2).toUpperCase() === "US";
       push(isUs ? 0.3 : -0.5, isUs ? "Profile country US matches US Chess" : `Profile country ${prof.country} for a US Chess member`);
     }
-    if (state && prof.location && locationMatchesState(prof.location, state)) {
-      push(0.6, `Profile location "${prof.location}" matches ${state}`);
+    if (state && prof.location) {
+      if (locationMatchesState(prof.location, state)) {
+        push(0.6, `Profile location "${prof.location}" matches ${state}`);
+      } else {
+        // A profile that confidently names a DIFFERENT state is most likely a
+        // namesake (observed live: a Missouri "Timothy Campbell" nearly stole
+        // a Washington player's identity at 80% attributes). Not fatal —
+        // people move — but a heavy strike.
+        const other = strictStateOf(prof.location);
+        if (other && other !== state.trim().toUpperCase()) {
+          push(-0.9, `Profile location "${prof.location}" is in ${other}, not the player's ${state}`);
+        }
+      }
     }
     if (!prof.gamesFound) push(-0.8, "Account has no games at all");
     if (prof.lastActiveMs && prof.lastActiveMs < startMs) {
@@ -1454,8 +1482,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
 
     // Positive-only name corroboration for structural methods (a pairing hit
-    // must not be sunk by a missing/whimsical display name).
-    if (via.method === "pairing" || via.method === "elimination" || via.method === "google" || via.method === "google-lead") {
+    // must not be sunk by a missing/whimsical display name). NOT for
+    // google-lead: the lead exists BECAUSE of the name, so "the profile name
+    // corroborates" is circular — it stacked a namesake to 99% once.
+    if (via.method === "pairing" || via.method === "elimination" || via.method === "google") {
       const sim = nameSimilarity(targetName, profile.displayName || "");
       if (profile.displayName && sim >= 0.6) {
         evidence.push({
@@ -1514,7 +1544,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       lastActive: profile.lastActiveMs ? new Date(profile.lastActiveMs).toISOString() : undefined,
       profileUrl: profile.profileUrl,
       verified: true,
-      confidence: scoreFromEvidence(evidence, -0.5),
+      // A google-lead is BY DEFINITION unproven (games in the window, no
+      // structural tie) — its confidence is hard-capped below the "confirmed"
+      // range no matter how well the name and attributes stack, because every
+      // input to that stack is name-derived and namesakes ace it. Structural
+      // methods keep the full score.
+      confidence:
+        via.method === "google-lead"
+          ? Math.min(0.65, scoreFromEvidence(evidence, -0.5))
+          : scoreFromEvidence(evidence, -0.5),
       evidence,
     };
 
@@ -2050,17 +2088,23 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           const { scoped, viaLink } = scopeToEvent(games, state.links, platform, ev);
           const alignment = alignWithRetry(app.rounds, scoped, !!viaLink, platform);
           // Do the lead's in-window opponents include handles already proven to
-          // be section players?
+          // be section players? Only CONFIRMED (mapped) section handles count —
+          // "seen in another source's pool" is casual-noise-grade in link-less
+          // events and must not settle an identity.
           const knownSectionHandles = new Set<string>();
           for (const p of ev.players) {
             const m = mapped.get(p.uscfId)?.get(platform);
             if (m) knownSectionHandles.add(m.profile.username.toLowerCase());
           }
-          const overlap = scoped.filter(
-            (g) => knownSectionHandles.has(g.oppHandle.toLowerCase()) || (state.oppSeen.get(g.oppHandle.toLowerCase()) || 0) > 0
-          ).length;
+          const overlap = scoped.filter((g) => knownSectionHandles.has(g.oppHandle.toLowerCase())).length;
 
-          if (alignment || viaLink || overlap > 0) {
+          // An alignment is only PROOF when nearly every crosstable round's
+          // result was verified against a game. A sparse match (observed live:
+          // 4/6 over a namesake's casual pool) is exactly the outcome-checksum
+          // coincidence alignRounds warns about — it stays a lead, not a match.
+          const alignmentProof = !!alignment && alignment.checked >= app.rounds.length - 1;
+
+          if (alignmentProof || viaLink || overlap > 0) {
             // Structural proof (round alignment / the linked tournament / games
             // against confirmed section players) settles it outright.
             if (
