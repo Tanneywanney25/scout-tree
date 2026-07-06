@@ -113,7 +113,10 @@ const DAY = 86_400_000;
 
 export type OnlinePlatform = "chesscom" | "lichess";
 
-/** Generate plausible Chess.com/Lichess handles from a real name. */
+/** Generate plausible Chess.com/Lichess handles from a real name. One base
+ *  shape per line, then common suffixes on the two shapes people actually use
+ *  most (firstlast, f-initial+last) — a single "firstlast" guess per person is
+ *  the 5%-hit-rate lazy path this replaces. */
 export function guessHandles(name: string): string[] {
   const clean = name.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
   const t = clean.split(" ").filter(Boolean);
@@ -131,14 +134,16 @@ export function guessHandles(name: string): string[] {
     add(`${first[0]}${last}`); // jsmith
     add(`${first}${last[0]}`); // johns / jefferyx
     add(`${last}${first}`);
-    add(`${first}${last}1`);
-    add(`${first}${last}chess`);
     add(`${last}${first[0]}`);
+    for (const base of [`${first}${last}`, `${first[0]}${last}`]) {
+      for (const suffix of ["1", "2", "3", "7", "123", "chess"]) add(`${base}${suffix}`);
+    }
   }
   add(clean.replace(/\s/g, ""));
   if (first) add(first);
+  if (first) add(`${first}chess`);
   if (last) add(last);
-  return Array.from(g).slice(0, 11);
+  return Array.from(g).slice(0, 24);
 }
 
 function platformLabel(p: OnlinePlatform): string {
@@ -1518,24 +1523,94 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       // 2. ABSOLUTE LAST RESORT: platform-side guessing (only after Google).
       // The profile must show a matching REAL name — a username that looks
       // like the player's name is meaningless (namesakes, not identities).
-      // Every guess is verified CONCURRENTLY, then judged in guess order —
-      // deterministic: the same handle wins as in a serial scan.
+      // And a real name alone is still not enough: EVERY name-gated candidate
+      // is pre-screened against the event itself (games in the window, at the
+      // event's control, aligning with the crosstable) BEFORE it may map.
+      // The old path returned the first name-matcher unseen — it got mapped,
+      // traced, found gameless, blacklisted and re-derived, one candidate per
+      // cycle. Now all candidates are judged concurrently in one pass, which
+      // also handles several same-name accounts and players with more than
+      // one account: the one that actually played the event wins.
+      const st = memberState.get(memberId);
+      const evTc = parseEventTc(ev.timeControl);
+
+      /** Judge name-gated candidates by real event evidence; best first. */
+      const judgeSeedCandidates = async (profs: VerifiedProfile[]): Promise<VerifiedProfile | null> => {
+        interface Judged {
+          prof: VerifiedProfile;
+          aligned: boolean;
+          tcOk: boolean;
+          order: number;
+        }
+        const judged: Judged[] = [];
+        await pool(
+          profs,
+          4,
+          async (prof, order) => {
+            if (stopNow()) return;
+            const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
+            if (!games.length) return; // provably not the account that played this event
+            const { scoped, viaLink, viaTc } = scopeToEvent(games, state?.links, platform, ev);
+            const alignment = app ? alignWithRetry(app.rounds, scoped, !!viaLink, platform) : null;
+            // "Name match + a same-TC same-date game" must NOT clear the bar
+            // when the profile CONTRADICTS the USCF record (foreign country,
+            // wrong state) — namesakes ace name matches. A contradicted
+            // candidate needs structural alignment, its published USCF ID, or
+            // a club tie to survive.
+            const otherState = st && prof.location && !locationMatchesState(prof.location, st) ? strictStateOf(prof.location) : null;
+            const contradicted = isForeignCountry(prof.country) || (!!otherState && otherState !== st!.trim().toUpperCase());
+            if (contradicted && !alignment && digits(prof.uscfId) !== memberId) {
+              const clubs = await fetchClubs(platform, prof.username, signal);
+              if (!clubs.some((c) => clubEventTie(c, ev.name, [st, graph.rootState]))) {
+                log(
+                  `Name-guess @${prof.username} matches "${name}" and played in the window, but its profile contradicts the USCF record (${
+                    isForeignCountry(prof.country) ? `country ${prof.country}` : `location ${prof.location}`
+                  }) with no structural tie — not accepting a namesake.`
+                );
+                return;
+              }
+            }
+            judged.push({ prof, aligned: !!alignment, tcOk: !evTc || !!viaTc || !!viaLink, order });
+          },
+          () => stopNow()
+        );
+        // Aligned beats TC-fitting beats mere in-window; original order last —
+        // deterministic, same winner as a serial best-first scan.
+        judged.sort(
+          (a, b) => (b.aligned ? 1 : 0) - (a.aligned ? 1 : 0) || (b.tcOk ? 1 : 0) - (a.tcOk ? 1 : 0) || a.order - b.order
+        );
+        return judged[0]?.prof ?? null;
+      };
+
       const gate = (prof: VerifiedProfile): boolean =>
         !!prof.displayName && nameSimilarity(name, prof.displayName) >= 0.72;
       const guesses = guessHandles(name).filter((h) => !dudHandles.has(`${platform}:${h.toLowerCase()}`));
       const guessProfs = new Map<string, VerifiedProfile | null>();
       await pool(
         guesses,
-        6,
+        VERIFY_POOL,
         async (h) => {
           if (stopNow()) return;
           guessProfs.set(h, await verifyOn(platform, h));
         },
         () => stopNow()
       );
+      const seenGuess = new Set<string>();
+      const guessPassers: VerifiedProfile[] = [];
       for (const h of guesses) {
         const prof = guessProfs.get(h);
-        if (prof && gate(prof) && !dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) return prof;
+        if (!prof || !gate(prof) || dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) continue;
+        const k = prof.username.toLowerCase();
+        if (seenGuess.has(k)) continue;
+        seenGuess.add(k);
+        guessPassers.push(prof);
+      }
+      if (guessPassers.length && !stopNow()) {
+        const best = await judgeSeedCandidates(guessPassers);
+        if (best) return best;
+        log(
+          `${name}: ${guessPassers.length} name-matching guessed account(s) exist, but none verifiably played "${ev.name}" — not settling for a namesake.`
+        );
       }
       if (platform === "lichess" && !stopNow()) {
         // Lichess offers autocomplete — still only a SEED finder for opponents.
@@ -1557,9 +1632,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             },
             () => stopNow()
           );
+          const acPassers: VerifiedProfile[] = [];
           for (const h of handles) {
             const prof = acProfs.get(h);
-            if (prof && prof.displayName && nameSimilarity(name, prof.displayName) >= 0.78) return prof;
+            if (prof && prof.displayName && nameSimilarity(name, prof.displayName) >= 0.78 && !seenGuess.has(prof.username.toLowerCase())) {
+              acPassers.push(prof);
+            }
+          }
+          if (acPassers.length) {
+            const best = await judgeSeedCandidates(acPassers);
+            if (best) return best;
           }
         }
       }
