@@ -283,6 +283,50 @@ function playedRounds(games: GraphGame[]): RoundGame[] {
   return out.sort((a, b) => a.round - b.round);
 }
 
+/** A USCF section time control resolved to platform clock terms. */
+export interface EventTc {
+  baseSecs: number;
+  /** Increment in seconds, when the control names one (";+5", "inc/15"). */
+  incSecs?: number;
+  /** Delay in seconds ("d5", ";d/3") — online platforms have no delay, so
+   *  organisers map it to an equal increment or drop it entirely. */
+  delaySecs?: number;
+  label: string;
+}
+
+/**
+ * Parse a USCF time-control string ("G/60;+5", "G/45;inc/15", "G/25 d5") into
+ * the exact platform clock the event's games were played at. Multi-stage OTB
+ * controls ("40/90;SD/30") and unparseable strings return null — scoping then
+ * falls back to the soft time-class filter.
+ */
+export function parseEventTc(timeControl?: string): EventTc | null {
+  const s = (timeControl || "").trim();
+  if (!s) return null;
+  if (/\d+\/\d+.*sd/i.test(s)) return null; // multi-stage control — not an online single clock
+  const base = /G\/?\s*(\d+)/i.exec(s);
+  if (!base) return null;
+  const baseSecs = parseInt(base[1], 10) * 60;
+  if (!isFinite(baseSecs) || baseSecs <= 0) return null;
+  const inc = /(?:\+|inc\/?)\s*(\d+)/i.exec(s);
+  const delay = /d\/?\s*(\d+)/i.exec(s);
+  const incSecs = inc ? parseInt(inc[1], 10) : undefined;
+  const delaySecs = !inc && delay ? parseInt(delay[1], 10) : undefined;
+  const label = `${baseSecs / 60}+${incSecs ?? (delaySecs != null ? `d${delaySecs}` : 0)}`;
+  return { baseSecs, incSecs, delaySecs, label };
+}
+
+/** Does an archive game's exact clock match the event's control? A delay-based
+ *  control accepts an equal increment or none (platforms lack delay); a control
+ *  with no increment/delay means an exact base with zero increment. */
+export function gameMatchesTc(g: { baseSecs?: number; incSecs?: number }, tc: EventTc): boolean {
+  if (g.baseSecs === undefined || g.baseSecs !== tc.baseSecs) return false;
+  const inc = g.incSecs ?? 0;
+  if (tc.incSecs !== undefined) return inc === tc.incSecs;
+  if (tc.delaySecs !== undefined) return inc === tc.delaySecs || inc === 0;
+  return inc === 0;
+}
+
 /** Soft expectation of platform time classes for a section. */
 function expectedTimeClasses(ev: GraphEvent): Set<string> {
   const m = /G\/?\s*(\d+)/i.exec(ev.timeControl || "");
@@ -311,6 +355,11 @@ interface ArchiveGame {
   endMs: number;
   rated: boolean;
   timeClass?: string;
+  /** Exact clock (base seconds + increment seconds), when the platform gave it.
+   *  Undefined for daily/correspondence. Lets games be scoped to the EVENT's
+   *  time control instead of a whole time class. */
+  baseSecs?: number;
+  incSecs?: number;
   url?: string;
   /** Chess.com tournament API url this game belonged to (the golden signal). */
   chesscomTournament?: string;
@@ -333,6 +382,14 @@ function monthsBetween(startMs: number, endMs: number): { y: number; m: number }
 }
 
 const CC_DRAW_CODES = new Set(["agreed", "repetition", "stalemate", "insufficient", "50move", "timevsinsufficient"]);
+
+/** Chess.com time_control: "3600+5" | "180" (live, seconds) | "1/259200" (daily). */
+function chesscomClock(tc: unknown): { baseSecs: number; incSecs: number } | null {
+  const s = typeof tc === "string" ? tc : "";
+  const m = /^(\d+)(?:\+(\d+))?$/.exec(s);
+  if (!m) return null; // daily ("1/86400") or missing
+  return { baseSecs: parseInt(m[1], 10), incSecs: m[2] ? parseInt(m[2], 10) : 0 };
+}
 
 function chesscomOutcome(myResult?: string, oppResult?: string): Outcome | undefined {
   if (myResult === "win") return "w";
@@ -378,6 +435,7 @@ function chesscomMonthGames(
         const them = sourceColor === "white" ? g.black : g.white;
         const opp = them?.username;
         if (!opp || opp.toLowerCase() === uLower) continue;
+        const clock = chesscomClock(g.time_control);
         out.push({
           oppHandle: opp,
           sourceColor,
@@ -385,6 +443,8 @@ function chesscomMonthGames(
           endMs: endT,
           rated: g.rated !== false,
           timeClass: g.time_class,
+          baseSecs: clock?.baseSecs,
+          incSecs: clock?.incSecs,
           url: g.url,
           chesscomTournament: typeof g.tournament === "string" ? g.tournament : undefined,
         });
@@ -456,6 +516,8 @@ async function lichessWindowGames(username: string, startMs: number, endMs: numb
         endMs: endT,
         rated: g.rated !== false,
         timeClass: g.speed,
+        baseSecs: typeof g.clock?.initial === "number" ? g.clock.initial : undefined,
+        incSecs: typeof g.clock?.increment === "number" ? g.clock.increment : undefined,
         // Current exports use swissTour/arenaTour objects; older ones used
         // flat swiss/tournament id strings. Accept both.
         lichessSwiss: g.swissTour?.id || (typeof g.swiss === "string" ? g.swiss : undefined),
@@ -1106,7 +1168,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     links: Map<string, EventLink> | undefined,
     platform: OnlinePlatform,
     ev: GraphEvent
-  ): { scoped: ArchiveGame[]; viaLink?: EventLink } => {
+  ): { scoped: ArchiveGame[]; viaLink?: EventLink; viaTc?: EventTc } => {
     if (links) {
       let best: { link: EventLink; inLink: ArchiveGame[] } | null = null;
       for (const link of links.values()) {
@@ -1118,8 +1180,20 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         return { scoped: best.inLink, viaLink: best.link };
       }
     }
+    // The event's EXACT time control beats a whole time class: a busy account
+    // can have 20+ in-window games in the right class where only the 4 played
+    // at the event's control are the event (observed: 23 window games, 4 at
+    // G/60+5 = precisely the crosstable rounds). A same-class casual pool is
+    // what lets the alignment checksum lock onto strangers.
+    const tc = parseEventTc(ev.timeControl);
+    if (tc) {
+      const exact = games.filter((g) => gameMatchesTc(g, tc));
+      if (exact.length) return { scoped: exact, viaTc: tc };
+    }
     // Manually-paired USCF events were usually played as UNRATED casual
     // challenges, so don't require rated — the time class is the useful filter.
+    // (Also the fallback when the organiser ran a slightly different clock than
+    // the USCF control string, in which case NO game matches it exactly.)
     const classes = expectedTimeClasses(ev);
     return { scoped: games.filter((g) => !g.timeClass || classes.has(g.timeClass)) };
   };
@@ -1212,6 +1286,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         for (const s of shortlist) void windowGames(platform, s.prof.username, win.startMs, win.endMs);
 
         let fallback: VerifiedProfile | null = null;
+        const evTc = parseEventTc(ev.timeControl);
         for (const { prof, score } of shortlist) {
           if (stopNow()) break;
           const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
@@ -1225,7 +1300,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           }
           // Crosstable check: do the in-window games line up with the member's
           // actual rounds (result sequence + tournament linkage)?
-          const { scoped, viaLink } = scopeToEvent(games, state?.links, platform, ev);
+          const { scoped, viaLink, viaTc } = scopeToEvent(games, state?.links, platform, ev);
           const alignment = app ? alignWithRetry(app.rounds, scoped, !!viaLink, platform) : null;
           if (alignment) {
             log(
@@ -1234,6 +1309,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
               )}% attributes AND their event games align with the crosstable.`
             );
             return prof;
+          }
+          // In-window games that include NONE at the event's known time control
+          // are the signature of the wrong account (a same-name player who was
+          // merely online that day) — only structural alignment may overrule.
+          if (evTc && !viaTc && !viaLink) {
+            log(
+              `Google lead @${prof.username} (${name}) has ${games.length} in-window game(s) but none at the event's ${evTc.label} control — likely the wrong account; trying the next lead.`
+            );
+            continue;
           }
           if (score >= ATTR_ACCEPT && !fallback) {
             fallback = prof;
@@ -1773,12 +1857,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
 
     // (b) Pairing alignment: source's crosstable rounds ↔ event-scoped games.
-    const { scoped, viaLink } = scopeToEvent(games, state.links, platform, ev);
+    const { scoped, viaLink, viaTc } = scopeToEvent(games, state.links, platform, ev);
     const alignment = alignWithRetry(app.rounds, scoped, !!viaLink, platform);
     if (!alignment && app.rounds.length) {
       log(
         `Couldn't align @${handle}'s ${scoped.length} in-window game(s) with ${srcName}'s ${app.rounds.length} crosstable rounds${
-          viaLink ? " (tournament-scoped)" : ""
+          viaLink ? " (tournament-scoped)" : viaTc ? ` (${viaTc.label}-scoped)` : ""
         } — relying on roster and name evidence instead.`
       );
     }
@@ -1799,9 +1883,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       const nearlyFull = alignment.pairs.length >= app.rounds.length - 1;
       const targetReadable = alignment.pairs.length >= app.rounds.length || (!!viaLink && nearlyFull);
       log(
-        `Aligned @${handle}'s ${alignment.pairs.length} of ${srcName}'s ${app.rounds.length} crosstable rounds (${alignment.checked} results verified)${
-          targetReadable ? "" : " — partial, so it can map opponents but not crown the target alone"
-        } — reading the other side of each board…`
+        `Aligned @${handle}'s ${alignment.pairs.length} of ${srcName}'s ${app.rounds.length} crosstable rounds (${alignment.checked} results verified${
+          viaTc ? `, ${viaTc.label}-scoped` : viaLink ? ", tournament-scoped" : ""
+        })${targetReadable ? "" : " — partial, so it can map opponents but not crown the target alone"} — reading the other side of each board…`
       );
       // Verify the other side of every aligned board CONCURRENTLY — each hit
       // maps one more crosstable player (or IS the target).
@@ -2087,7 +2171,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           for (const link of linksFromGames(games)) {
             if (!state.links.has(linkKey(link))) state.links.set(linkKey(link), link);
           }
-          const { scoped, viaLink } = scopeToEvent(games, state.links, platform, ev);
+          const { scoped, viaLink, viaTc } = scopeToEvent(games, state.links, platform, ev);
           const alignment = alignWithRetry(app.rounds, scoped, !!viaLink, platform);
           // Do the lead's in-window opponents include handles already proven to
           // be section players? Only CONFIRMED (mapped) section handles count —
@@ -2127,7 +2211,18 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           }
           // Games in the window but no structural tie yet: only an attribute
           // score past the acceptance bar earns a capped "lead" record; the late
-          // phase re-tests once links and mapped handles are richer.
+          // phase re-tests once links and mapped handles are richer. An account
+          // whose window games include NONE at the event's known time control is
+          // most likely a namesake who merely played that day — no lead at all.
+          const evTc = parseEventTc(ev.timeControl);
+          if (evTc && !viaTc) {
+            if (phase === "early") {
+              log(
+                `Google lead @${prof.username} has ${games.length} in-window game(s) but none at the event's ${evTc.label} control — not recording a lead.`
+              );
+            }
+            continue;
+          }
           if (score >= ATTR_ACCEPT) {
             recordTarget(platform, prof, {
               method: "google-lead",
