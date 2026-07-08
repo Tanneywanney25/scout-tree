@@ -509,34 +509,55 @@ function chesscomOutcome(myResult?: string, oppResult?: string): Outcome | undef
 }
 
 /** One player's full Chess.com archive for one month, memoized in `cache` so
- *  overlapping event windows never refetch the same month. A failed month is
- *  evicted from the cache (a later window gets a fresh chance) — a silently
- *  cached miss would break pairing chains. */
+ *  overlapping event windows never refetch the same month.
+ *
+ *  Chess.com's archive shards intermittently serve 404 with a 503 "internal
+ *  error" BODY (or plain 5xx/timeouts) for months that exist — observed live
+ *  while the same account's profile and other months answered 200. To the
+ *  judgment awaiting this month, "no games" and "the shard hiccuped" are the
+ *  difference between rejecting the player's REAL account as a namesake and
+ *  mapping it — one flaked GET zeroed an entire live search. So a transient
+ *  failure is retried IN PLACE (politeFetch already handles 429s; this covers
+ *  the 404/5xx flake), and a month that still fails is recorded in
+ *  `failedMonths` and evicted from the cache so later windows retry it and
+ *  callers can tell "hole in the data" from "provably played nothing". */
 function chesscomMonthGames(
   username: string,
   y: number,
   m: number,
   cache: Map<string, Promise<ArchiveGame[]>>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  failedMonths?: Set<string>
 ): Promise<ArchiveGame[]> {
   const uLower = username.toLowerCase();
   const key = `${uLower}:${y}:${m}`;
   const hit = cache.get(key);
   if (hit) return hit;
+  const giveUp = (): ArchiveGame[] => {
+    cache.delete(key);
+    failedMonths?.add(key);
+    return [];
+  };
   const p = (async (): Promise<ArchiveGame[]> => {
-    try {
-      const res = await politeFetch(
-        `https://api.chess.com/pub/player/${uLower}/games/${y}/${String(m).padStart(2, "0")}`,
-        { headers: { Accept: "application/json" }, signal },
-        "chesscom",
-        20_000
-      );
+    for (let attempt = 0; ; attempt++) {
+      let res: Response;
+      try {
+        res = await politeFetch(
+          `https://api.chess.com/pub/player/${uLower}/games/${y}/${String(m).padStart(2, "0")}`,
+          { headers: { Accept: "application/json" }, signal },
+          "chesscom",
+          20_000
+        );
+      } catch {
+        if (attempt < 2 && !signal?.aborted) {
+          await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+          continue;
+        }
+        return giveUp();
+      }
       if (!res.ok) {
-        // A real 404 (month truly absent) may cache as empty. But chess.com's
-        // archive shards intermittently serve 404 with a 503 "internal error"
-        // BODY for months that exist (observed live: two accounts' 2020/11-12
-        // shards down while their profiles and other months answered 200) —
-        // caching that as "no games" silently breaks pairing chains.
+        // A real 404 (month truly absent) caches as empty; a 404 whose body
+        // carries a 5xx error code is the shard flake in disguise.
         let transient = res.status !== 404;
         if (!transient) {
           try {
@@ -546,10 +567,23 @@ function chesscomMonthGames(
             transient = true;
           }
         }
-        if (transient) cache.delete(key);
-        return [];
+        if (!transient) {
+          failedMonths?.delete(key);
+          return [];
+        }
+        if (attempt < 2 && !signal?.aborted) {
+          await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+          continue;
+        }
+        return giveUp();
       }
-      const data = await res.json();
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        if (attempt < 2 && !signal?.aborted) continue;
+        return giveUp();
+      }
       const out: ArchiveGame[] = [];
       for (const g of Array.isArray(data.games) ? data.games : []) {
         const endT = (g.end_time || 0) * 1000;
@@ -573,10 +607,8 @@ function chesscomMonthGames(
           chesscomTournament: typeof g.tournament === "string" ? g.tournament : undefined,
         });
       }
+      failedMonths?.delete(key);
       return out;
-    } catch {
-      cache.delete(key);
-      return [];
     }
   })();
   cache.set(key, p);
@@ -590,10 +622,11 @@ async function chesscomWindowGames(
   startMs: number,
   endMs: number,
   monthCache: Map<string, Promise<ArchiveGame[]>>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  failedMonths?: Set<string>
 ): Promise<ArchiveGame[]> {
   const months = monthsBetween(startMs, endMs);
-  const perMonth = await Promise.all(months.map(({ y, m }) => chesscomMonthGames(username, y, m, monthCache, signal)));
+  const perMonth = await Promise.all(months.map(({ y, m }) => chesscomMonthGames(username, y, m, monthCache, signal, failedMonths)));
   return perMonth
     .flat()
     .filter((g) => g.endMs >= startMs && g.endMs <= endMs)
@@ -950,10 +983,14 @@ export interface SharedCaches {
   games: Map<string, Promise<ArchiveGame[]>>;
   ccMonths: Map<string, Promise<ArchiveGame[]>>;
   google: Map<string, Promise<UsernameCandidate[]>>;
+  /** Chess.com months (`user:y:m`) whose archive fetch LAST failed (shard
+   *  flake) — a window spanning one is a HOLE in the data, not proof the
+   *  player was idle, and must never be cached or judged as "no games". */
+  ccFailedMonths: Set<string>;
 }
 
 export function makeSharedCaches(): SharedCaches {
-  return { verify: new Map(), games: new Map(), ccMonths: new Map(), google: new Map() };
+  return { verify: new Map(), games: new Map(), ccMonths: new Map(), google: new Map(), ccFailedMonths: new Set() };
 }
 
 export interface TraversalOptions {
@@ -1077,15 +1114,28 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   };
 
   const gamesCache = shared.games;
+  /** Does this window span a chess.com month whose archive fetch failed? Then
+   *  an empty/thin result is a HOLE in the data, not proof of inactivity. */
+  const archiveHole = (platform: OnlinePlatform, handle: string, startMs: number, endMs: number): boolean =>
+    platform === "chesscom" &&
+    monthsBetween(startMs, endMs).some(({ y, m }) => shared.ccFailedMonths.has(`${handle.toLowerCase()}:${y}:${m}`));
   const windowGames = (platform: OnlinePlatform, handle: string, startMs: number, endMs: number): Promise<ArchiveGame[]> => {
     const key = `${platform}:${handle.toLowerCase()}:${Math.round(startMs / DAY)}:${Math.round(endMs / DAY)}`;
     const hit = gamesCache.get(key);
     if (hit) return hit;
     const p =
       platform === "chesscom"
-        ? chesscomWindowGames(handle, startMs, endMs, shared.ccMonths, signal)
+        ? chesscomWindowGames(handle, startMs, endMs, shared.ccMonths, signal, shared.ccFailedMonths)
         : lichessWindowGames(handle, startMs, endMs, signal);
     gamesCache.set(key, p);
+    if (platform === "chesscom") {
+      // An aggregate with a flaked month in its span must not be remembered as
+      // gospel — evict it so the next asker refetches (healthy months stay
+      // memoized; only the hole is retried).
+      void p.then(() => {
+        if (archiveHole(platform, handle, startMs, endMs)) gamesCache.delete(key);
+      });
+    }
     return p;
   };
 
@@ -1459,6 +1509,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const hit = seedCache.get(key);
     if (hit) return hit;
     const name = memberName.get(memberId) || "";
+    // Set when this resolution concluded null for TRANSIENT reasons (archive
+    // shard hole, clock ran out) rather than a real verdict — such a null must
+    // not stay cached as "this member has no account here".
+    let transientMiss = false;
     const promise = (async (): Promise<VerifiedProfile | null> => {
       if (!name || memberId === targetId) return null;
       const app = (appearances.get(memberId) || []).find((a) => a.event.eventId === ev.eventId);
@@ -1512,11 +1566,18 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           if (stopNow()) break;
           const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
           if (!games.length) {
-            log(
-              `Google lead @${prof.username} (${name}, ${Math.round(score * 100)}% attributes) played no ${platformLabel(
-                platform
-              )} games during "${ev.name}" — wrong account for this event; trying the next lead.`
-            );
+            if (archiveHole(platform, prof.username, win.startMs, win.endMs)) {
+              transientMiss = true;
+              log(
+                `Google lead @${prof.username} (${name}): chess.com's archive shard failed for the "${ev.name}" window — data hole, not a verdict; will retry later.`
+              );
+            } else {
+              log(
+                `Google lead @${prof.username} (${name}, ${Math.round(score * 100)}% attributes) played no ${platformLabel(
+                  platform
+                )} games during "${ev.name}" — wrong account for this event; trying the next lead.`
+              );
+            }
             continue;
           }
           // Crosstable check: do the in-window games line up with the member's
@@ -1581,7 +1642,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           async (prof, order) => {
             if (stopNow()) return;
             const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
-            if (!games.length) return; // provably not the account that played this event
+            if (!games.length) {
+              // Provably not the account that played this event — UNLESS the
+              // archive shard failed, in which case we know nothing.
+              if (archiveHole(platform, prof.username, win.startMs, win.endMs)) transientMiss = true;
+              return;
+            }
             const { scoped, viaLink, viaTc } = scopeToEvent(games, state, platform, ev);
             const alignment = app ? alignWithRetry(app.rounds, scoped, !!viaLink, platform) : null;
             // "Name match + a same-TC same-date game" must NOT clear the bar
@@ -1651,9 +1717,22 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       if (guessPassers.length && !stopNow()) {
         const best = await judgeSeedCandidates(guessPassers);
         if (best) return best;
-        log(
-          `${name}: ${guessPassers.length} name-matching guessed account(s) exist, but none verifiably played "${ev.name}" — not settling for a namesake.`
-        );
+        // Honesty in the rejection: "none verifiably played" is only a verdict
+        // when the candidates were actually judged against real data. A clock
+        // that ran out or an archive shard that failed is NOT a namesake call —
+        // say so, and (via transientMiss) let a later pass retry this member.
+        if (stopNow()) {
+          transientMiss = true;
+          if (!found) log(`${name}: ran out of time mid-verification of ${guessPassers.length} name-matching account(s) — not a verdict.`);
+        } else if (transientMiss) {
+          log(
+            `${name}: ${guessPassers.length} name-matching account(s) exist but chess.com's archive shards failed while checking them — data hole, not a namesake verdict; will retry.`
+          );
+        } else {
+          log(
+            `${name}: ${guessPassers.length} name-matching guessed account(s) exist, but none verifiably played "${ev.name}" — not settling for a namesake.`
+          );
+        }
       }
       if (platform === "lichess" && !stopNow()) {
         // Lichess offers autocomplete — still only a SEED finder for opponents.
@@ -1691,6 +1770,13 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       return null;
     })();
     seedCache.set(key, promise);
+    void promise.then((r) => {
+      // A transient null (archive shard hole, out of clock, fleet stand-down)
+      // is not this member's verdict — evict it so a later pass, the requeue
+      // path or the opponent pivot gets a REAL attempt instead of the cached
+      // artifact of bad weather.
+      if (!r && (transientMiss || stopNow())) seedCache.delete(key);
+    });
     return promise;
   };
 
@@ -2224,6 +2310,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // them so the member's REAL account can surface on a retry.
   const dudHandles = new Set<string>();
   const dudCount = new Map<string, number>();
+  // Bounded re-trace budget for archive-shard holes (member:platform:event) —
+  // a hard-down shard must not spin the tracer forever.
+  const holeRetries = new Map<string, number>();
 
   const traceFromSource = async (
     ev: GraphEvent,
@@ -2240,6 +2329,25 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     log(`Pulling @${handle}'s (${srcName}) ${platformLabel(platform)} games from the "${ev.name}" date window…`);
     const games = await windowGames(platform, handle, app.startMs, app.endMs);
     if (!games.length) {
+      if (archiveHole(platform, handle, app.startMs, app.endMs)) {
+        // The shard failed — we know NOTHING about this window. Blacklisting
+        // the handle here is how one flaked GET destroys a correct mapping
+        // (and with it the whole pairing chain). Keep the mapping and re-queue
+        // the trace (bounded) so it re-runs if the shard comes back.
+        const hk = `${memberId}:${platform}:${ev.eventId}`;
+        const n = holeRetries.get(hk) || 0;
+        log(
+          `Couldn't fetch @${handle}'s (${srcName}) archive for the "${ev.name}" window — chess.com shard failure, not a namesake verdict; ${
+            n < 2 ? "keeping the mapping and retrying" : "keeping the mapping (retries exhausted here)"
+          }.`
+        );
+        if (n < 2) {
+          holeRetries.set(hk, n + 1);
+          state.visited.delete(`${memberId}:${platform}`);
+          enqueue(state, { memberId, platform, mapping });
+        }
+        return false;
+      }
       log(`@${handle} (${srcName}) played no ${platformLabel(platform)} games in that window — likely a namesake or second account.`);
       // A seed that never played the event is a dud: blacklist the handle,
       // unmap, and — for the target's own opponents, the highest-value
