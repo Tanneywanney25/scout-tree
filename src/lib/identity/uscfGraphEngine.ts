@@ -1515,11 +1515,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     memberId: string,
     platform: OnlinePlatform,
     ev: GraphEvent,
-    state?: EventState
+    state?: EventState,
+    stop?: () => boolean
   ): Promise<VerifiedProfile | null> => {
     const key = `${memberId}:${platform}:${ev.eventId}`;
     const hit = seedCache.get(key);
     if (hit) return hit;
+    // Observe the caller's (event-slice) stop as well as the global one: an
+    // in-flight judgment that ignores its event's deadline is how the main
+    // loop overran its budget and starved the pivot stage.
+    const stopHere = () => stopNow() || !!stop?.();
     const name = memberName.get(memberId) || "";
     // Set when this resolution concluded null for TRANSIENT reasons (archive
     // shard hole, clock ran out) rather than a real verdict — such a null must
@@ -1532,13 +1537,13 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
       // 1. PRIMARY: the Google index — never settle for the first hit.
       const leads = candidatesForPlatform(await googleCandidatesFor(memberId, ev), platform);
-      if (leads.length && !stopNow()) {
+      if (leads.length && !stopHere()) {
         const scored: { cand: UsernameCandidate; prof: VerifiedProfile; score: number }[] = [];
         await pool(
           leads,
           VERIFY_POOL,
           async (cand) => {
-            if (stopNow()) return;
+            if (stopHere()) return;
             if (dudHandles.has(`${platform}:${cand.username.toLowerCase()}`)) return;
             const prof = await verifyOn(platform, cand.username);
             if (!prof || dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) return;
@@ -1555,7 +1560,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             if (!attr) return; // created after the event, or publishes someone else's USCF ID
             scored.push({ cand, prof, score: attr.score });
           },
-          () => stopNow()
+          () => stopHere()
         );
         scored.sort((a, b) => b.score - a.score);
         if (scored.length) {
@@ -1575,7 +1580,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         let fallback: VerifiedProfile | null = null;
         const evTc = parseEventTc(ev.timeControl);
         for (const { prof, score } of shortlist) {
-          if (stopNow()) break;
+          if (stopHere()) break;
           const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
           if (!games.length) {
             if (archiveHole(platform, prof.username, win.startMs, win.endMs)) {
@@ -1652,7 +1657,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           profs,
           4,
           async (prof, order) => {
-            if (stopNow()) return;
+            if (stopHere()) return;
             const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
             if (!games.length) {
               // Provably not the account that played this event — UNLESS the
@@ -1693,7 +1698,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             }
             judged.push({ prof, aligned: !!alignment, tcOk, order });
           },
-          () => stopNow()
+          () => stopHere()
         );
         // Aligned beats TC-fitting beats mere in-window; original order last —
         // deterministic, same winner as a serial best-first scan.
@@ -1711,10 +1716,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         guesses,
         VERIFY_POOL,
         async (h) => {
-          if (stopNow()) return;
+          if (stopHere()) return;
           guessProfs.set(h, await verifyOn(platform, h));
         },
-        () => stopNow()
+        () => stopHere()
       );
       const seenGuess = new Set<string>();
       const guessPassers: VerifiedProfile[] = [];
@@ -1726,14 +1731,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         seenGuess.add(k);
         guessPassers.push(prof);
       }
-      if (guessPassers.length && !stopNow()) {
+      if (guessPassers.length && !stopHere()) {
         const best = await judgeSeedCandidates(guessPassers);
         if (best) return best;
         // Honesty in the rejection: "none verifiably played" is only a verdict
         // when the candidates were actually judged against real data. A clock
         // that ran out or an archive shard that failed is NOT a namesake call —
         // say so, and (via transientMiss) let a later pass retry this member.
-        if (stopNow()) {
+        if (stopHere()) {
           transientMiss = true;
           if (!found) log(`${name}: ran out of time mid-verification of ${guessPassers.length} name-matching account(s) — not a verdict.`);
         } else if (transientMiss) {
@@ -1746,7 +1751,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           );
         }
       }
-      if (platform === "lichess" && !stopNow()) {
+      if (platform === "lichess" && !stopHere()) {
         // Lichess offers autocomplete — still only a SEED finder for opponents.
         const t = name.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
         const terms = new Set<string>();
@@ -1754,17 +1759,17 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         const last = t[t.length - 1];
         if (last && last.length >= 4) terms.add(last);
         for (const term of terms) {
-          if (stopNow()) return null;
+          if (stopHere()) return null;
           const handles = (await lichessAutocomplete(term, signal)).slice(0, 5).filter((h) => !dudHandles.has(`lichess:${h.toLowerCase()}`));
           const acProfs = new Map<string, VerifiedProfile | null>();
           await pool(
             handles,
             4,
             async (h) => {
-              if (stopNow()) return;
+              if (stopHere()) return;
               acProfs.set(h, await verifyOn("lichess", h));
             },
-            () => stopNow()
+            () => stopHere()
           );
           const acPassers: VerifiedProfile[] = [];
           for (const h of handles) {
@@ -1787,7 +1792,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       // is not this member's verdict — evict it so a later pass, the requeue
       // path or the opponent pivot gets a REAL attempt instead of the cached
       // artifact of bad weather.
-      if (!r && (transientMiss || stopNow())) seedCache.delete(key);
+      if (!r && (transientMiss || stopHere())) seedCache.delete(key);
     });
     return promise;
   };
@@ -3004,7 +3009,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
                 for (const platform of order) {
                   if (stopEv()) return;
                   if (mapped.get(memberId)?.has(platform)) continue;
-                  const prof = await resolveMemberOn(memberId, platform, ev, state);
+                  const prof = await resolveMemberOn(memberId, platform, ev, state, stopEv);
                   if (prof) {
                     setMapping(memberId, platform, { profile: prof, how: "seed", chain: [] });
                     enqueue(state, { memberId, platform, mapping: mapped.get(memberId)!.get(platform)! });
