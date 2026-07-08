@@ -3176,7 +3176,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         targetRating: memberRating.get(oppId),
         signal,
         log,
-        budgetMs: Math.min(300_000, Math.max(60_000, deadline - Date.now() - 15_000)),
+        // Finding the username outranks the clock: a dive that has to chain
+        // through the opponent's own opponents (no guessable seed anywhere)
+        // regularly needs more than 5 minutes — observed live: a dive that
+        // would have revealed the target's section was stood down at the old
+        // 300s cap mid-chain.
+        budgetMs: Math.min(600_000, Math.max(60_000, deadline - Date.now() - 15_000)),
         // Google-index + flyer search stay available; no further expansion.
         hooks: { discoverPlatform: hooks.discoverPlatform, findUsernames: hooks.findUsernames },
         depth: 1,
