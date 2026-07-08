@@ -516,26 +516,36 @@ function chesscomOutcome(myResult?: string, oppResult?: string): Outcome | undef
  *  while the same account's profile and other months answered 200. To the
  *  judgment awaiting this month, "no games" and "the shard hiccuped" are the
  *  difference between rejecting the player's REAL account as a namesake and
- *  mapping it — one flaked GET zeroed an entire live search. So a transient
- *  failure is retried IN PLACE (politeFetch already handles 429s; this covers
- *  the 404/5xx flake), and a month that still fails is recorded in
- *  `failedMonths` and evicted from the cache so later windows retry it and
- *  callers can tell "hole in the data" from "provably played nothing". */
+ *  mapping it — one flaked GET zeroed an entire live search. So:
+ *    • the 404-flake is retried IN PLACE (politeFetch already retries 429s
+ *      and network errors — those are NOT re-retried here);
+ *    • a month that still fails is recorded in `failedMonths` (keyed with the
+ *      failure time) and evicted from the cache, so callers can tell "hole in
+ *      the data" from "provably played nothing";
+ *    • a month that failed moments ago FAST-FAILS for MONTH_FAIL_COOLDOWN_MS
+ *      instead of re-fetching — a hard-down shard must not be re-hammered
+ *      with full backoff by every judgment that touches its window. */
+const MONTH_FAIL_COOLDOWN_MS = 45_000;
+
 function chesscomMonthGames(
   username: string,
   y: number,
   m: number,
   cache: Map<string, Promise<ArchiveGame[]>>,
   signal?: AbortSignal,
-  failedMonths?: Set<string>
+  failedMonths?: Map<string, number>
 ): Promise<ArchiveGame[]> {
   const uLower = username.toLowerCase();
   const key = `${uLower}:${y}:${m}`;
   const hit = cache.get(key);
   if (hit) return hit;
+  const failedAt = failedMonths?.get(key);
+  if (failedAt !== undefined && Date.now() - failedAt < MONTH_FAIL_COOLDOWN_MS) {
+    return Promise.resolve([]); // still cooling down — the hole stays marked, nothing is cached
+  }
   const giveUp = (): ArchiveGame[] => {
     cache.delete(key);
-    failedMonths?.add(key);
+    failedMonths?.set(key, Date.now());
     return [];
   };
   const p = (async (): Promise<ArchiveGame[]> => {
@@ -549,11 +559,7 @@ function chesscomMonthGames(
           20_000
         );
       } catch {
-        if (attempt < 2 && !signal?.aborted) {
-          await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
-          continue;
-        }
-        return giveUp();
+        return giveUp(); // politeFetch already retried network errors
       }
       if (!res.ok) {
         // A real 404 (month truly absent) caches as empty; a 404 whose body
@@ -581,8 +587,7 @@ function chesscomMonthGames(
       try {
         data = await res.json();
       } catch {
-        if (attempt < 2 && !signal?.aborted) continue;
-        return giveUp();
+        return giveUp(); // corrupt body — treat as the same transient hole
       }
       const out: ArchiveGame[] = [];
       for (const g of Array.isArray(data.games) ? data.games : []) {
@@ -623,7 +628,7 @@ async function chesscomWindowGames(
   endMs: number,
   monthCache: Map<string, Promise<ArchiveGame[]>>,
   signal?: AbortSignal,
-  failedMonths?: Set<string>
+  failedMonths?: Map<string, number>
 ): Promise<ArchiveGame[]> {
   const months = monthsBetween(startMs, endMs);
   const perMonth = await Promise.all(months.map(({ y, m }) => chesscomMonthGames(username, y, m, monthCache, signal, failedMonths)));
@@ -633,10 +638,22 @@ async function chesscomWindowGames(
     .sort((a, b) => a.endMs - b.endMs);
 }
 
-/** Lichess: pull games in the [since, until] window as NDJSON. */
-async function lichessWindowGames(username: string, startMs: number, endMs: number, signal?: AbortSignal): Promise<ArchiveGame[]> {
+/** Lichess: pull games in the [since, until] window as NDJSON. A failed fetch
+ *  is recorded in `failedWindows` (same reasoning as chess.com's failedMonths:
+ *  "the export failed" must never read as "played nothing"). */
+async function lichessWindowGames(
+  username: string,
+  startMs: number,
+  endMs: number,
+  signal?: AbortSignal,
+  failedWindows?: Set<string>,
+  windowKey?: string
+): Promise<ArchiveGame[]> {
   const uLower = username.toLowerCase();
   const out: ArchiveGame[] = [];
+  const markFailed = () => {
+    if (failedWindows && windowKey) failedWindows.add(windowKey);
+  };
   try {
     const url = `https://lichess.org/api/games/user/${encodeURIComponent(username)}?since=${Math.floor(startMs)}&until=${Math.ceil(
       endMs
@@ -645,8 +662,12 @@ async function lichessWindowGames(username: string, startMs: number, endMs: numb
     // means "slow down", never "no games"; losing games here silently breaks
     // the traversal.
     const res = await politeFetch(url, { headers: { Accept: "application/x-ndjson" }, signal }, "lichess", 20_000);
-    if (!res.ok) return out;
+    if (!res.ok) {
+      markFailed();
+      return out;
+    }
     const text = await res.text();
+    if (failedWindows && windowKey) failedWindows.delete(windowKey);
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
       let g: ReturnType<typeof JSON.parse>;
@@ -682,7 +703,7 @@ async function lichessWindowGames(username: string, startMs: number, endMs: numb
       });
     }
   } catch {
-    /* rate-limited or blocked — degrade */
+    markFailed(); // rate-limited or blocked — a hole, not an idle window
   }
   return out.sort((a, b) => a.endMs - b.endMs);
 }
@@ -984,13 +1005,24 @@ export interface SharedCaches {
   ccMonths: Map<string, Promise<ArchiveGame[]>>;
   google: Map<string, Promise<UsernameCandidate[]>>;
   /** Chess.com months (`user:y:m`) whose archive fetch LAST failed (shard
-   *  flake) — a window spanning one is a HOLE in the data, not proof the
-   *  player was idle, and must never be cached or judged as "no games". */
-  ccFailedMonths: Set<string>;
+   *  flake), keyed to the failure time — a window spanning one is a HOLE in
+   *  the data, not proof the player was idle, and must never be cached or
+   *  judged as "no games". Recent failures fast-fail instead of refetching. */
+  ccFailedMonths: Map<string, number>;
+  /** Lichess windows (`user:startDay:endDay`) whose game export failed —
+   *  the same hole semantics as ccFailedMonths. */
+  lichessFailedWindows: Set<string>;
 }
 
 export function makeSharedCaches(): SharedCaches {
-  return { verify: new Map(), games: new Map(), ccMonths: new Map(), google: new Map(), ccFailedMonths: new Set() };
+  return {
+    verify: new Map(),
+    games: new Map(),
+    ccMonths: new Map(),
+    google: new Map(),
+    ccFailedMonths: new Map(),
+    lichessFailedWindows: new Set(),
+  };
 }
 
 export interface TraversalOptions {
@@ -1063,7 +1095,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // and the reserved tail belongs to the pivot (a main-loop find just ends
   // the search early — the reserve costs nothing on success).
   const pivotPossible = depth === 0 && !!hooks.expandMember;
-  const pivotReserveMs = pivotPossible ? Math.min(150_000, Math.round(totalBudgetMs * 0.4)) : 0;
+  // A reserve below ~45s can't clear the pivot's own entry gate (>35s) — on a
+  // tiny budget it would shorten the main loop while funding NOTHING, so the
+  // reserve only exists when it is big enough to actually run the stage.
+  const rawReserve = pivotPossible ? Math.min(150_000, Math.round(totalBudgetMs * 0.4)) : 0;
+  const pivotReserveMs = rawReserve >= 45_000 ? rawReserve : 0;
   const mainDeadline = deadline - pivotReserveMs;
   const outOfTime = (localDeadline?: number) =>
     Date.now() > (localDeadline ?? deadline) || !!signal?.aborted || !!opts.stopWhen?.();
@@ -1126,28 +1162,31 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   };
 
   const gamesCache = shared.games;
-  /** Does this window span a chess.com month whose archive fetch failed? Then
-   *  an empty/thin result is a HOLE in the data, not proof of inactivity. */
+  const windowKeyOf = (handle: string, startMs: number, endMs: number) =>
+    `${handle.toLowerCase()}:${Math.round(startMs / DAY)}:${Math.round(endMs / DAY)}`;
+  /** Does this window span archive data whose fetch FAILED (chess.com month
+   *  shard flake / lichess export failure)? Then an empty — or PARTIAL —
+   *  result is a HOLE in the data, not proof of inactivity, and no judgment
+   *  may treat it as a rejection verdict. */
   const archiveHole = (platform: OnlinePlatform, handle: string, startMs: number, endMs: number): boolean =>
-    platform === "chesscom" &&
-    monthsBetween(startMs, endMs).some(({ y, m }) => shared.ccFailedMonths.has(`${handle.toLowerCase()}:${y}:${m}`));
+    platform === "chesscom"
+      ? monthsBetween(startMs, endMs).some(({ y, m }) => shared.ccFailedMonths.has(`${handle.toLowerCase()}:${y}:${m}`))
+      : shared.lichessFailedWindows.has(windowKeyOf(handle, startMs, endMs));
   const windowGames = (platform: OnlinePlatform, handle: string, startMs: number, endMs: number): Promise<ArchiveGame[]> => {
-    const key = `${platform}:${handle.toLowerCase()}:${Math.round(startMs / DAY)}:${Math.round(endMs / DAY)}`;
+    const key = `${platform}:${windowKeyOf(handle, startMs, endMs)}`;
     const hit = gamesCache.get(key);
     if (hit) return hit;
     const p =
       platform === "chesscom"
         ? chesscomWindowGames(handle, startMs, endMs, shared.ccMonths, signal, shared.ccFailedMonths)
-        : lichessWindowGames(handle, startMs, endMs, signal);
+        : lichessWindowGames(handle, startMs, endMs, signal, shared.lichessFailedWindows, windowKeyOf(handle, startMs, endMs));
     gamesCache.set(key, p);
-    if (platform === "chesscom") {
-      // An aggregate with a flaked month in its span must not be remembered as
-      // gospel — evict it so the next asker refetches (healthy months stay
-      // memoized; only the hole is retried).
-      void p.then(() => {
-        if (archiveHole(platform, handle, startMs, endMs)) gamesCache.delete(key);
-      });
-    }
+    // An aggregate with a failed month/export in its span must not be
+    // remembered as gospel — evict it so the next asker refetches (healthy
+    // chess.com months stay memoized; only the hole is retried).
+    void p.then(() => {
+      if (archiveHole(platform, handle, startMs, endMs)) gamesCache.delete(key);
+    });
     return p;
   };
 
@@ -1613,6 +1652,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           // are the signature of the wrong account (a same-name player who was
           // merely online that day) — only structural alignment may overrule.
           if (evTc && !viaTc && !viaLink) {
+            if (archiveHole(platform, prof.username, win.startMs, win.endMs)) {
+              // The failed month may hold exactly the event-TC games — a hole,
+              // not a wrong-account verdict.
+              transientMiss = true;
+              continue;
+            }
             log(
               `Google lead @${prof.username} (${name}) has ${games.length} in-window game(s) but none at the event's ${evTc.label} control — likely the wrong account; trying the next lead.`
             );
@@ -1659,10 +1704,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           async (prof, order) => {
             if (stopHere()) return;
             const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
+            // A window spanning a failed month/export is a HOLE: even a
+            // NON-EMPTY result can be missing exactly the event games, so a
+            // hole may never feed a REJECTION verdict — positive evidence
+            // (an alignment on the partial data) still counts.
+            const hole = archiveHole(platform, prof.username, win.startMs, win.endMs);
             if (!games.length) {
               // Provably not the account that played this event — UNLESS the
-              // archive shard failed, in which case we know nothing.
-              if (archiveHole(platform, prof.username, win.startMs, win.endMs)) transientMiss = true;
+              // archive fetch failed, in which case we know nothing.
+              if (hole) transientMiss = true;
               return;
             }
             const { scoped, viaLink, viaTc } = scopeToEvent(games, state, platform, ev);
@@ -1675,6 +1725,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             const otherState = st && prof.location && !locationMatchesState(prof.location, st) ? strictStateOf(prof.location) : null;
             const contradicted = isForeignCountry(prof.country) || (!!otherState && otherState !== st!.trim().toUpperCase());
             if (contradicted && !alignment && digits(prof.uscfId) !== memberId) {
+              if (hole) {
+                transientMiss = true;
+                return; // can't judge a contradicted candidate over partial data
+              }
               const clubs = await fetchClubs(platform, prof.username, signal);
               if (!clubs.some((c) => clubEventTie(c, ev.name, [st, graph.rootState]))) {
                 log(
@@ -1691,6 +1745,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             // same rule as the Google-lead path (observed: a namesake with
             // same-class games in the window mapping a section player).
             if (!tcOk && !alignment) {
+              if (hole) {
+                transientMiss = true;
+                return; // the missing month may hold exactly the event-TC games
+              }
               log(
                 `Name-guess @${prof.username} (${name}) has ${games.length} in-window game(s) but none at the event's ${evTc!.label} control — likely the wrong account; skipping.`
               );
