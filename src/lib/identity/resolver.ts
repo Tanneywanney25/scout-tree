@@ -360,18 +360,19 @@ export async function resolveIdentity(
       graphAvailable = true;
       emit("Tracing the player's USCF online events to uncover their real usernames…", "running", "uscf-graph");
 
-      // The traversal must NEVER leave the search hanging on one step. Three
-      // layers guarantee it always concludes and the search moves on to the
-      // fallbacks + final results:
-      //   1. an explicit time budget (the engine's own default is effectively
-      //      unbounded — fine for the CLI, not for a user staring at a spinner);
-      //   2. a stall watchdog — if the engine emits NO log line for a while
+      // FINDING THE USERNAME MATTERS MORE THAN WALL-CLOCK. The traversal runs
+      // until it is genuinely exhausted — the engine ends itself once every
+      // avenue (events, retries, the opponent pivot) is spent. A tight budget
+      // is how the pivot stage got starved into ranking-then-quitting, and how
+      // seed judgments got clock-poisoned into fake namesake verdicts. The
+      // guards that remain protect against WEDGING, not slowness:
+      //   1. a stall watchdog — if the engine emits NO log line for a while
       //      (a wedged step, a silent retry loop), it is stood down gracefully
       //      via stopWhen, keeping any accounts it already traced;
-      //   3. a hard race as the last-ditch backstop, in case the engine somehow
-      //      never returns at all.
-      const TRAVERSAL_BUDGET_MS = 240_000; // 4 min of thorough tracing, max
-      const TRAVERSAL_STALL_MS = 60_000; // no log line for 60s = wedged
+      //   2. a very generous hard ceiling + race as the last-ditch backstop,
+      //      in case the engine somehow never returns at all.
+      const TRAVERSAL_BUDGET_MS = 60 * 60_000; // hard ceiling — effectively unbounded
+      const TRAVERSAL_STALL_MS = 90_000; // no log line for 90s = wedged
       let lastLogAt = Date.now();
       let abandoned = false;
       let stallAnnounced = false;

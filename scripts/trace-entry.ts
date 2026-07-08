@@ -8,8 +8,9 @@
 //   node scripts/trace-username.mjs --name "First Last" [--state XX]
 //   node scripts/trace-username.mjs --id 12345678 [--budget 300] [--list]
 //
-// `--budget 0` removes the time limit entirely (run until exhausted, like the
-// app). With GEMINI_API_KEY / ANTHROPIC_API_KEY (and optionally GOOGLE_CSE_KEY
+// The DEFAULT is no time limit (run until exhausted, like the app — finding
+// the username matters more than speed); pass --budget <seconds> to cap a
+// run. With GEMINI_API_KEY / ANTHROPIC_API_KEY (and optionally GOOGLE_CSE_KEY
 // + GOOGLE_CSE_ID) in the environment, the Google-index username discovery and
 // flyer search hooks run exactly as they do in production.
 // ============================================================================
@@ -42,13 +43,13 @@ interface Args {
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { budget: 300, list: false, seeds: [] };
+  const args: Args = { budget: 0, list: false, seeds: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--id") args.id = argv[++i];
     else if (a === "--name") args.name = argv[++i];
     else if (a === "--state") args.state = argv[++i];
-    else if (a === "--budget") args.budget = Number(argv[++i] ?? "300");
+    else if (a === "--budget") args.budget = Number(argv[++i] ?? "0");
     else if (a === "--list") args.list = true;
     else if (a === "--seed") {
       const [memberId, username, platform] = String(argv[++i] ?? "").split(":");
