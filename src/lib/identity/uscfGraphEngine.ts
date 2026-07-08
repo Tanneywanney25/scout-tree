@@ -1052,7 +1052,19 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   const { targetName, signal, log, hooks = {} } = opts;
   const depth = opts.depth ?? 0;
   const shared = opts.shared ?? makeSharedCaches();
-  const deadline = Date.now() + (opts.budgetMs ?? DEFAULT_BUDGET_MS);
+  const totalBudgetMs = opts.budgetMs ?? DEFAULT_BUDGET_MS;
+  const deadline = Date.now() + totalBudgetMs;
+  // The opponent-pivot fallback is the LAST discovery stage before callers
+  // drop to name-search namesakes — it must never be starved by the main
+  // event loop. Observed live: the main loop ate the whole budget, the pivot
+  // RANKED 39 opponents and then deepStop was already true — zero dives ran,
+  // "Exhausted every online event" logged the same second as the ranking.
+  // So when the pivot is possible, the main loop is capped at mainDeadline
+  // and the reserved tail belongs to the pivot (a main-loop find just ends
+  // the search early — the reserve costs nothing on success).
+  const pivotPossible = depth === 0 && !!hooks.expandMember;
+  const pivotReserveMs = pivotPossible ? Math.min(150_000, Math.round(totalBudgetMs * 0.4)) : 0;
+  const mainDeadline = deadline - pivotReserveMs;
   const outOfTime = (localDeadline?: number) =>
     Date.now() > (localDeadline ?? deadline) || !!signal?.aborted || !!opts.stopWhen?.();
 
@@ -3103,11 +3115,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
   }
 
-  for (let pass = 0; pass < 4 && !found && !outOfTime(); pass++) {
+  for (let pass = 0; pass < 4 && !found && !outOfTime(mainDeadline); pass++) {
     const pending = events.filter((e) => !workStates.get(e.eventId)?.exhausted);
     if (!pending.length) break;
     if (pass > 0) {
-      const secsLeft = Math.round((deadline - Date.now()) / 1000);
+      const secsLeft = Math.round((mainDeadline - Date.now()) / 1000);
       log(
         `${pending.length} event(s) still have open leads — going back in${secsLeft < 3600 ? ` (${secsLeft}s left on the clock)` : ""}.`
       );
@@ -3115,15 +3127,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     prefetchDiscover(pending, 0, EVENT_AGENTS + DISCOVER_LOOKAHEAD);
     let nextIdx = 0;
     const eventAgent = async () => {
-      while (!found && !outOfTime()) {
+      while (!found && !outOfTime(mainDeadline)) {
         const i = nextIdx++;
         if (i >= pending.length) return;
         prefetchDiscover(pending, i + EVENT_AGENTS, DISCOVER_LOOKAHEAD);
-        const remaining = deadline - Date.now();
+        const remaining = mainDeadline - Date.now();
         const batchesLeft = Math.max(1, Math.ceil((pending.length - i) / EVENT_AGENTS));
         const slice = Math.max(EVENT_MIN_MS, Math.floor(remaining / batchesLeft));
-        if (await workEvent(pending[i], Math.min(deadline, Date.now() + slice))) found = true;
-        else if (!found && !outOfTime() && pass === 0) log(`"${pending[i].name}" didn't give up the username yet — moving on for now.`);
+        if (await workEvent(pending[i], Math.min(mainDeadline, Date.now() + slice))) found = true;
+        else if (!found && !outOfTime(mainDeadline) && pass === 0) log(`"${pending[i].name}" didn't give up the username yet — moving on for now.`);
       }
     };
     await Promise.all(Array.from({ length: Math.min(EVENT_AGENTS, pending.length) }, eventAgent));
@@ -3141,9 +3153,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // target directly); other section players second (their chains still reach
   // the target through the pairing frontier).
   // ---------------------------------------------------------------------------
+  if (!found && depth === 0 && hooks.expandMember && deadline - Date.now() <= 35_000) {
+    log(
+      `No time left for the opponent-pivot stage (${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s remaining) — a bigger budget would let it run.`
+    );
+  }
   if (!found && depth === 0 && hooks.expandMember && deadline - Date.now() > 35_000) {
     const deepStop = () => found || outOfTime() || deadline - Date.now() < 25_000;
-    const RANK_WINDOW = 12; // graphs fetched per ranking window (MUIR-paced)
+    const RANK_WINDOW = 8; // graphs fetched per ranking window (MUIR-paced) — small enough that the first dives start fast
 
     /** Resolve one pivot candidate's own username, then trace shared events. */
     const divePivot = async (oppId: string, sub: TournamentGraph, ownEvents: number): Promise<void> => {
@@ -3202,7 +3219,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           DEEP_AGENTS,
           async (id) => {
             if (deepStop()) return;
-            graphs.set(id, await hooks.expandMember!(id).catch(() => null));
+            const g = await hooks.expandMember!(id).catch(() => null);
+            graphs.set(id, g);
+            // Narrate each fetch: the ranking window can take a while (MUIR
+            // paced) and a silent stretch reads as a wedged engine upstream.
+            log(
+              `Pivot: ${memberName.get(id) || id} has ${g?.onlineEvents.length || 0} online event(s) of their own${
+                g?.onlineEvents.length ? "" : " — not a useful pivot"
+              }.`
+            );
           },
           deepStop
         );
