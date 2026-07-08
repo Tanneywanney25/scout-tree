@@ -1,7 +1,7 @@
 import Header from "@/components/Header";
 import Hero from "@/components/Hero";
 import PlatformLogos from "@/components/PlatformLogos";
-import PricingSection from "@/components/PricingSection";
+// import PricingSection from "@/components/PricingSection";
 
 const Landing = () => {
   return (
@@ -10,7 +10,7 @@ const Landing = () => {
       <main className="flex-1">
         <Hero />
         <PlatformLogos />
-        <PricingSection />
+        {/* <PricingSection /> */}
       </main>
       <footer className="border-t border-border py-8">
         <div className="container mx-auto px-4 text-center text-sm text-muted-foreground">

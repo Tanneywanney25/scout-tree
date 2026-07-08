@@ -48,9 +48,9 @@ const Header = () => {
               </Link>
             </>
           )}
-          <Link to="/pricing" className="text-sm font-medium text-muted-foreground hover:text-foreground">
+          {/* <Link to="/pricing" className="text-sm font-medium text-muted-foreground hover:text-foreground">
             Pricing
-          </Link>
+          </Link> */}
         </nav>
         
         <div className="flex items-center gap-3">
