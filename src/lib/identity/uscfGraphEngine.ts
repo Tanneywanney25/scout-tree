@@ -1876,6 +1876,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     /** How many DIFFERENT direct opponents' games independently named this handle
      *  as their round-vs-target opponent (cross-corroborated single-edge reveal). */
     crossVotes?: number;
+    /** A ≥2-opponent structural consensus (or a FIDE-id match) proved this handle
+     *  IS the target — strong enough to RECLAIM it from an earlier mis-mapping to a
+     *  section player and clear its contested mark. Only set by tryCrownTarget; the
+     *  identity gates (FIDE/USCF id) still apply. */
+    override?: boolean;
   }
 
   const foundKeys = new Set<string>();
@@ -1892,6 +1897,27 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (digits(profile.uscfId) && digits(profile.uscfId) !== targetId) {
       log(`Rejected @${profile.username}: profile publishes USCF ID ${profile.uscfId}, but ${targetName} is #${targetId}.`);
       return false;
+    }
+    // A ≥2 independent-opponent consensus (or a FIDE-id match) has proven this
+    // handle IS the target. That structural agreement is far stronger than a
+    // single earlier mis-mapping of the handle to a section player, so reclaim
+    // it: un-map it from the wrong member(s) and clear the contested mark. This
+    // is what lets the PRIMARY target survive a run that has already (wrongly)
+    // filed its handle as an opponent — the exact asymmetry that let pivot
+    // sub-traversals (which start with a clean registry) resolve while the main
+    // target never did. The FIDE/USCF-id identity gates above still apply.
+    if (via.override) {
+      const ckey = claimKey(platform, profile.username);
+      const wrongOwners = [...(handleClaims.get(ckey) || [])].filter((id) => id !== targetId);
+      for (const mid of wrongOwners) {
+        unsetMapping(mid, platform);
+        log(
+          `Reclaimed @${profile.username} from ${memberName.get(mid) || mid}: ${
+            via.crossVotes ? `${via.crossVotes} independent opponents` : "a FIDE-id match"
+          } prove it is ${targetName}, not a section player — that earlier mapping was a mis-alignment.`
+        );
+      }
+      contestedHandles.delete(ckey);
     }
     // One handle = one person. An account already mapped to a DIFFERENT
     // crosstable player (or claimed by several — a hyperactive casual account
@@ -2202,6 +2228,94 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     return true;
   };
 
+  // Cross-corroboration ledger for the TARGET's handle, SEARCH-WIDE (not per
+  // event): lowercased handle → the set of DIFFERENT direct opponents whose
+  // round-vs-target board named it. The target's ~dozens of direct opponents are
+  // spread across every event; a per-event ledger threw each event's one-or-two
+  // votes away and never reached the corroboration bar, so the primary target
+  // was never crowned even as pivot sub-traversals (whose opponents concentrate
+  // in one sub-graph) resolved fine. One shared ledger lets every chain, in any
+  // event or pivot dive, add to the SAME consensus.
+  const targetEdgeVotes = new Map<string, { voters: Set<string>; game: ArchiveGame; viaName: string; viaHandle: string; round: number }>();
+
+  /** A direct opponent of the target has identified — from a fully-aligned board
+   *  or an outcome-anchored unique game — the handle it faced the target under.
+   *  Register the vote in the search-wide ledger and decide:
+   *    • a FULLY-aligned board on a handle nothing contradicts is proof on its
+   *      own (the fast, clean single-source crown);
+   *    • otherwise the corroboration bar — ≥2 independent direct opponents naming
+   *      the SAME handle, or a FIDE-id match — clinches it, and is strong enough
+   *      to OVERRIDE an earlier mis-mapping of that handle to a section player.
+   *  ALWAYS logs the handle it read and why it crowned / held / rejected, so the
+   *  "reading the other side of each board" step is never silent again. */
+  const tryCrownTarget = async (
+    platform: OnlinePlatform,
+    ev: GraphEvent,
+    v: {
+      voterId: string;
+      viaName: string;
+      viaHandle: string;
+      chain: string[];
+      round: number;
+      game: ArchiveGame;
+      oppHandle: string;
+      fullyAligned: boolean;
+      viaLink?: EventLink;
+      checkedRounds?: number;
+      totalRounds?: number;
+    }
+  ): Promise<boolean> => {
+    const key = v.oppHandle.toLowerCase();
+    const entry =
+      targetEdgeVotes.get(key) ||
+      { voters: new Set<string>(), game: v.game, viaName: v.viaName, viaHandle: v.viaHandle, round: v.round };
+    entry.voters.add(v.voterId);
+    targetEdgeVotes.set(key, entry);
+    const votes = entry.voters.size;
+    const prefix = `The other side of ${v.viaName}'s round-${v.round} board vs ${targetName} is @${v.oppHandle}`;
+
+    const prof = await verifyOn(platform, v.oppHandle);
+    if (!prof) {
+      log(`${prefix} — but its ${platformLabel(platform)} profile wouldn't load; leaving the vote to be re-tried from another chain.`);
+      return false;
+    }
+    const fideOk = !!(prof.fideId && targetFideId && digits(prof.fideId) === targetFideId);
+    const disq = handleDisqualified(platform, v.oppHandle);
+    const cleanSolo = v.fullyAligned && !disq;
+    const consensus = votes >= 2 || fideOk;
+
+    if (cleanSolo || consensus) {
+      const override = !cleanSolo && disq; // reclaim only a genuinely-blocked handle
+      log(
+        `${prefix} — ${
+          fideOk
+            ? `its FIDE ID ${prof.fideId} matches ${targetName}'s`
+            : votes >= 2
+            ? `${votes} independent opponents now name it`
+            : "a fully-aligned board names it"
+        }${override ? " (overriding an earlier mis-mapping of it to a section player)" : ""}. Crowning ${targetName}.`
+      );
+      return recordTarget(platform, prof, {
+        method: "pairing",
+        event: ev,
+        link: v.viaLink && gameInLink(v.game, v.viaLink) ? v.viaLink : undefined,
+        chain: v.chain,
+        viaName: v.viaName,
+        viaHandle: v.viaHandle,
+        round: v.round,
+        checkedRounds: v.checkedRounds,
+        totalRounds: v.totalRounds,
+        game: v.game,
+        crossVotes: votes >= 2 ? votes : undefined,
+        override,
+      });
+    }
+    log(
+      `${prefix}${disq ? " (currently filed as another section player — likely that mapping, not this board, is the mis-alignment)" : ""} — ${votes}/2 independent opponents so far; holding for one more to corroborate before crowning.`
+    );
+    return false;
+  };
+
   // ---------------------------------------------------------------------------
   // Roster shortcut: match a platform tournament's participants to a crosstable.
   // ---------------------------------------------------------------------------
@@ -2364,11 +2478,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
      *  a handle seen from several section players is almost surely a section
      *  player itself, so it gets verified first. */
     oppSeen: Map<string, number>;
-    /** Cross-corroboration ledger for the TARGET's handle: lowercased handle →
-     *  the set of DIFFERENT direct opponents whose round-vs-target game named it,
-     *  plus a representative game. Two independent voters (or a FIDE match)
-     *  clinches the target even when no single opponent fully aligned. */
-    targetEdgeVotes?: Map<string, { voters: Set<string>; game: ArchiveGame; viaName: string; viaHandle: string; round: number }>;
+    // NOTE: the TARGET-handle cross-corroboration ledger used to live here, per
+    // event. It is now the SEARCH-WIDE `targetEdgeVotes` (declared beside
+    // recordTarget) so votes from direct opponents scattered across every event
+    // accumulate toward one consensus instead of being thrown away per event.
     /** Seed queue (present on real event states; duds get requeued here). */
     seedOrder?: string[];
   }
@@ -2514,27 +2627,31 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         async ({ round, game }) => {
           if (pairingHit || stopNow(localDeadline)) return;
           const oppId = round.opponentUscfId;
-          const prof = await verifyOn(platform, game.oppHandle);
-          if (!prof) return;
           if (oppId === targetId) {
+            // The target's own board. A fully-aligned board crowns on its own
+            // when the handle is clean; a partial board casts a vote toward the
+            // search-wide ≥2 consensus (which can also reclaim a mis-mapped
+            // handle). Either way the handle we read and the verdict are logged.
             if (
-              targetReadable &&
-              (await recordTarget(platform, prof, {
-                method: "pairing",
-                event: ev,
-                link: viaLink,
-                chain: mapping.chain.concat(srcName),
+              await tryCrownTarget(platform, ev, {
+                voterId: memberId,
                 viaName: srcName,
                 viaHandle: handle,
+                chain: mapping.chain.concat(srcName),
                 round: round.round,
+                game,
+                oppHandle: game.oppHandle,
+                fullyAligned: targetReadable,
+                viaLink,
                 checkedRounds: alignment.checked,
                 totalRounds: app.rounds.length,
-                game,
-              }))
+              })
             )
               pairingHit = true;
             return;
           }
+          const prof = await verifyOn(platform, game.oppHandle);
+          if (!prof) return;
           if (!mapped.get(oppId)?.has(platform)) {
             // A board from a PARTIAL alignment may only name a player when the
             // account doesn't contradict the USCF record (or a corroborator
@@ -2573,12 +2690,18 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (!found && !stopNow(localDeadline)) {
       const tr = app.rounds.find((r) => r.opponentUscfId === targetId);
       if (tr) {
-        // Handles this source's OTHER rounds already account for (aligned boards
-        // + any already-mapped section-mate on this platform) can't be the target.
+        // Handles this source's OTHER crosstable rounds already account for can't
+        // be the target: its aligned boards, plus the handles of the section-mates
+        // it actually played this event. A handle mapped to some UNRELATED member
+        // is deliberately NOT excluded — that mapping may itself be the mis-align
+        // that filed the target's real handle as an opponent, and the cross-
+        // opponent consensus (below) is what reclaims it. (Blanket-excluding every
+        // mapped handle is precisely what silenced the primary-target reveal.)
         const claimed = new Set<string>();
         if (alignment) for (const p of alignment.pairs) claimed.add(p.game.oppHandle.toLowerCase());
-        for (const per of mapped.values()) {
-          const h = per.get(platform)?.profile.username;
+        for (const r of app.rounds) {
+          if (r.opponentUscfId === targetId) continue;
+          const h = mapped.get(r.opponentUscfId)?.get(platform)?.profile.username;
           if (h) claimed.add(h.toLowerCase());
         }
         // The target's game this source played: outcome MUST be known and match
@@ -2586,38 +2709,23 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         // agree when both know it; opponent must be otherwise unaccounted-for.
         const cands = targetEdgeCandidates(tr, scoped, handle.toLowerCase(), claimed);
         // Only an UNAMBIGUOUS single candidate is this source's vote — two equally
-        // plausible games mean we can't tell which board was the target's.
+        // plausible games mean we can't tell which board was the target's. The
+        // search-wide ledger + ≥2/FIDE bar live inside tryCrownTarget.
         if (cands.length === 1) {
-          const votes = (state.targetEdgeVotes ??= new Map());
-          const k = cands[0].oppHandle.toLowerCase();
-          const entry =
-            votes.get(k) || { voters: new Set<string>(), game: cands[0], viaName: srcName, viaHandle: handle, round: tr.round };
-          entry.voters.add(memberId);
-          votes.set(k, entry);
-          if (entry.voters.size >= 2 || targetFideId) {
-            const prof = await verifyOn(platform, cands[0].oppHandle);
-            const fideOk = !!(prof?.fideId && targetFideId && digits(prof.fideId) === targetFideId);
-            if (prof && (entry.voters.size >= 2 || fideOk)) {
-              if (
-                await recordTarget(platform, prof, {
-                  method: "pairing",
-                  event: ev,
-                  link: viaLink && gameInLink(entry.game, viaLink) ? viaLink : undefined,
-                  chain: mapping.chain.concat(srcName),
-                  viaName: entry.viaName,
-                  viaHandle: entry.viaHandle,
-                  round: entry.round,
-                  game: entry.game,
-                  crossVotes: entry.voters.size,
-                })
-              )
-                return true;
-            }
-          } else {
-            log(
-              `@${cands[0].oppHandle} looks like ${targetName}'s round-${tr.round} opponent from ${srcName}'s game, but one edge isn't proof — holding for a second opponent to corroborate.`
-            );
-          }
+          if (
+            await tryCrownTarget(platform, ev, {
+              voterId: memberId,
+              viaName: srcName,
+              viaHandle: handle,
+              chain: mapping.chain.concat(srcName),
+              round: tr.round,
+              game: cands[0],
+              oppHandle: cands[0].oppHandle,
+              fullyAligned: false,
+              viaLink,
+            })
+          )
+            return true;
         }
       }
     }
