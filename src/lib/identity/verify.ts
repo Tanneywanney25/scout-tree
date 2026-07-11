@@ -73,12 +73,21 @@ function realCountry(v: unknown): string | undefined {
 // the global Chess.com concurrency gate / Lichess pacer, per-attempt timeouts,
 // and 429-backoff-and-retry (a 429 is "slow down", NEVER "doesn't exist" —
 // treating it as a missing account silently loses the player mid-traversal).
+//
+// Return contract (both verifiers): a profile when the account loads, `null`
+// ONLY for a definitive verdict (no such user / closed account), and
+// `undefined` when the FETCH failed — 5xx, timeout, corrupt body, or the
+// shard-flake 404 that carries a 5xx error in its body. The distinction is
+// the same hole-vs-verdict rule the archive fetchers live by: a hole says
+// NOTHING about the account, so callers may retry it or fall back to
+// structural evidence, but must never file it as "account doesn't exist".
 
-/** Verify and enrich a Lichess account. Returns null if it doesn't exist. */
+/** Verify and enrich a Lichess account. Null = no such account; undefined =
+ *  the fetch failed (a data hole, not a verdict). */
 export async function verifyLichess(
   username: string,
   signal?: AbortSignal
-): Promise<VerifiedProfile | null> {
+): Promise<VerifiedProfile | null | undefined> {
   const clean = username.trim().replace(/^@/, "");
   if (!clean) return null;
   try {
@@ -87,9 +96,12 @@ export async function verifyLichess(
       { headers: { Accept: "application/json" }, signal },
       "lichess"
     );
-    if (!res.ok) return null;
+    // Only a clean 404 says "no such user" — any other failure status is the
+    // server, not the account.
+    if (!res.ok) return res.status === 404 ? null : undefined;
     const data = await res.json();
-    if (!data || data.disabled || data.closed) return null;
+    if (!data) return undefined;
+    if (data.disabled || data.closed) return null;
 
     const perfs = data.perfs || {};
     const ratings: Record<string, number> = {};
@@ -138,35 +150,64 @@ export async function verifyLichess(
       profileUrl: data.url || `https://lichess.org/@/${data.username || clean}`,
     };
   } catch {
-    return null;
+    return undefined; // network failure / corrupt body — a hole, not a verdict
   }
 }
 
-/** Verify and enrich a Chess.com account. Returns null if it doesn't exist. */
+/** Verify and enrich a Chess.com account. Null = no such account; undefined =
+ *  the fetch failed (a data hole, not a verdict). Chess.com's profile shards
+ *  fail the same way its archive shards do — intermittent 404s whose BODY is
+ *  a 5xx "internal error" for accounts that exist — so a 404 is only a
+ *  verdict when its body doesn't carry that signature, and transient
+ *  failures get the same bounded in-place retry the month fetcher uses. */
 export async function verifyChesscom(
   username: string,
   signal?: AbortSignal
-): Promise<VerifiedProfile | null> {
+): Promise<VerifiedProfile | null | undefined> {
   const clean = username.trim().replace(/^@/, "").toLowerCase();
   if (!clean) return null;
-  try {
-    // The profile and /stats calls are independent — fire both at once (the
-    // stats fetch for a nonexistent user is a cheap fast 404).
-    const [res, statsRes] = await Promise.all([
-      politeFetch(
+  // The profile and /stats calls are independent — fire both at once (the
+  // stats fetch for a nonexistent user is a cheap fast 404).
+  const statsP = politeFetch(
+    `https://api.chess.com/pub/player/${encodeURIComponent(clean)}/stats`,
+    { headers: { Accept: "application/json" }, signal },
+    "chesscom"
+  ).catch(() => null);
+  let res: Response;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await politeFetch(
         `https://api.chess.com/pub/player/${encodeURIComponent(clean)}`,
         { headers: { Accept: "application/json" }, signal },
         "chesscom"
-      ),
-      politeFetch(
-        `https://api.chess.com/pub/player/${encodeURIComponent(clean)}/stats`,
-        { headers: { Accept: "application/json" }, signal },
-        "chesscom"
-      ).catch(() => null),
-    ]);
-    if (!res.ok) return null;
+      );
+    } catch {
+      return undefined; // politeFetch already retried network errors
+    }
+    if (res.ok) break;
+    // A real 404 (no such user) is a verdict; a 404 whose body carries a 5xx
+    // error code is the shard flake in disguise; everything else is transient.
+    let transient = res.status !== 404;
+    if (!transient) {
+      try {
+        const body = await res.text();
+        transient = /"code"\s*:\s*5\d\d|internal error/i.test(body);
+      } catch {
+        transient = true;
+      }
+    }
+    if (!transient) return null;
+    if (attempt < 2 && !signal?.aborted) {
+      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+      continue;
+    }
+    return undefined;
+  }
+  try {
+    const statsRes = await statsP;
     const data = await res.json();
-    if (!data || data.status === "closed:abuse") return null;
+    if (!data) return undefined;
+    if (data.status === "closed:abuse") return null;
 
     // ISO-2 country code lives at the end of the country URL.
     let country: string | undefined;
@@ -222,16 +263,18 @@ export async function verifyChesscom(
       profileUrl: data.url || `https://www.chess.com/member/${data.username || clean}`,
     };
   } catch {
-    return null;
+    return undefined; // corrupt body on a 200 — a hole, not a verdict
   }
 }
 
-/** Dispatch verification by platform. Unknown platforms return null. */
+/** Dispatch verification by platform. Unknown platforms return null; an
+ *  undefined result means the fetch failed (hole), not that the account is
+ *  missing. */
 export async function verifyAccount(
   platform: Platform,
   username: string,
   signal?: AbortSignal
-): Promise<VerifiedProfile | null> {
+): Promise<VerifiedProfile | null | undefined> {
   if (platform === "lichess") return verifyLichess(username, signal);
   if (platform === "chesscom") return verifyChesscom(username, signal);
   return null;

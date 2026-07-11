@@ -1000,7 +1000,7 @@ export interface TraversalHooks {
  *  sub-traversals — so an expensive fetch (profile verify, game archive,
  *  monthly Chess.com archive, Google search) never runs twice for one key. */
 export interface SharedCaches {
-  verify: Map<string, Promise<VerifiedProfile | null>>;
+  verify: Map<string, Promise<VerifiedProfile | null | undefined>>;
   games: Map<string, Promise<ArchiveGame[]>>;
   ccMonths: Map<string, Promise<ArchiveGame[]>>;
   google: Map<string, Promise<UsernameCandidate[]>>;
@@ -1012,6 +1012,13 @@ export interface SharedCaches {
   /** Lichess windows (`user:startDay:endDay`) whose game export failed —
    *  the same hole semantics as ccFailedMonths. */
   lichessFailedWindows: Set<string>;
+  /** Profiles (`platform:handle`) whose verify fetch LAST failed transiently
+   *  (5xx / shard-flake 404 / timeout), keyed to the failure time. Same
+   *  hole-vs-verdict rule as ccFailedMonths: the failure must never be
+   *  memoized as "no such account" (that poisoned null once silenced five
+   *  independent chains naming the target), and a recent failure fast-fails
+   *  instead of re-hammering a down shard. */
+  profileFailures: Map<string, number>;
 }
 
 export function makeSharedCaches(): SharedCaches {
@@ -1022,6 +1029,7 @@ export function makeSharedCaches(): SharedCaches {
     google: new Map(),
     ccFailedMonths: new Map(),
     lichessFailedWindows: new Set(),
+    profileFailures: new Map(),
   };
 }
 
@@ -1150,14 +1158,34 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
   // --- Shared caches (search-wide, incl. deep-phase sub-traversals) -----------
   const verifyCache = shared.verify;
-  const verifyOn = (platform: OnlinePlatform, handle: string): Promise<VerifiedProfile | null> => {
+  const verifyOn = (platform: OnlinePlatform, handle: string): Promise<VerifiedProfile | null | undefined> => {
     const key = `${platform}:${handle.toLowerCase()}`;
     const hit = verifyCache.get(key);
     if (hit) return hit;
+    // A profile whose fetch failed moments ago fast-fails (same cooldown as
+    // the archive shards — it is usually the same outage) instead of
+    // re-hammering a down shard from every chain that reads the handle.
+    const failedAt = shared.profileFailures.get(key);
+    if (failedAt !== undefined && Date.now() - failedAt < MONTH_FAIL_COOLDOWN_MS) {
+      return Promise.resolve(undefined);
+    }
     // verifyLichess paces itself through the global Lichess slot machine;
     // verifyChesscom runs behind the global Chess.com gate.
     const p = platform === "chesscom" ? verifyChesscom(handle, signal) : verifyLichess(handle, signal);
     verifyCache.set(key, p);
+    // A transient failure (undefined) is a HOLE, not a "no such account"
+    // verdict. Memoizing it is how one outage-era fetch poisoned every later
+    // "retry from another chain" for the rest of a run — evict it so a retry
+    // past the cooldown really refetches. Real profiles and definitive nulls
+    // stay memoized.
+    void p.then((r) => {
+      if (r === undefined) {
+        if (verifyCache.get(key) === p) verifyCache.delete(key);
+        shared.profileFailures.set(key, Date.now());
+      } else {
+        shared.profileFailures.delete(key);
+      }
+    });
     return p;
   };
 
@@ -1881,9 +1909,17 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
      *  section player and clear its contested mark. Only set by tryCrownTarget; the
      *  identity gates (FIDE/USCF id) still apply. */
     override?: boolean;
+    /** The handle's profile could not be fetched (platform data hole) — the
+     *  crown rests on the pairing evidence alone. The profile-derived evidence
+     *  (live-account check, clubs) is skipped and an honest note takes its
+     *  place; a late refetch at the end of the run upgrades the trail. */
+    profileUnavailable?: boolean;
   }
 
   const foundKeys = new Set<string>();
+  // Accounts recorded while their profile fetch was failing — retried once at
+  // the end of the run so a healed shard can upgrade the evidence trail.
+  const pendingEnrichment = new Map<string, { platform: OnlinePlatform; username: string; via: FoundVia }>();
 
   const recordTarget = async (platform: OnlinePlatform, profile: VerifiedProfile, via: FoundVia): Promise<boolean> => {
     // FIDE-ID gate: a linked FIDE ID that contradicts the target's rejects the
@@ -2119,8 +2155,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
     // Club membership tied to the event's organiser or region — the kind of
     // corroboration a careful human checks (e.g. a PNWCC club member playing
-    // a PNWCC event).
-    const clubs = await fetchClubs(platform, profile.username, signal);
+    // a PNWCC event). Pointless while the profile shard is down.
+    const clubs = via.profileUnavailable ? [] : await fetchClubs(platform, profile.username, signal);
     for (const club of clubs) {
       const tie = clubEventTie(club, ev.name, [graph.rootState]);
       if (tie) {
@@ -2156,7 +2192,19 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         source: "uscf-graph",
       });
     }
-    evidence.push({ kind: "account-verified", weight: 0.5, label: `Account confirmed live via ${platformLabel(platform)} API`, source: "uscf-graph" });
+    if (via.profileUnavailable) {
+      // Honest zero-weight note in place of the live-account check: the games
+      // on the aligned boards are themselves platform data, so the account's
+      // existence isn't in doubt — only its profile details are missing.
+      evidence.push({
+        kind: "other",
+        weight: 0,
+        label: `The account's profile couldn't be fetched during the search (platform data hole or a closed/renamed account) — the identification rests on the pairing evidence above`,
+        source: "uscf-graph",
+      });
+    } else {
+      evidence.push({ kind: "account-verified", weight: 0.5, label: `Account confirmed live via ${platformLabel(platform)} API`, source: "uscf-graph" });
+    }
     if (effTargetRating && profile.rating) {
       evidence.push({
         kind: "rating-match",
@@ -2198,11 +2246,20 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     // an identification, so it keeps the search running.
     if (via.method !== "google-lead") found = true;
 
+    // Was this account recorded while its profile shard was down? A re-record
+    // WITH the profile is the enrichment upgrade — it must win even at equal
+    // confidence (both trails sit at the cap, but only the new one carries
+    // the profile's details), so the strict > below gets a tie-breaker.
+    const upgradesGhost = pendingEnrichment.has(key) && !via.profileUnavailable;
+    if (via.profileUnavailable) pendingEnrichment.set(key, { platform, username: profile.username, via });
+    else pendingEnrichment.delete(key);
+
     if (foundKeys.has(key)) {
       // Already recorded — keep whichever evidence trail is stronger (a
       // google-lead upgraded by a later structural proof, or vice versa).
       const idx = accounts.findIndex((a) => a.platform === platform && a.username.toLowerCase() === profile.username.toLowerCase());
-      if (idx >= 0 && account.confidence > accounts[idx].confidence) accounts[idx] = account;
+      if (idx >= 0 && (account.confidence > accounts[idx].confidence || (upgradesGhost && account.confidence >= accounts[idx].confidence)))
+        accounts[idx] = account;
       else if (idx < 0) accounts.push(account);
       return true;
     }
@@ -2274,14 +2331,19 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const votes = entry.voters.size;
     const prefix = `The other side of ${v.viaName}'s round-${v.round} board vs ${targetName} is @${v.oppHandle}`;
 
+    // The profile fetch is CORROBORATION, not a gate. The aligned board IS the
+    // structural evidence — a chess.com profile-shard outage must never veto
+    // it (observed live: FIVE independent chains read the target's handle and
+    // every one was discarded at this fence while the vote ledger sat full).
+    // A missing profile only costs the FIDE shortcut and attribute evidence.
     const prof = await verifyOn(platform, v.oppHandle);
-    if (!prof) {
-      log(`${prefix} — but its ${platformLabel(platform)} profile wouldn't load; leaving the vote to be re-tried from another chain.`);
-      return false;
-    }
-    const fideOk = !!(prof.fideId && targetFideId && digits(prof.fideId) === targetFideId);
+    const noProfile = !prof;
+    const fideOk = !!(prof && prof.fideId && targetFideId && digits(prof.fideId) === targetFideId);
     const disq = handleDisqualified(platform, v.oppHandle);
-    const cleanSolo = v.fullyAligned && !disq;
+    // A single fully-aligned board still crowns alone only when the profile
+    // loaded clean — with no profile there is nothing to check a solo claim
+    // against, so it casts its vote and holds for a second chain instead.
+    const cleanSolo = v.fullyAligned && !disq && !noProfile;
     const consensus = votes >= 2 || fideOk;
 
     if (cleanSolo || consensus) {
@@ -2289,29 +2351,46 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       log(
         `${prefix} — ${
           fideOk
-            ? `its FIDE ID ${prof.fideId} matches ${targetName}'s`
+            ? `its FIDE ID ${prof!.fideId} matches ${targetName}'s`
             : votes >= 2
             ? `${votes} independent opponents now name it`
             : "a fully-aligned board names it"
-        }${override ? " (overriding an earlier mis-mapping of it to a section player)" : ""}. Crowning ${targetName}.`
+        }${noProfile ? "; its profile still won't load, but the pairing chains are proof on their own" : ""}${
+          override ? " (overriding an earlier mis-mapping of it to a section player)" : ""
+        }. Crowning ${targetName}.`
       );
-      return recordTarget(platform, prof, {
-        method: "pairing",
-        event: ev,
-        link: v.viaLink && gameInLink(v.game, v.viaLink) ? v.viaLink : undefined,
-        chain: v.chain,
-        viaName: v.viaName,
-        viaHandle: v.viaHandle,
-        round: v.round,
-        checkedRounds: v.checkedRounds,
-        totalRounds: v.totalRounds,
-        game: v.game,
-        crossVotes: votes >= 2 ? votes : undefined,
-        override,
-      });
+      return recordTarget(
+        platform,
+        prof ?? {
+          // Ghost profile: the handle and platform are certain (they come from
+          // the platform's own archive data on the aligned boards) — only the
+          // profile details are missing.
+          platform,
+          username: v.oppHandle,
+          profileUrl:
+            platform === "chesscom" ? `https://www.chess.com/member/${v.oppHandle}` : `https://lichess.org/@/${v.oppHandle}`,
+        },
+        {
+          method: "pairing",
+          event: ev,
+          link: v.viaLink && gameInLink(v.game, v.viaLink) ? v.viaLink : undefined,
+          chain: v.chain,
+          viaName: v.viaName,
+          viaHandle: v.viaHandle,
+          round: v.round,
+          checkedRounds: v.checkedRounds,
+          totalRounds: v.totalRounds,
+          game: v.game,
+          crossVotes: votes >= 2 ? votes : undefined,
+          override,
+          profileUnavailable: noProfile,
+        }
+      );
     }
     log(
-      `${prefix}${disq ? " (currently filed as another section player — likely that mapping, not this board, is the mis-alignment)" : ""} — ${votes}/2 independent opponents so far; holding for one more to corroborate before crowning.`
+      `${prefix}${
+        noProfile ? " — its profile wouldn't load (a data hole, not a verdict), but the aligned board still counts" : ""
+      }${disq ? " (currently filed as another section player — likely that mapping, not this board, is the mis-alignment)" : ""} — vote ${votes}/2; holding for a second independent opponent to corroborate before crowning.`
     );
     return false;
   };
@@ -3362,8 +3441,27 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         // uncertainty into "confirmed" pairing evidence for the target.
         if (acc.confidence < 0.7 || (acc.platform !== "chesscom" && acc.platform !== "lichess")) continue;
         const platform = acc.platform as OnlinePlatform;
-        const prof = await verifyOn(platform, acc.username);
-        if (!prof) continue;
+        // Re-verifying the dive's own proven account is a formality — during a
+        // profile-shard outage it fails for the very account the dive just
+        // spent minutes proving. The sub-run's recorded details are the same
+        // data a fresh fetch would return, so seed the trace-back from them.
+        let prof = await verifyOn(platform, acc.username);
+        if (!prof) {
+          log(`Couldn't re-fetch @${acc.username}'s profile (data hole) — seeding the trace-back from the dive's own verified details.`);
+          prof = {
+            platform,
+            username: acc.username,
+            displayName: acc.displayName,
+            title: acc.title,
+            rating: acc.rating,
+            ratings: acc.ratings,
+            country: acc.country,
+            fideId: acc.fideId,
+            gamesFound: acc.gamesFound,
+            lastActiveMs: acc.lastActive ? Date.parse(acc.lastActive) : undefined,
+            profileUrl: acc.profileUrl,
+          };
+        }
         setMapping(oppId, platform, { profile: prof, how: "deep", chain: [] });
         // Trace the shared events from this hard-won seed.
         for (const app of appearances.get(oppId) || []) {
@@ -3463,6 +3561,22 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         await pivotRing(ring2, "section players");
       }
     }
+  }
+
+  // An account crowned during a platform outage carries no profile details —
+  // try once more now that the search is over (forcing past the cooldown): a
+  // healed shard upgrades the evidence trail in place; a still-down shard
+  // leaves the pairing-proven identification standing as recorded.
+  for (const [pendKey, pend] of pendingEnrichment) {
+    if (signal?.aborted) break;
+    shared.profileFailures.delete(pendKey);
+    const late = await verifyOn(pend.platform, pend.username);
+    if (!late) {
+      log(`@${pend.username}'s profile is still unreachable — keeping the pairing-proven identification as recorded.`);
+      continue;
+    }
+    log(`@${pend.username}'s profile loaded on a late retry — upgrading the evidence with its details.`);
+    await recordTarget(pend.platform, late, { ...pend.via, profileUnavailable: false });
   }
 
   accounts.sort((a, b) => b.confidence - a.confidence);
