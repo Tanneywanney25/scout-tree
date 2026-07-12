@@ -40,12 +40,16 @@ export type { SchoolResolverInput, SchoolResolverResult } from "../schoolResolve
 
 /** A schoolmate's USCF ID → their best online handle, exactly the way the main
  *  engine resolves a target from a USCF ID: fetch the member's own online
- *  tournament graph and run the tournament-graph traversal over it. Kept on a
- *  tight budget — it runs per schoolmate (the engine times it out at 30s), and
- *  the school crawl only needs a couple of confident anchors, not an
- *  exhaustive trace. Traversal chatter stays out of the detective UI. */
+ *  tournament graph (the edge builds it with the SAME generous section/event
+ *  limits as a main-search target) and run the tournament-graph traversal over
+ *  it, with the same edge-backed discovery hooks (flyer search, Google-index
+ *  usernames, member expansion) runGraphTraversal always wires in. The budget
+ *  comes from the school engine's per-mate allowance — we stay slightly under
+ *  it so the traversal winds down and returns before the engine's outer
+ *  timeout would drop a late result. Traversal chatter stays out of the
+ *  detective UI. */
 async function resolveUscfIdentity(
-  req: { uscfId: string; name: string; rating?: number },
+  req: { uscfId: string; name: string; rating?: number; budgetMs?: number },
   signal?: AbortSignal
 ): Promise<{ platform: OnlinePlatform; username: string; confidence: number } | null> {
   const graph = await expandMemberGraph(req.uscfId, signal);
@@ -54,7 +58,7 @@ async function resolveUscfIdentity(
     targetName: graph.rootName || req.name,
     targetRating: req.rating,
     signal,
-    budgetMs: 25_000,
+    budgetMs: Math.max(30_000, (req.budgetMs ?? 120_000) - 10_000),
     log: () => {},
   });
   const best = [...traversal.accounts]

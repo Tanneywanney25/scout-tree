@@ -456,8 +456,19 @@ function collectUsernames(v: unknown, out: Set<string>, depth = 0, inArray = fal
   }
 }
 
+let friendsAuthMode: string | undefined; // last-logged cookie presence — announce the mode once, not per mate
+
 export async function fetchChesscomFriends(username: string, log: (m: string) => void = () => {}): Promise<string[]> {
   const cookie = readEnv("CHESSCOM_COOKIE") || readEnv("CHESSCOM_SESSION");
+  const mode = cookie ? "cookie" : "none";
+  if (friendsAuthMode !== mode) {
+    friendsAuthMode = mode;
+    log(
+      cookie
+        ? "Chess.com friends: CHESSCOM_COOKIE is configured — using the authenticated top-friends endpoint."
+        : "Chess.com friends: no CHESSCOM_COOKIE in the environment — public game archives and clubs carry the crawl."
+    );
+  }
   if (!cookie) return []; // no session configured — game-overlap carries the crawl
   const clean = username.trim().replace(/^@/, "");
   if (!clean) return [];

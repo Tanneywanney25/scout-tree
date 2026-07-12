@@ -112,15 +112,27 @@ async function main() {
   // Same hooks the browser wires via the edge function — here they hit MUIR
   // directly. The schoolmate traversal (resolveUscfIdentity) gets its own
   // expand hook so pairing-chain recursion works, plus the web hooks when keys
-  // exist — mirroring scripts/trace-entry.ts.
+  // exist — mirroring scripts/trace-entry.ts, INCLUDING its graph limits: a
+  // mate's own graph is built like a main-search target (16 sections / 100
+  // events) and expansions like the main CLI's expand hook (6 / 24). The old
+  // skimpier limits made schoolmates untraceable that the main search resolved
+  // fine. Expansions are memoized across mates (MUIR rate-limits refetches).
   const mateGraphFor = async (memberId: string, maxSections: number, maxEvents: number): Promise<TournamentGraph | null> => {
     const m = await fetchUscfMember(memberId);
     if (!m) return null;
     const secs = await buildOnlineGraphForMember(m, { maxSections, maxEvents });
     return { rootUscfId: m.id, rootName: m.name, rootState: m.state, onlineEvents: secs, graphTraversalReady: secs.length > 0 };
   };
+  const expandCache = new Map<string, Promise<TournamentGraph | null>>();
+  const expandMemo = (memberId: string): Promise<TournamentGraph | null> => {
+    const hit = expandCache.get(memberId);
+    if (hit) return hit;
+    const p = mateGraphFor(memberId, 6, 24).catch(() => null);
+    expandCache.set(memberId, p);
+    return p;
+  };
   const mateTraversalHooks: TraversalHooks = {
-    expandMember: (memberId) => mateGraphFor(memberId, 4, 16).catch(() => null),
+    expandMember: expandMemo,
     ...(hasAiKey || hasCse
       ? { findUsernames: (req) => findUsernamesOnWeb(req, () => {}).then((r) => r.candidates) }
       : {}),
@@ -151,13 +163,15 @@ async function main() {
       (await fetchSchoolRoster(school, schoolCode, st, source, (m) => console.log(`  ${m}`))).schoolmates,
     fetchFriends: (_platform, username) => fetchChesscomFriends(username, (m) => console.log(`  ${m}`)),
     findUscfId: ({ firstName, lastName, state: st, rating }) => findMemberId(firstName, lastName, st, rating),
-    resolveUscfIdentity: async ({ uscfId: mateId, name: mateName, rating }) => {
-      const graph = await mateGraphFor(mateId, 6, 24);
+    resolveUscfIdentity: async ({ uscfId: mateId, name: mateName, rating, budgetMs }) => {
+      const graph = await mateGraphFor(mateId, 16, 100);
       if (!graph?.graphTraversalReady || !graph.onlineEvents.length) return null;
       const traversal = await runGraphTraversal(graph, {
         targetName: graph.rootName || mateName,
         targetRating: rating,
-        budgetMs: 25_000,
+        // Stay under the school engine's per-mate allowance so the traversal
+        // returns before the outer timeout drops the late result.
+        budgetMs: Math.max(30_000, (budgetMs ?? 120_000) - 10_000),
         log: (m) => console.log(`    [mate #${mateId}] ${m}`),
         hooks: mateTraversalHooks,
       });

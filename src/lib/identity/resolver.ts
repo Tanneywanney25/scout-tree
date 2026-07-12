@@ -546,7 +546,10 @@ export async function resolveIdentity(
             targetFideId,
             excludeHandles: pool.map((p) => p.account.username),
           },
-          { signal, budgetMs: 4 * 60_000, log: (m) => emit(m, "running", "school-graph") }
+          // Room for the 180s USCF-anchored schoolmate phase plus a full
+          // archive/clubs crawl — 4min starved the crawl once the anchor
+          // phase was given main-search-sized traversal budgets.
+          { signal, budgetMs: 7 * 60_000, log: (m) => emit(m, "running", "school-graph") }
         );
         for (const acc of school.accounts) {
           addToPool(acc, query.name);

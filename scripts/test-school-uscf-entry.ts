@@ -9,15 +9,20 @@
 //
 // Scenarios:
 //   A. Two schoolmates resolve through their USCF IDs (one multi-match pick,
-//      one no-USCF-record skip, one below-confidence discard) and the crawl
-//      identifies the target's handle at the 2-mutual confidence cap (90%).
-//      The Google name→handle fallback must NOT run.
+//      one no-USCF-record skip, one 55% handle accepted at the 50% bar but
+//      failing live verification, one 45% discard) and the crawl identifies
+//      the target's handle at the 2-mutual confidence cap (90%) from public
+//      game archives alone. The Google name→handle fallback must NOT run.
 //   B. No schoolmate has a USCF match → the engine falls back to name-based
 //      discovery (the pre-existing route).
 //   C. Hooks without the new USCF lookups (an older caller) still work.
+//   D. CHESSCOM_COOKIE set → the REAL fetchChesscomFriends serves the
+//      authenticated top-friends signal and the crawl corroborates the same
+//      target through friends lists; without the cookie it degrades to [].
 // ============================================================================
 
 import { findMemberId } from "../supabase/functions/resolve-identity/uscf";
+import { fetchChesscomFriends } from "../supabase/functions/resolve-identity/school";
 import { runSchoolResolution, type SchoolResolverHooks } from "../src/lib/identity/schoolResolver";
 import type { Schoolmate } from "../src/lib/identity/schoolTypes";
 
@@ -59,6 +64,9 @@ const muir: Record<string, Record<string, unknown>[]> = {
   // Only a SURNAME-INCOMPATIBLE member exists ("Leo Parker") — must be null.
   "leo park": [
     { id: 17000009, firstName: "LEO", lastName: "PARKER", stateRep: "OR", ratings: [{ ratingSystem: "R", rating: 1400 }] },
+  ],
+  "omar diaz": [
+    { id: 17000004, firstName: "OMAR", lastName: "DIAZ", stateRep: "WA", ratings: [{ ratingSystem: "R", rating: 1452 }] },
   ],
   "nina rao": [
     { id: 17000003, firstName: "NINA", lastName: "RAO", stateRep: "WA", ratings: [{ ratingSystem: "R", rating: 1305 }] },
@@ -127,9 +135,25 @@ const ccMonths: Record<string, { games: unknown[] }> = {
   },
 };
 
+// Authenticated top-friends fixtures (only served when the request carries the
+// session cookie — mirroring the real endpoint's 401 for anonymous callers).
+const ccFriends: Record<string, string[]> = {
+  tanneywanney25: ["Kai0627", "randomguy"],
+  ninarao15: ["Kai0627"],
+};
+
 const realFetch = globalThis.fetch;
-globalThis.fetch = (async (input: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   const url = String(typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url);
+
+  // --- chess.com authenticated friends callback -------------------------------
+  const fr = /www\.chess\.com\/callback\/friends\/([^/]+)\/top-friends$/i.exec(url);
+  if (fr) {
+    const cookie = String((init?.headers as Record<string, string> | undefined)?.["Cookie"] || "");
+    if (!cookie) return new Response("Unauthorized", { status: 401 });
+    const u = decodeURIComponent(fr[1]).toLowerCase();
+    return J({ friends: (ccFriends[u] || []).map((username) => ({ username })) });
+  }
 
   // --- MUIR ratings API -----------------------------------------------------
   const search = /ratings-api\.uschess\.org\/api\/v1\/members\?(.+)$/i.exec(url);
@@ -191,6 +215,7 @@ const check = (name: string, cond: boolean, detail = "") => {
 const roster: Schoolmate[] = [
   { name: "Tanush Bhatia", rating: 1600, source: "nwsrs-school-report" },
   { name: "Maya Chen", rating: 1550, source: "nwsrs-school-report" },
+  { name: "Omar Diaz", rating: 1450, source: "nwsrs-school-report" },
   { name: "Leo Park", rating: 1400, source: "nwsrs-school-report" },
   { name: "Nina Rao", rating: 1300, source: "nwsrs-school-report" },
 ];
@@ -229,6 +254,7 @@ async function scenarioA() {
       // harnesses); the wrapper's plumbing is what scenario A validates.
       if (uscfId === "16538484") return { platform: "chesscom", username: "tanneywanney25", confidence: 0.92 };
       if (uscfId === "17000001") return { platform: "chesscom", username: "mchen_maybe", confidence: 0.55 };
+      if (uscfId === "17000004") return { platform: "chesscom", username: "odz_wild", confidence: 0.45 };
       if (uscfId === "17000003") return { platform: "chesscom", username: "ninarao15", confidence: 0.86 };
       return null;
     },
@@ -251,8 +277,13 @@ async function scenarioA() {
   check("A6 logged the resolution", has("resolved Tanush Bhatia to @tanneywanney25 at 92% (USCF #16538484)"));
   check("A7 multi-match picked by rating", has("found USCF ID 17000001 for Maya Chen"));
   check("A8 no-USCF-record mate skipped", has("no USCF member found for Leo Park"));
-  check("A9 below-70% mate discarded", has("below the 70% bar") && has("@mchen_maybe"));
-  check("A10 Google fallback did NOT run", googleCalls.length === 0, `called for: ${googleCalls.join(", ")}`);
+  check("A9 55% mate accepted at the 50% bar (fails live verify here)", has("@mchen_maybe (Maya Chen) did not verify live") && !has("@mchen_maybe for Maya Chen scored 55% — below"));
+  check("A10 45% mate discarded below the 50% bar", has("below the 50% bar") && has("@odz_wild"));
+  check("A11 Google fallback did NOT run", googleCalls.length === 0, `called for: ${googleCalls.join(", ")}`);
+  check("A12 logged exact resolveUscfIdentity args", has('resolveUscfIdentity(uscfId=16538484, name="Tanush Bhatia"'));
+  check("A13 logged sub-threshold results too", has("resolveUscfIdentity for Omar Diaz returned @odz_wild (chesscom) at 45%"));
+  check("A14 crawl announces its signals", has("public game archives (last 24 months)"));
+  check("A15 candidate logged with mates + evidence", has("candidate @kai0627 — connected to tanneywanney25, ninarao15 via 9 archive game(s)"));
 }
 
 async function scenarioB() {
@@ -292,6 +323,57 @@ async function scenarioC() {
   check("C3 degrades to not-found gracefully", !result.found);
 }
 
+async function scenarioD() {
+  console.log("\n=== Scenario D: CHESSCOM_COOKIE → authenticated friends signal ===\n");
+  const logs: string[] = [];
+  const log = (m: string) => {
+    logs.push(m);
+    console.log(`  ${m}`);
+  };
+  const has = (s: string) => logs.some((l) => l.includes(s));
+
+  // Without the cookie, the REAL fetchChesscomFriends must degrade to [] and
+  // say so (public archives/clubs carry the crawl).
+  delete process.env.CHESSCOM_COOKIE;
+  delete process.env.CHESSCOM_SESSION;
+  const none = await fetchChesscomFriends("tanneywanney25", log);
+  check("D1 no cookie → no friends, mode logged", none.length === 0 && has("no CHESSCOM_COOKIE"));
+
+  // With the cookie, the same call serves the authenticated top-friends list.
+  process.env.CHESSCOM_COOKIE = "PHPSESSID=fixture-session";
+  const friends = await fetchChesscomFriends("tanneywanney25", log);
+  check(
+    "D2 cookie → authenticated friends fetched",
+    friends.map((f) => f.toLowerCase()).sort().join(",") === "kai0627,randomguy" && has("CHESSCOM_COOKIE is configured"),
+    `got [${friends.join(", ")}]`
+  );
+
+  // Full run with the friends hook wired to the real server helper: the crawl
+  // corroborates @Kai0627 through BOTH archives and two friends lists.
+  const googleCalls: string[] = [];
+  const hooks: SchoolResolverHooks = {
+    ...baseHooks(googleCalls),
+    fetchFriends: (_platform, username) => fetchChesscomFriends(username, log),
+    findUscfId: ({ firstName, lastName, state, rating }) => findMemberId(firstName, lastName, state, rating),
+    resolveUscfIdentity: async ({ uscfId }) => {
+      if (uscfId === "16538484") return { platform: "chesscom", username: "tanneywanney25", confidence: 0.92 };
+      if (uscfId === "17000003") return { platform: "chesscom", username: "ninarao15", confidence: 0.86 };
+      return null;
+    },
+  };
+  const result = await runSchoolResolution(input, { log, hooks });
+  const top = result.accounts[0];
+  check("D3 top account is @Kai0627", top?.username === "Kai0627", `got ${top?.username}`);
+  check("D4 confidence ≥ 90%", (top?.confidence ?? 0) >= 0.899, `got ${Math.round((top?.confidence ?? 0) * 100)}%`);
+  check(
+    "D5 friends lists corroborate the tie",
+    !!top?.evidence.some((e) => e.label.includes("on 2 of their friends lists")),
+    top?.evidence.map((e) => e.label).join(" | ")
+  );
+  check("D6 crawl logged the friends counts", has("has 2 chess.com friend(s)"));
+  delete process.env.CHESSCOM_COOKIE;
+}
+
 async function unitFindMemberId() {
   console.log("\n=== findMemberId unit checks (fake MUIR) ===\n");
   const t = await findMemberId("Tanush", "Bhatia", "WA");
@@ -310,6 +392,7 @@ async function main() {
   await scenarioA();
   await scenarioB();
   await scenarioC();
+  await scenarioD();
   console.log(`\n${failures ? `${failures} check(s) FAILED` : "All checks passed"}`);
   process.exit(failures ? 1 : 0);
 }
