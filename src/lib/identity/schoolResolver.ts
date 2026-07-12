@@ -30,11 +30,21 @@
 //      candidate's profile that matches the target's). A high bar keeps this
 //      from ever crowning the wrong same-cohort player.
 //
-// Dependency-light on purpose (net.ts / verify.ts / confidence.ts only), so it
-// runs in the browser, the Node CLI harness and tests alike — same discipline
-// as uscfGraphEngine.ts. All the CORS-friendly platform work (archives, clubs,
-// verification) happens here directly; the two things that need a server (school
-// lookup, authenticated friends) come in as hooks.
+// Dependency-light on purpose (net.ts / verify.ts / confidence.ts / cache.ts
+// and two pure helpers from uscfGraphEngine.ts), so it runs in the browser,
+// the Node CLI harness and tests alike — same discipline as uscfGraphEngine.ts.
+// All the CORS-friendly platform work (archives, clubs, verification) happens
+// here directly; the two things that need a server (school lookup,
+// authenticated friends) come in as hooks.
+//
+// SPEED: schoolmate resolution is where the school fallback used to burn its
+// minutes, so it now runs cheapest-first per mate — the search-wide
+// resolved-identity cache, then a quick real-name guess-and-verify probe on
+// Chess.com, and only then the full 60s tournament trace — with FOUR mates in
+// flight (the global chess.com gate / edge-side MUIR throttle bound the actual
+// request rate). The cohort archive crawl reuses the SAME memoized Chess.com
+// months the traversals fill, fetched a few months at a time instead of one by
+// one.
 // ============================================================================
 
 import type { DiscoveredAccount, Evidence, Platform } from "./types";
@@ -47,6 +57,8 @@ import type {
 import type { UsernameSearchRequest, UsernameCandidate } from "./graphTypes";
 import { politeFetch, pool } from "./net";
 import { verifyChesscom, verifyLichess, type VerifiedProfile } from "./verify";
+import { guessHandles, sharedChesscomMonthGames } from "./uscfGraphEngine";
+import { getSharedTraversalCaches, getCachedIdentity, cacheIdentity } from "./cache";
 import {
   scoreFromEvidence,
   nameSimilarity,
@@ -61,21 +73,35 @@ import {
 
 const SCHOOLMATE_RESOLVE_POOL = 6; // schoolmates resolved to handles concurrently
 // The USCF-anchored phase runs the SAME tournament-graph engine the main search
-// runs on its target — and the main search regularly needs 60-120s per member
-// (observed live: Tanush #16538484 resolves in under 60s, but never in 30s
-// with cold caches). The old 30s per-mate budget timed out on every mate and
-// starved the crawl, so these now mirror the main search's allowances.
-const USCF_MATE_POOL = 2; // schoolmates traced at once (each trace fans out MUIR + chess.com calls of its own — more than 2 in flight earns 429s)
+// runs on its target. Two things changed the arithmetic since the 2×120s era:
+// the fast path below lands most mates without any trace at all, and every
+// trace now shares the SESSION-WIDE fetch caches (cache.ts), so the second and
+// later traces run largely warm — 60s is the observed budget a warm trace
+// needs (Tanush #16538484 resolves in under 60s). Four traces in flight do not
+// multiply 429s the way raw fan-out would: every chess.com call still queues
+// behind net.ts's global gate and every MUIR call behind the edge throttle.
+const USCF_MATE_POOL = 4; // schoolmates traced at once
 const USCF_MATE_SPACING_MS = 1_000; // pause between successive traces per worker (rate-limit hygiene)
-const USCF_MATE_TIMEOUT_MS = 120_000; // one schoolmate's identity-engine budget (matches the main search's per-member pace)
-const USCF_MATE_PHASE_MS = 180_000; // the whole USCF-anchored resolution phase
-const USCF_MATE_TARGET = 2; // resolved schoolmates are enough to crawl on — stop here
+const USCF_MATE_TIMEOUT_MS = 60_000; // one schoolmate's identity-engine budget (warm-cache pace)
+const USCF_MATE_PHASE_MS = 120_000; // the whole USCF-anchored resolution phase — after this, fall back
+const USCF_MATE_TARGET = 3; // resolved schoolmates are enough to crawl on — stop here
+const USCF_MATE_EARLY_TARGET = 2; // …or settle for 2 once the phase runs long
+const USCF_MATE_EARLY_MS = 90_000; // "long" = 90s into the phase
 // A schoolmate's handle only needs to be USABLE FOR THE CRAWL — the target is
 // crowned by the social graph's own evidence bar (≥2 mutuals + verification),
 // not by this number. 50% keeps plausible mates in; a wrong mate contributes
 // noise the ≥2-mutual candidate bar filters out anyway.
 const USCF_MATE_MIN_CONFIDENCE = 0.5; // bar for accepting a schoolmate's handle
+// FAST PATH: before a mate earns a 60s tournament trace, probe a handful of
+// name-shaped Chess.com handles and accept one ONLY when the profile's REAL
+// name matches the roster name (a namey username alone proves nothing — the
+// main engine's discipline). The unsuffixed shapes carry nearly all the hit
+// rate, so the probe stays tiny.
+const FAST_PROBE_HANDLES = 8; // guessHandles() shapes checked per mate
+const FAST_PROBE_POOL = 4; // probe verifications in flight per mate
+const FAST_PROBE_MIN_CONFIDENCE = 0.7; // bar to skip the tournament trace
 const CRAWL_POOL = 6; // schoolmate graphs walked concurrently
+const CC_MONTH_POOL = 4; // archive months fetched at once per schoolmate (global gate still applies)
 const CANDIDATE_VERIFY_POOL = 8; // candidate accounts verified concurrently
 const CC_ARCHIVE_MONTHS = 24; // months of chess.com archive scanned per schoolmate (the last 2 years)
 const LICHESS_GAMES = 200; // recent lichess games scanned per schoolmate
@@ -85,7 +111,7 @@ const HEAVY_OPP_GAMES = 12; // one schoolmate playing a handle this much = stron
 const MAX_CANDIDATES = 40; // candidate handles carried into verification
 const BIG_CLUB_MEMBERS = 2000; // clubs bigger than this are too generic to link on
 const SMALL_CLUB_FOR_MEMBERS = 200; // only surface members from a club this small
-const DEFAULT_SCHOOL_BUDGET_MS = 8 * 60_000; // wall-clock ceiling for the whole crawl (≥ the 180s anchor phase + a full archive crawl)
+const DEFAULT_SCHOOL_BUDGET_MS = 6 * 60_000; // wall-clock ceiling for the whole crawl (≥ the 120s anchor phase + a parallel archive crawl)
 
 /** A purely-social identification (no federation-ID anchor) is capped here: it
  *  is a strong lead, but "the account your schoolmates all play" is not the same
@@ -250,7 +276,11 @@ interface Conn {
   clubs: Map<string, number>;
 }
 
-/** Chess.com: tally a player's opponents across their recent monthly archives. */
+/** Chess.com: tally a player's opponents across their recent monthly archives.
+ *  Months go through the SESSION-WIDE month cache (cache.ts), so a month any
+ *  traversal — or an earlier crawl — already fetched costs nothing here, and a
+ *  few months are fetched at once (the global chess.com gate still bounds the
+ *  real request rate). */
 async function chesscomOpponents(handle: string, signal?: AbortSignal): Promise<Map<string, number>> {
   const tally = new Map<string, number>();
   try {
@@ -262,25 +292,25 @@ async function chesscomOpponents(handle: string, signal?: AbortSignal): Promise<
     );
     if (!res.ok) return tally;
     const data = await res.json();
-    const months: string[] = (Array.isArray(data?.archives) ? data.archives : []).slice(-CC_ARCHIVE_MONTHS);
-    // Sequential per schoolmate (the outer crawl pool provides the parallelism)
-    // so one player never floods the shared chess.com gate.
-    for (const url of months) {
-      if (signal?.aborted) break;
-      try {
-        const gr = await politeFetch(url, { headers: { Accept: "application/json" }, signal }, "chesscom", 20000);
-        if (!gr.ok) continue;
-        const gd = await gr.json();
-        for (const g of Array.isArray(gd?.games) ? gd.games : []) {
-          for (const side of ["white", "black"] as const) {
-            const u = lc(String(g?.[side]?.username || ""));
-            if (u && u !== lc(handle)) tally.set(u, (tally.get(u) || 0) + 1);
-          }
+    const months = (Array.isArray(data?.archives) ? data.archives : [])
+      .map((url: unknown) => /\/(\d{4})\/(\d{2})$/.exec(String(url)))
+      .filter((m: RegExpExecArray | null): m is RegExpExecArray => !!m)
+      .map((m: RegExpExecArray) => ({ y: parseInt(m[1], 10), m: parseInt(m[2], 10) }))
+      .slice(-CC_ARCHIVE_MONTHS);
+    const shared = getSharedTraversalCaches();
+    await pool(
+      months,
+      CC_MONTH_POOL,
+      async ({ y, m }) => {
+        if (signal?.aborted) return;
+        const games = await sharedChesscomMonthGames(handle, y, m, shared, signal).catch(() => []);
+        for (const g of games) {
+          const u = lc(g.oppHandle);
+          if (u && u !== lc(handle)) tally.set(u, (tally.get(u) || 0) + 1);
         }
-      } catch {
-        /* one month is a hole, not fatal */
-      }
-    }
+      },
+      () => !!signal?.aborted
+    );
   } catch {
     /* archives unreachable — no opponents from this schoolmate */
   }
@@ -421,6 +451,44 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
 async function verify(platform: OnlinePlatform, username: string, signal?: AbortSignal): Promise<VerifiedProfile | null> {
   const p = platform === "lichess" ? await verifyLichess(username, signal) : await verifyChesscom(username, signal);
   return p || null; // null-or-undefined both mean "not usable here"
+}
+
+interface FastProbeHit {
+  platform: OnlinePlatform;
+  profile: VerifiedProfile;
+  confidence: number;
+}
+
+/** FAST PATH probe: a schoolmate with a simple real-name handle resolves in a
+ *  few profile GETs instead of a 60s tournament trace. Chess.com has no name
+ *  search, so this is guess-and-verify over the top name shapes — and a guess
+ *  only counts when the profile's REAL name matches the roster name (and it
+ *  isn't confidently foreign). A state-naming location lifts the confidence.
+ *  The tournament trace remains the fallback for every non-obvious handle. */
+async function fastNameProbe(
+  name: string,
+  state: string | undefined,
+  signal?: AbortSignal
+): Promise<FastProbeHit | null> {
+  const guesses = guessHandles(name).slice(0, FAST_PROBE_HANDLES);
+  if (!guesses.length) return null;
+  let best: FastProbeHit | null = null;
+  await pool(
+    guesses,
+    FAST_PROBE_POOL,
+    async (g) => {
+      if (signal?.aborted) return;
+      const profile = await verify("chesscom", g, signal);
+      if (!profile || !profile.displayName || isForeign(profile.country)) return;
+      const sim = nameSimilarity(name, profile.displayName);
+      if (sim < 0.85) return; // only a real-name match may claim the mate
+      let confidence = sim >= 0.95 ? 0.75 : 0.7;
+      if (locationNamesState(profile.location, state)) confidence += 0.05;
+      if (!best || confidence > best.confidence) best = { platform: "chesscom", profile, confidence };
+    },
+    () => !!signal?.aborted
+  );
+  return best && (best as FastProbeHit).confidence >= FAST_PROBE_MIN_CONFIDENCE ? best : null;
 }
 
 /** Resolve one schoolmate name to their best verified online handle via the
@@ -646,6 +714,8 @@ export async function runSchoolResolution(
   const { signal, log, hooks = {} } = options;
   const notes: string[] = [];
   const exclude = new Set((input.excludeHandles || []).map(lc));
+  const t0 = Date.now();
+  const since = () => `${Math.round((Date.now() - t0) / 1000)}s`;
   // Wall-clock ceiling for the whole crawl (the school phase iterates finite
   // lists, but a full roster × months of archives can still run long). Stops
   // gracefully — whatever was found so far is still ranked and returned.
@@ -699,12 +769,19 @@ export async function runSchoolResolution(
   //     Runs a few mates at a time, each on a hard timeout (the engine is
   //     expensive), and stops as soon as the crawl has enough anchors.
   if (hooks.findUscfId && hooks.resolveUscfIdentity && resolved.length < USCF_MATE_TARGET && !halted()) {
-    const phaseDeadline = Date.now() + USCF_MATE_PHASE_MS;
-    const phaseHalted = () => halted() || Date.now() > phaseDeadline || resolved.length >= USCF_MATE_TARGET;
+    const phaseStart = Date.now();
+    const phaseDeadline = phaseStart + USCF_MATE_PHASE_MS;
+    // Enough anchors to crawl on: the full target, or the early target once
+    // the phase runs long — 2 good seeds beat a third that costs another 60s.
+    const enoughMates = () =>
+      resolved.length >= USCF_MATE_TARGET ||
+      (resolved.length >= USCF_MATE_EARLY_TARGET && Date.now() - phaseStart > USCF_MATE_EARLY_MS);
+    const phaseHalted = () => halted() || Date.now() > phaseDeadline || enoughMates();
     log(
       `School resolver: USCF-anchored resolution — ${USCF_MATE_POOL} mate(s) at a time, ` +
-        `${Math.round(USCF_MATE_TIMEOUT_MS / 1000)}s per trace (same engine + discovery as the main search), ` +
-        `phase cap ${Math.round(USCF_MATE_PHASE_MS / 1000)}s, stopping at ${USCF_MATE_TARGET} resolved.`
+        `fast path (cache + real-name probe) before each ${Math.round(USCF_MATE_TIMEOUT_MS / 1000)}s trace, ` +
+        `phase cap ${Math.round(USCF_MATE_PHASE_MS / 1000)}s, stopping at ${USCF_MATE_TARGET} resolved ` +
+        `(${USCF_MATE_EARLY_TARGET} after ${Math.round(USCF_MATE_EARLY_MS / 1000)}s).`
     );
     await pool(
       pickedMates,
@@ -724,6 +801,55 @@ export async function runSchoolResolution(
           return;
         }
         log(`School resolver: found USCF ID ${found.uscfId} for ${mate.name}${found.rating ? ` (~${found.rating} USCF)` : ""}.`);
+        if (phaseHalted()) return;
+
+        // FAST PATH 1: the search-wide resolved-identity store — a mate any
+        // traversal already confirmed (this search or an earlier one) costs
+        // one verification, not a trace.
+        const known = getCachedIdentity(found.uscfId);
+        if (known && known.confidence >= USCF_MATE_MIN_CONFIDENCE) {
+          if (resolved.some((x) => x.platform === known.platform && lc(x.username) === lc(known.username))) return;
+          const profile = await verify(known.platform, known.username, signal);
+          if (profile && !enoughMates()) {
+            resolved.push({
+              name: mate.name,
+              platform: known.platform,
+              username: profile.username,
+              profile,
+              uscfId: found.uscfId,
+              confidence: known.confidence,
+            });
+            log(
+              `School resolver: resolved ${mate.name} to @${profile.username} from the search-wide cache ` +
+                `(${Math.round(known.confidence * 100)}%, no trace needed).`
+            );
+            return;
+          }
+          if (enoughMates()) return;
+          // Cached handle didn't verify live — fall through to the probes.
+        }
+
+        // FAST PATH 2: quick real-name guess-and-verify on Chess.com — lands
+        // simple handles in a few profile GETs instead of a tournament trace.
+        const fast = await fastNameProbe(mate.name, mateState, signal);
+        if (fast) {
+          if (resolved.some((x) => x.platform === fast.platform && lc(x.username) === lc(fast.profile.username))) return;
+          if (enoughMates()) return;
+          resolved.push({
+            name: mate.name,
+            platform: fast.platform,
+            username: fast.profile.username,
+            profile: fast.profile,
+            uscfId: found.uscfId,
+            confidence: fast.confidence,
+          });
+          cacheIdentity(found.uscfId, { platform: fast.platform, username: fast.profile.username, confidence: fast.confidence });
+          log(
+            `School resolver: fast path resolved ${mate.name} to @${fast.profile.username} ` +
+              `(real profile name matches, ${Math.round(fast.confidence * 100)}%) — no tournament trace needed.`
+          );
+          return;
+        }
         if (phaseHalted()) return;
         log(
           `School resolver: resolveUscfIdentity(uscfId=${found.uscfId}, name="${mate.name}", ` +
@@ -765,7 +891,7 @@ export async function runSchoolResolution(
           log(`School resolver: @${hit.username} (${mate.name}) did not verify live — skipping.`);
           return;
         }
-        if (resolved.length >= USCF_MATE_TARGET) return; // target filled while we verified
+        if (enoughMates()) return; // target filled while we verified
         resolved.push({
           name: mate.name,
           platform: hit.platform,
@@ -774,9 +900,14 @@ export async function runSchoolResolution(
           uscfId: found.uscfId,
           confidence: hit.confidence,
         });
+        cacheIdentity(found.uscfId, { platform: hit.platform, username: profile.username, confidence: hit.confidence });
         log(`School resolver: resolved ${mate.name} to @${profile.username} at ${Math.round(hit.confidence * 100)}% (USCF #${found.uscfId}).`);
       },
       phaseHalted
+    );
+    log(
+      `School resolver: USCF-anchored phase finished in ${Math.round((Date.now() - phaseStart) / 1000)}s — ` +
+        `${resolved.length} schoolmate(s) resolved.`
     );
   }
 
@@ -884,6 +1015,8 @@ export async function runSchoolResolution(
     }
   }
 
+  log(`School resolver: cohort graph crawl done ${since()} into the school phase.`);
+
   // --- 4. Candidates → verify → score ---------------------------------------
   const candidates: Candidate[] = [];
   for (const [handle, rec] of conns) {
@@ -947,6 +1080,7 @@ export async function runSchoolResolution(
   const accounts = scored.map((s) => s.account).filter((a) => a.confidence >= 0.5);
 
   const found = accounts.length > 0;
+  log(`School resolver: whole school phase took ${since()}.`);
   if (found) {
     const top = accounts[0];
     log(`School resolver: strongest match @${top.username} on ${top.platform} — ${Math.round(top.confidence * 100)}% confidence.`);
