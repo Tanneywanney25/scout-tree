@@ -273,6 +273,64 @@ export async function fetchUscfMember(id: string): Promise<UscfMember | null> {
   return memberFrom(data);
 }
 
+/** Surname must match exactly; first names are compatible when equal or one
+ *  is a prefix of the other ("Alex" vs "Alexander"). Same strictness the
+ *  school sources use, so a fuzzy-search homonym can't hijack an identity. */
+function nameCompatible(first: string, last: string, memberName: string): boolean {
+  const clean = (s: string) =>
+    s.toLowerCase().normalize("NFD").replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim();
+  const tokens = clean(memberName).split(" ").filter(Boolean);
+  if (tokens.length < 2) return false;
+  const mFirst = tokens[0];
+  const mLast = tokens[tokens.length - 1];
+  const qFirst = clean(first);
+  const qLast = clean(last);
+  if (!qFirst || !qLast || mLast !== qLast) return false;
+  return mFirst === qFirst || mFirst.startsWith(qFirst) || qFirst.startsWith(mFirst);
+}
+
+/**
+ * Name + state → USCF member ID. The bridge that lets the school resolver run
+ * the identity engine on a schoolmate known only as a roster name: scholastic
+ * rosters print names and ratings, never USCF IDs, and the engine's ID-based
+ * resolution (fetchUscfMember + the tournament graph) needs the ID. Uses the
+ * same public MUIR ratings-search endpoint (and the same throttled, retrying
+ * fetch) as everything else in this module.
+ *
+ * With several matches: the member whose rating sits closest to the roster's
+ * wins (regional scholastic ratings track USCF closely); without a rating we
+ * lean on state, online activity and being rated at all. Null when nothing
+ * plausibly matches the name.
+ */
+export async function findMemberId(
+  firstName: string,
+  lastName: string,
+  state?: string,
+  rating?: number
+): Promise<{ uscfId: string; rating?: number } | null> {
+  const name = `${firstName} ${lastName}`.replace(/\s+/g, " ").trim();
+  if (!name) return null;
+  let rows = await searchUscfByName(name, state);
+  // A state-scoped search can miss a member whose USCF state-of-record lags
+  // their school's (a recent move) — retry unscoped before giving up.
+  if (!rows.length && state) rows = await searchUscfByName(name);
+  const matches = rows.filter((r) => nameCompatible(firstName, lastName, r.name));
+  if (!matches.length) return null;
+  const score = (r: UscfSearchRow): number => {
+    let s = 0;
+    if (typeof rating === "number" && typeof r.rating === "number") {
+      s += Math.max(0, 3 - Math.abs(rating - r.rating) / 100); // closest rating dominates
+    }
+    if (state && r.state && r.state.toUpperCase() === state.toUpperCase()) s += 1.5;
+    if (r.hasOnline) s += 1; // online history is what the identity engine traverses
+    if (typeof r.rating === "number") s += 0.3; // rated beats an unrated homonym
+    return s;
+  };
+  matches.sort((a, b) => score(b) - score(a));
+  const best = matches[0];
+  return { uscfId: best.id, rating: best.rating };
+}
+
 function eventRefFrom(e: any): UscfEventRef {
   return {
     eventId: String(e.id),

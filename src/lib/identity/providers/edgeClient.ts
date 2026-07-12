@@ -268,6 +268,39 @@ export function findUsernameCandidates(req: UsernameSearchRequest, signal?: Abor
 }
 
 // ---------------------------------------------------------------------------
+// USCF name→ID lookup (edge `findUscfId` mode). The school resolver's bridge
+// from a roster name to the ID-based identity engine: scholastic rosters print
+// names and ratings, never USCF IDs. Same public MUIR ratings search the main
+// engine uses — it just isn't CORS-accessible, hence the edge round-trip.
+// Memoized per person for the session.
+// ---------------------------------------------------------------------------
+
+export interface UscfIdLookup {
+  firstName: string;
+  lastName: string;
+  state?: string;
+  rating?: number;
+}
+
+const uscfIdCache = new Map<string, Promise<{ uscfId: string; rating?: number } | null>>();
+export function findUscfMemberId(
+  req: UscfIdLookup,
+  signal?: AbortSignal
+): Promise<{ uscfId: string; rating?: number } | null> {
+  const key = JSON.stringify([req.firstName.toLowerCase(), req.lastName.toLowerCase(), req.state, req.rating]);
+  const existing = uscfIdCache.get(key);
+  if (existing) return existing;
+  const promise = (async (): Promise<{ uscfId: string; rating?: number } | null> => {
+    if (signal?.aborted) return null;
+    const data = await invokeEdge({ findUscfId: req }, 30_000);
+    if (!data || data.available === false || typeof data.uscfId !== "string" || !data.uscfId) return null;
+    return { uscfId: data.uscfId, rating: typeof data.rating === "number" ? data.rating : undefined };
+  })();
+  uscfIdCache.set(key, promise);
+  return promise;
+}
+
+// ---------------------------------------------------------------------------
 // School-based fallback: the edge is where school-affiliation sources (NWSRS /
 // state associations / registration platforms / LinkedIn / web — all needing
 // server-side fetch or an AI/search key) and the authenticated chess.com
