@@ -503,9 +503,11 @@ export async function buildOnlineGraphForMember(
   const rest = era.filter((e) => !named.has(e) && !pandemicEra.has(e));
   const candidates = [...named, ...pandemicEra, ...rest].slice(0, maxEvents);
 
-  // Phase 1: find which sections are actually online. Modest concurrency plus
-  // early stopping — named events are near-certain hits, and once the unnamed
-  // scan keeps missing there is no point burning MUIR's rate limit further.
+  // Phase 1: find which sections are actually online. Concurrency 4 hides
+  // MUIR's per-request latency without raising the request RATE — every call
+  // still queues behind muirThrottle's global spacing — plus early stopping:
+  // named events are near-certain hits, and once the unnamed scan keeps
+  // missing there is no point burning MUIR's rate limit further.
   interface Found {
     ev: UscfEventRef;
     section: SectionRef;
@@ -513,7 +515,7 @@ export async function buildOnlineGraphForMember(
   }
   let foundCount = 0;
   let unnamedMisses = 0;
-  const perEvent = await mapLimit(candidates, 2, async (ev): Promise<Found[]> => {
+  const perEvent = await mapLimit(candidates, 4, async (ev): Promise<Found[]> => {
     if (foundCount >= maxSections || (unnamedMisses >= 20 && !named.has(ev))) return [];
     const { sections, startDate, endDate, name } = await fetchEventSections(ev.eventId);
     const evRef: UscfEventRef = { ...ev, name: ev.name || name || "", startDate: ev.startDate || startDate, endDate: ev.endDate || endDate };
@@ -529,8 +531,9 @@ export async function buildOnlineGraphForMember(
   });
   const foundSections = perEvent.flat().slice(0, maxSections);
 
-  // Phase 2: pull the crosstable for each online section.
-  const online = await mapLimit(foundSections, 2, async ({ ev, section, meta }): Promise<OnlineSection | null> => {
+  // Phase 2: pull the crosstables IN PARALLEL — they are independent GETs, and
+  // the muirThrottle keeps the actual request rate unchanged.
+  const online = await mapLimit(foundSections, 4, async ({ ev, section, meta }): Promise<OnlineSection | null> => {
     const players = await fetchSectionPlayers(ev.eventId, section.number, member.id);
     if (!players.some((p) => p.isTarget)) return null; // target not actually here
     const evName = ev.name || "";
