@@ -418,20 +418,35 @@ export async function findSchoolForPlayer(
 // browser, which is exactly why it lives behind the edge function.
 // ---------------------------------------------------------------------------
 
-/** Recursively pull every distinct `username` string out of a JSON value. */
-function collectUsernames(v: unknown, out: Set<string>, depth = 0): void {
+const HANDLE_RE = /^[A-Za-z0-9_-]{2,30}$/;
+
+/** Recursively pull friend usernames out of the callback response, whatever its
+ *  shape. The exact JSON of /callback/friends/{u}/top-friends isn't documented
+ *  (it needs auth to observe), so this is deliberately tolerant of both
+ *  object-lists ([{username|user|handle: "x"}]) and bare string-lists (["x"]):
+ *   • values of any username-ish key, and
+ *   • handle-shaped bare strings that are elements of an array (a friends array).
+ *  Over-collection is harmless — every handle is re-verified against the live
+ *  chess.com API downstream, so a stray non-handle string just fails to verify. */
+function collectUsernames(v: unknown, out: Set<string>, depth = 0, inArray = false): void {
   if (depth > 6 || out.size > 500 || v == null) return;
+  if (typeof v === "string") {
+    if (inArray && HANDLE_RE.test(v)) out.add(v);
+    return;
+  }
   if (Array.isArray(v)) {
-    for (const x of v) collectUsernames(x, out, depth + 1);
+    for (const x of v) collectUsernames(x, out, depth + 1, true);
     return;
   }
   if (typeof v === "object") {
     const o = v as Record<string, unknown>;
+    // Only handle-carrying keys — NOT "name" (a display name like "Kai" would
+    // pass the pattern but resolve to the wrong account).
     for (const key of ["username", "user", "friendUsername", "handle"]) {
       const val = o[key];
-      if (typeof val === "string" && /^[A-Za-z0-9_-]{2,30}$/.test(val)) out.add(val);
+      if (typeof val === "string" && HANDLE_RE.test(val)) out.add(val);
     }
-    for (const val of Object.values(o)) if (val && typeof val === "object") collectUsernames(val, out, depth + 1);
+    for (const val of Object.values(o)) if (val && typeof val === "object") collectUsernames(val, out, depth + 1, false);
   }
 }
 
