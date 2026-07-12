@@ -20,13 +20,23 @@ import {
 } from "./edgeClient";
 import {
   runGraphTraversal as runEngine,
+  type OnlinePlatform,
   type TraversalOptions,
   type TraversalResult,
 } from "../uscfGraphEngine";
+import { getSharedTraversalCaches, cacheIdentity } from "../cache";
 
 export type { TraversalOptions, TraversalResult } from "../uscfGraphEngine";
 
 /** Run the traversal with the app's server-backed hooks pre-wired.
+ *
+ * Every traversal launched through here — the main search's AND each
+ * schoolmate trace the school resolver runs — shares ONE session-wide set of
+ * fetch caches (profile verifies, game windows, Chess.com months, Google
+ * candidates). Schoolmates' tournament graphs overlap heavily, so the second
+ * and later traces mostly hit cache instead of the network. A confirmed
+ * root-member handle is also recorded in the resolved-identity store so later
+ * lookups (the school fast path) skip the traversal entirely.
  *
  * SAFETY GUARD: `seedMappings` is a TEST-ONLY affordance (pre-seed known
  * member→handle pairs to validate pairing/target-reveal without live
@@ -36,10 +46,11 @@ export type { TraversalOptions, TraversalResult } from "../uscfGraphEngine";
  * future mis-wiring cannot inject seeds through the production path: the ONLY
  * way to seed is to bypass this wrapper and call the engine directly, which
  * only the offline CLI harness (scripts/trace-entry.ts) does. */
-export function runGraphTraversal(graph: TournamentGraph, opts: TraversalOptions): Promise<TraversalResult> {
+export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalOptions): Promise<TraversalResult> {
   const { seedMappings: _testOnlySeeds, ...safe } = opts;
-  return runEngine(graph, {
+  const result = await runEngine(graph, {
     ...safe,
+    shared: opts.shared ?? getSharedTraversalCaches(),
     hooks: {
       discoverPlatform: (ev) => discoverEventPlatform(ev, opts.signal),
       expandMember: (memberId) => expandMemberGraph(memberId, opts.signal),
@@ -47,6 +58,15 @@ export function runGraphTraversal(graph: TournamentGraph, opts: TraversalOptions
       ...(opts.hooks || {}),
     },
   });
+  const best = result.accounts.find((a) => a.platform === "chesscom" || a.platform === "lichess");
+  if (best && graph.rootUscfId) {
+    cacheIdentity(graph.rootUscfId, {
+      platform: best.platform as OnlinePlatform,
+      username: best.username,
+      confidence: best.confidence,
+    });
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

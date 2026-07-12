@@ -620,6 +620,21 @@ function chesscomMonthGames(
   return p;
 }
 
+/** One player's Chess.com monthly archive through the SHARED caches — exported
+ *  so the school resolver's cohort crawl reuses the SAME memoized months (and
+ *  the same failed-shard bookkeeping) the traversals fill. Schoolmates' and
+ *  their opponents' archives overlap heavily; without this the crawl refetched
+ *  months a traversal had already paid for. */
+export function sharedChesscomMonthGames(
+  username: string,
+  y: number,
+  m: number,
+  shared: SharedCaches,
+  signal?: AbortSignal
+): Promise<{ oppHandle: string; endMs: number }[]> {
+  return chesscomMonthGames(username, y, m, shared.ccMonths, signal, shared.ccFailedMonths);
+}
+
 /** Chess.com: pull the monthly archives spanning the window IN PARALLEL (they
  *  are independent GETs behind the global gate), keep in-window games. */
 async function chesscomWindowGames(
@@ -2842,7 +2857,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     for (const k of scopedKeys) state.oppSeen.set(k, (state.oppSeen.get(k) || 0) + 1);
 
     const roster = ev.players;
-    let scanHit = false;
+    const scanHit = false;
     await pool(
       candidates,
       VERIFY_POOL,
