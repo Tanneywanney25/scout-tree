@@ -60,14 +60,24 @@ import {
 // ---------------------------------------------------------------------------
 
 const SCHOOLMATE_RESOLVE_POOL = 6; // schoolmates resolved to handles concurrently
-const USCF_MATE_POOL = 4; // schoolmates pushed through the identity engine at once
-const USCF_MATE_TIMEOUT_MS = 30_000; // one schoolmate's identity-engine budget
-const USCF_MATE_PHASE_MS = 90_000; // the whole USCF-anchored resolution phase
+// The USCF-anchored phase runs the SAME tournament-graph engine the main search
+// runs on its target — and the main search regularly needs 60-120s per member
+// (observed live: Tanush #16538484 resolves in under 60s, but never in 30s
+// with cold caches). The old 30s per-mate budget timed out on every mate and
+// starved the crawl, so these now mirror the main search's allowances.
+const USCF_MATE_POOL = 2; // schoolmates traced at once (each trace fans out MUIR + chess.com calls of its own — more than 2 in flight earns 429s)
+const USCF_MATE_SPACING_MS = 1_000; // pause between successive traces per worker (rate-limit hygiene)
+const USCF_MATE_TIMEOUT_MS = 120_000; // one schoolmate's identity-engine budget (matches the main search's per-member pace)
+const USCF_MATE_PHASE_MS = 180_000; // the whole USCF-anchored resolution phase
 const USCF_MATE_TARGET = 2; // resolved schoolmates are enough to crawl on — stop here
-const USCF_MATE_MIN_CONFIDENCE = 0.7; // the engine's bar for accepting a schoolmate's handle
+// A schoolmate's handle only needs to be USABLE FOR THE CRAWL — the target is
+// crowned by the social graph's own evidence bar (≥2 mutuals + verification),
+// not by this number. 50% keeps plausible mates in; a wrong mate contributes
+// noise the ≥2-mutual candidate bar filters out anyway.
+const USCF_MATE_MIN_CONFIDENCE = 0.5; // bar for accepting a schoolmate's handle
 const CRAWL_POOL = 6; // schoolmate graphs walked concurrently
 const CANDIDATE_VERIFY_POOL = 8; // candidate accounts verified concurrently
-const CC_ARCHIVE_MONTHS = 18; // months of chess.com archive scanned per schoolmate
+const CC_ARCHIVE_MONTHS = 24; // months of chess.com archive scanned per schoolmate (the last 2 years)
 const LICHESS_GAMES = 200; // recent lichess games scanned per schoolmate
 const MAX_SCHOOLMATES = 24; // roster players we try to resolve (highest-rated first)
 const MIN_OPP_GAMES = 3; // games vs a handle before it counts as a "connection"
@@ -75,7 +85,7 @@ const HEAVY_OPP_GAMES = 12; // one schoolmate playing a handle this much = stron
 const MAX_CANDIDATES = 40; // candidate handles carried into verification
 const BIG_CLUB_MEMBERS = 2000; // clubs bigger than this are too generic to link on
 const SMALL_CLUB_FOR_MEMBERS = 200; // only surface members from a club this small
-const DEFAULT_SCHOOL_BUDGET_MS = 5 * 60_000; // wall-clock ceiling for the whole crawl
+const DEFAULT_SCHOOL_BUDGET_MS = 8 * 60_000; // wall-clock ceiling for the whole crawl (≥ the 180s anchor phase + a full archive crawl)
 
 /** A purely-social identification (no federation-ID anchor) is capped here: it
  *  is a strong lead, but "the account your schoolmates all play" is not the same
@@ -122,6 +132,11 @@ export interface SchoolResolverHooks {
     uscfId: string;
     name: string;
     rating?: number;
+    /** The engine's per-mate allowance. Implementations should run the
+     *  traversal with (slightly under) this — the SAME machinery and discovery
+     *  hooks as the main search, just time-boxed — so it winds down and returns
+     *  before the caller's outer timeout drops the late result. */
+    budgetMs?: number;
   }) => Promise<{ platform: OnlinePlatform; username: string; confidence: number } | null>;
   /** A player's chess.com friends (member-public; needs an authenticated
    *  session, so it is fetched server-side). Returns friend usernames, or []
@@ -169,6 +184,7 @@ export interface SchoolResolverResult {
 
 const lc = (s: string) => s.trim().toLowerCase();
 const digits = (s?: string) => (s ? s.replace(/\D/g, "") : "");
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const norm = (s: string) =>
   s.toLowerCase().normalize("NFD").replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 
@@ -685,10 +701,18 @@ export async function runSchoolResolution(
   if (hooks.findUscfId && hooks.resolveUscfIdentity && resolved.length < USCF_MATE_TARGET && !halted()) {
     const phaseDeadline = Date.now() + USCF_MATE_PHASE_MS;
     const phaseHalted = () => halted() || Date.now() > phaseDeadline || resolved.length >= USCF_MATE_TARGET;
+    log(
+      `School resolver: USCF-anchored resolution — ${USCF_MATE_POOL} mate(s) at a time, ` +
+        `${Math.round(USCF_MATE_TIMEOUT_MS / 1000)}s per trace (same engine + discovery as the main search), ` +
+        `phase cap ${Math.round(USCF_MATE_PHASE_MS / 1000)}s, stopping at ${USCF_MATE_TARGET} resolved.`
+    );
     await pool(
       pickedMates,
       USCF_MATE_POOL,
-      async (mate) => {
+      async (mate, idx) => {
+        // Space successive traces out — each one fans out its own MUIR and
+        // chess.com requests, and back-to-back starts invite 429s.
+        if (idx >= USCF_MATE_POOL) await sleep(USCF_MATE_SPACING_MS);
         const parts = splitName(mate.name);
         if (!parts) return;
         const mateState = mate.state || affiliations[0]?.state || input.state;
@@ -701,14 +725,33 @@ export async function runSchoolResolution(
         }
         log(`School resolver: found USCF ID ${found.uscfId} for ${mate.name}${found.rating ? ` (~${found.rating} USCF)` : ""}.`);
         if (phaseHalted()) return;
+        log(
+          `School resolver: resolveUscfIdentity(uscfId=${found.uscfId}, name="${mate.name}", ` +
+            `rating=${found.rating ?? mate.rating ?? "?"}, budgetMs=${USCF_MATE_TIMEOUT_MS})…`
+        );
+        const t0 = Date.now();
         const hit = await withTimeout(
-          hooks.resolveUscfIdentity!({ uscfId: found.uscfId, name: mate.name, rating: found.rating ?? mate.rating }),
+          hooks.resolveUscfIdentity!({
+            uscfId: found.uscfId,
+            name: mate.name,
+            rating: found.rating ?? mate.rating,
+            budgetMs: USCF_MATE_TIMEOUT_MS,
+          }),
           USCF_MATE_TIMEOUT_MS
         );
+        const secs = Math.round((Date.now() - t0) / 1000);
         if (!hit) {
-          log(`School resolver: couldn't trace USCF #${found.uscfId} (${mate.name}) to an online handle — continuing.`);
+          const timedOut = Date.now() - t0 >= USCF_MATE_TIMEOUT_MS;
+          log(
+            `School resolver: couldn't trace USCF #${found.uscfId} (${mate.name}) to an online handle ` +
+              `after ${secs}s${timedOut ? " — timed out" : ""} — continuing.`
+          );
           return;
         }
+        log(
+          `School resolver: resolveUscfIdentity for ${mate.name} returned @${hit.username} (${hit.platform}) ` +
+            `at ${Math.round(hit.confidence * 100)}% in ${secs}s.`
+        );
         if (hit.confidence < USCF_MATE_MIN_CONFIDENCE) {
           log(
             `School resolver: @${hit.username} for ${mate.name} scored ${Math.round(hit.confidence * 100)}% — below the ` +
@@ -765,6 +808,11 @@ export async function runSchoolResolution(
   // --- 3. Social-graph crawl -------------------------------------------------
   // For each resolved schoolmate: friends (if a session hook exists) + frequent
   // game opponents + clubs. Aggregate into per-candidate connection counts.
+  log(
+    `School resolver: crawling ${resolved.length} schoolmate graph(s) — signals: ` +
+      `authenticated chess.com friends ${hooks.fetchFriends ? "hook wired (used when the server has CHESSCOM_COOKIE)" : "unavailable"}, ` +
+      `public game archives (last ${CC_ARCHIVE_MONTHS} months), shared clubs.`
+  );
   const conns = new Map<string, Conn>(); // candidate handle → connection record
   const get = (h: string): Conn => {
     let c = conns.get(h);
@@ -861,17 +909,34 @@ export async function runSchoolResolution(
     CANDIDATE_VERIFY_POOL,
     async (cand) => {
       if (signal?.aborted) return;
+      const via = [
+        cand.friendOf ? `${cand.friendOf} friends list(s)` : "",
+        cand.gamesWithCohort ? `${cand.gamesWithCohort} archive game(s)` : "",
+        cand.sharedClubs.size ? `${cand.sharedClubs.size} shared club(s)` : "",
+      ]
+        .filter(Boolean)
+        .join(", ");
       // Verify on both platforms: whichever the target is on, plus the
       // cross-platform consistency check. Prefer the platform the connections
       // came from, but a handle live on both is a stronger identity.
       const cc = await verify("chesscom", cand.handle, signal);
       const li = await verify("lichess", cand.handle, signal);
-      if (!cc && !li) return;
+      if (!cc && !li) {
+        log(`School resolver: candidate @${cand.handle} — connected to ${[...cand.mates].join(", ")} via ${via} — no live account, dropped.`);
+        return;
+      }
       // Lichess is where a USCF/FIDE id can actually live (bio/links), so if the
       // account exists there, score that one (it carries the anchor); keep the
       // chess.com account too when present.
-      if (li) scored.push(scoreCandidate(cand, li, "lichess", input, school, cc));
-      if (cc) scored.push(scoreCandidate(cand, cc, "chesscom", input, school, li));
+      const scores: ScoredAccount[] = [];
+      if (li) scores.push(scoreCandidate(cand, li, "lichess", input, school, cc));
+      if (cc) scores.push(scoreCandidate(cand, cc, "chesscom", input, school, li));
+      scored.push(...scores);
+      const best = scores.sort((a, b) => b.account.confidence - a.account.confidence)[0];
+      log(
+        `School resolver: candidate @${cand.handle} — connected to ${[...cand.mates].join(", ")} via ${via} — ` +
+          `${Math.round(best.account.confidence * 100)}%${best.anchored ? " (federation-ID anchored)" : ""}.`
+      );
     },
     halted
   );
