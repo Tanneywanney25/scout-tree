@@ -181,6 +181,17 @@ export async function resolveIdentity(
 
   emit("Starting identity resolution…", "info");
 
+  // Per-phase wall-clock, ms — the profiling trail that tells us WHERE a slow
+  // search spent its time (anchors vs traversal vs fallbacks). Returned on the
+  // result and summarised in the narration at the end.
+  const timings: Record<string, number> = {};
+  const phaseTimer = (name: string) => {
+    const p0 = performance.now();
+    return () => {
+      timings[name] = Math.round(performance.now() - p0);
+    };
+  };
+
   const results: ProviderResult[] = [];
   const providerStatus: ResolutionResult["providerStatus"] = [];
 
@@ -211,7 +222,11 @@ export async function resolveIdentity(
   };
 
   // --- 1. ANCHOR PHASE: who is this person? ----------------------------------
-  await runProviders(PROVIDERS);
+  {
+    const done = phaseTimer("anchors");
+    await runProviders(PROVIDERS);
+    done();
+  }
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
   const fragments: PartialIdentity[] = results.flatMap((r) => r.identities);
@@ -331,6 +346,7 @@ export async function resolveIdentity(
   const hintHandles = extractHintHandles(query.usernameHint);
   let hintStrong = false;
   if (hintHandles.length && !signal?.aborted) {
+    const done = phaseTimer("hint-probe");
     emit(`Checking the username hint (${hintHandles.map((h) => `"${h}"`).join(", ")})…`, "running");
     // Every handle × platform combination verified concurrently.
     const combos = hintHandles.flatMap((h) => (["chesscom", "lichess"] as Platform[]).map((platform) => ({ h, platform })));
@@ -345,6 +361,7 @@ export async function resolveIdentity(
       if (fideMatch || sim >= 0.92) hintStrong = true;
     }
     if (hintStrong) emit("The user-supplied handle checks out against the player's identity.", "done");
+    done();
   }
 
   // --- 2. PRIMARY DISCOVERY: tournament-graph traversal ------------------------
@@ -355,6 +372,7 @@ export async function resolveIdentity(
   let traversalFound = false;
   let graphAvailable = false;
   let partialOpponents = 0;
+  const traversalDone = phaseTimer("traversal");
   if (!hintStrong && !signal?.aborted) {
     const graph = await getTournamentGraph(query, signal).catch(() => null);
     if (graph && graph.graphTraversalReady && graph.onlineEvents.length) {
@@ -438,6 +456,7 @@ export async function resolveIdentity(
   } else if (hintStrong) {
     emit("Skipping the tournament trace — the user-supplied handle already identifies the account.", "info", "uscf-graph");
   }
+  traversalDone();
 
   // --- 3. LAST RESORT: name-based platform search -----------------------------
   // Only when no tournament-verified username exists. Everything found here is
@@ -468,6 +487,7 @@ export async function resolveIdentity(
     );
 
     let googleVerified = 0;
+    const googleDone = phaseTimer("google-index");
     try {
       const leads = await findUsernameCandidates(
         {
@@ -522,6 +542,7 @@ export async function resolveIdentity(
     } catch {
       /* Google fallback is best-effort */
     }
+    googleDone();
 
     // --- 3a½. SCHOOL-BASED SOCIAL-GRAPH FALLBACK -----------------------------
     // For a player with no online tournament history AND no Google-indexed
@@ -532,6 +553,7 @@ export async function resolveIdentity(
     // a social-graph identification is far stronger than a same-name guess.
     let schoolVerified = 0;
     if (googleVerified === 0 && !signal?.aborted) {
+      const schoolDone = phaseTimer("school-graph");
       const targetUscfId = idDigits(fragments.find((f) => f.source === "uscf")?.uscfId) || idDigits(query.uscfId) || undefined;
       const schoolState = query.state || fragments.find((f) => f.source === "uscf")?.state;
       emit("Nothing indexed either — tracing the player through their school's social graph…", "info", "school-graph");
@@ -546,10 +568,10 @@ export async function resolveIdentity(
             targetFideId,
             excludeHandles: pool.map((p) => p.account.username),
           },
-          // Room for the 180s USCF-anchored schoolmate phase plus a full
-          // archive/clubs crawl — 4min starved the crawl once the anchor
-          // phase was given main-search-sized traversal budgets.
-          { signal, budgetMs: 7 * 60_000, log: (m) => emit(m, "running", "school-graph") }
+          // Room for the 120s USCF-anchored schoolmate phase plus a full
+          // archive/clubs crawl (now warm-cached and month-parallel — 4min
+          // used to starve the crawl when the anchor phase ran 180s).
+          { signal, budgetMs: 6 * 60_000, log: (m) => emit(m, "running", "school-graph") }
         );
         for (const acc of school.accounts) {
           addToPool(acc, query.name);
@@ -561,10 +583,12 @@ export async function resolveIdentity(
       } catch {
         providerStatus.push({ name: "school-graph", label: "School social graph", available: false, notes: ["School resolver error."] });
       }
+      schoolDone();
     }
 
     // --- 3b. ABSOLUTE LAST RESORT: platform name search ----------------------
     if (googleVerified === 0 && schoolVerified === 0 && !signal?.aborted) {
+      const nameSearchDone = phaseTimer("name-search");
       emit("The Google index gave nothing verifiable — falling back to platform name search (results may be a namesake).", "info");
 
       const demote = (acc: DiscoveredAccount): DiscoveredAccount => {
@@ -616,6 +640,7 @@ export async function resolveIdentity(
           if (acc) addToPool(demote(acc), s.attachName);
         });
       }
+      nameSearchDone();
     } else if (googleVerified > 0 || schoolVerified > 0) {
       for (const p of NAME_FALLBACK_PROVIDERS) {
         providerStatus.push({
@@ -740,11 +765,19 @@ export async function resolveIdentity(
   if (top.length) emit(`Found ${top.length} possible match${top.length > 1 ? "es" : ""}.`, "done");
   else emit("No confident match found.", "info");
 
+  const elapsedMs = Math.round(performance.now() - start);
+  const phaseSummary = Object.entries(timings)
+    .filter(([, ms]) => ms >= 100)
+    .map(([name, ms]) => `${name} ${(ms / 1000).toFixed(1)}s`)
+    .join(" · ");
+  if (phaseSummary) emit(`Search took ${(elapsedMs / 1000).toFixed(1)}s — ${phaseSummary}.`, "info");
+
   return {
     query,
     identities: top,
     providerStatus,
-    elapsedMs: Math.round(performance.now() - start),
+    elapsedMs,
+    timings,
     // Only flag partial-progress when we truly never confirmed the target: if a
     // later fallback DID produce a verified-identity account, drop the warning.
     partialOpponents:

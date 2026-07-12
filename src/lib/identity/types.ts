@@ -219,6 +219,9 @@ export interface ResolutionResult {
   providerStatus: { name: string; label: string; available: boolean; notes?: string[] }[];
   /** Total wall-clock time, ms. */
   elapsedMs: number;
+  /** Wall-clock per major phase, ms (anchors, traversal, school, …) — the
+   *  profiling trail behind elapsedMs, for logs and perf regressions. */
+  timings?: Record<string, number>;
   /** When the tournament traversal resolved N of the target's opponents but
    *  never confirmed the target's OWN account: N. Signals the UI to warn that
    *  any accounts shown are same-name leads, not tournament-confirmed matches. */
