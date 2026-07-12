@@ -124,7 +124,8 @@ const decodeEntities = (s: string) =>
 //   <td><span class="id" onmouseover="Tip('Skyline High School, 11th grade')">SKNLH30T</span></td>
 //   <td>1542</td>...
 // The Tip literally names the school — no code table needed. A "school report"
-// page (ratings/schoolreport.php?school=<name>) lists that school's roster.
+// page (ratings/schoolreport.php?school=<code>) lists that school's roster,
+// keyed by the id's three-letter school code ("SKN") — never the school name.
 // ---------------------------------------------------------------------------
 
 const NWSRS_BASE = "https://www.ratingsnw.com";
@@ -179,9 +180,11 @@ function parseNwsrsRows(html: string): NwsrsRow[] {
   return rows;
 }
 
-/** The alpha prefix of an NWSRS id encodes the school (e.g. "SKNLH30T"). */
+/** The first THREE letters of an NWSRS id are the school code ("SKNLH30T" →
+ *  "SKN") — the key the school-report page is queried by. The letters after
+ *  them are the player's initials, so a greedy grab corrupts the code. */
 function schoolCodeOf(id: string): string | undefined {
-  const m = /^([A-Z]{2,5})/.exec(id);
+  const m = /^([A-Z]{3})/.exec(id);
   return m ? m[1] : undefined;
 }
 
@@ -222,10 +225,13 @@ async function nwsrsLookup(req: SchoolLookupRequest, log: (m: string) => void): 
   };
 }
 
-/** NWSRS: the roster of a school ("school report"), keyless. */
-export async function nwsrsSchoolRoster(school: string, log: (m: string) => void): Promise<Schoolmate[]> {
-  const url = `${NWSRS_BASE}/ratings/schoolreport.php?school=${encodeURIComponent(school)}`;
-  log(`NWSRS: pulling the roster for "${school}"…`);
+/** NWSRS: the roster of a school ("school report"), keyless. The endpoint is
+ *  keyed by the three-letter school CODE (?school=SKN) — handing it the
+ *  school's NAME silently returns a roster that isn't this school's. */
+export async function nwsrsSchoolRoster(schoolCode: string, log: (m: string) => void): Promise<Schoolmate[]> {
+  const code = schoolCode.trim().toUpperCase();
+  const url = `${NWSRS_BASE}/ratings/schoolreport.php?school=${encodeURIComponent(code)}`;
+  log(`NWSRS: pulling the school report for code ${code}…`);
   const html = await fetchText(url, 20000);
   if (!html) return [];
   const rows = parseNwsrsRows(html);
@@ -237,7 +243,7 @@ export async function nwsrsSchoolRoster(school: string, log: (m: string) => void
     state: undefined,
     source: "nwsrs-school-report",
   }));
-  log(`NWSRS: roster for "${school}" → ${mates.length} player(s).`);
+  log(`NWSRS: school report ${code} → ${mates.length} player(s).`);
   return mates;
 }
 
@@ -487,6 +493,7 @@ export async function fetchChesscomFriends(username: string, log: (m: string) =>
 
 export async function fetchSchoolRoster(
   school: string,
+  schoolCode: string | undefined,
   state: string | undefined,
   source: string | undefined,
   log: (m: string) => void = () => {}
@@ -495,10 +502,18 @@ export async function fetchSchoolRoster(
   let schoolmates: Schoolmate[] = [];
 
   // NWSRS is the only source with a directly-fetchable roster today; for a
-  // school it named (or any NW-state school) use its school-report page.
+  // school it named (or any NW-state school) use its school-report page. The
+  // report is keyed by the three-letter school code the NWSRS id encodes —
+  // without a code there is no report (querying by name returns the WRONG
+  // school's roster, which is worse than none).
   const st = state?.trim().toUpperCase();
+  const code = schoolCode?.trim().toUpperCase();
   if (source === "nwsrs" || !st || NWSRS_STATES.has(st)) {
-    schoolmates = await nwsrsSchoolRoster(school, log).catch(() => []);
+    if (code && /^[A-Z]{2,5}$/.test(code)) {
+      schoolmates = await nwsrsSchoolRoster(code, log).catch(() => []);
+    } else {
+      log(`NWSRS: no school code for "${school}" — skipping its school report.`);
+    }
   }
   if (schoolmates.length) notes.push(`Roster: ${schoolmates.length} schoolmate(s) from ${school}.`);
   else notes.push(`No roster available for ${school}.`);

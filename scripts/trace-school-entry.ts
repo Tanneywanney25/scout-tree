@@ -147,7 +147,8 @@ async function main() {
     findSchool: args.noWeb
       ? async (req) => (await findSchoolForPlayer({ ...req }, (m) => console.log(`  ${m}`))).affiliations.filter((x) => x.source === "nwsrs")
       : async (req) => (await findSchoolForPlayer(req, (m) => console.log(`  ${m}`))).affiliations,
-    findSchoolmates: async (school, st, source) => (await fetchSchoolRoster(school, st, source, (m) => console.log(`  ${m}`))).schoolmates,
+    findSchoolmates: async (school, st, source, schoolCode) =>
+      (await fetchSchoolRoster(school, schoolCode, st, source, (m) => console.log(`  ${m}`))).schoolmates,
     fetchFriends: (_platform, username) => fetchChesscomFriends(username, (m) => console.log(`  ${m}`)),
     findUscfId: ({ firstName, lastName, state: st, rating }) => findMemberId(firstName, lastName, st, rating),
     resolveUscfIdentity: async ({ uscfId: mateId, name: mateName, rating }) => {

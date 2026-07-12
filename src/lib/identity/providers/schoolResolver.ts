@@ -75,7 +75,7 @@ export function runSchoolResolver(
     ...opts,
     hooks: {
       findSchool: (req) => findSchoolAffiliation(req, opts.signal),
-      findSchoolmates: (school, state, source) => fetchSchoolmates(school, state, source, opts.signal),
+      findSchoolmates: (school, state, source, schoolCode) => fetchSchoolmates(school, state, source, schoolCode, opts.signal),
       findUsernames: (req) => findUsernameCandidates(req, opts.signal),
       fetchFriends: (platform, username) => fetchFriends(platform, username, opts.signal),
       findUscfId: (req) => findUscfMemberId(req, opts.signal),

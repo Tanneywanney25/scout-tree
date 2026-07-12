@@ -89,11 +89,14 @@ const SCHOOL_SOCIAL_MAX_CONFIDENCE = 0.9;
 export interface SchoolResolverHooks {
   /** Resolve the target's school(s). Server-backed (school.ts via the edge). */
   findSchool?: (req: SchoolLookupRequest) => Promise<SchoolAffiliation[] | null>;
-  /** Fetch a school's roster (schoolmates). Server-backed. */
+  /** Fetch a school's roster (schoolmates). Server-backed. `schoolCode` is the
+   *  regional roster key (NWSRS: the id's three-letter school code, "SKN") —
+   *  the school report is queried by it, not by the school's name. */
   findSchoolmates?: (
     school: string,
     state: string | undefined,
-    source: string | undefined
+    source: string | undefined,
+    schoolCode?: string
   ) => Promise<Schoolmate[] | null>;
   /** Google-index username discovery — the FALLBACK way a name resolves to a
    *  handle (many schoolmates use non-obvious handles no index ties to their
@@ -657,7 +660,9 @@ export async function runSchoolResolution(
   const mates: Schoolmate[] = [];
   if (hooks.findSchoolmates && affiliations[0]) {
     const roster =
-      (await hooks.findSchoolmates(affiliations[0].school, affiliations[0].state, affiliations[0].source).catch(() => null)) || [];
+      (await hooks
+        .findSchoolmates(affiliations[0].school, affiliations[0].state, affiliations[0].source, affiliations[0].schoolCode)
+        .catch(() => null)) || [];
     for (const m of roster) if (!sameName(m.name, input.name)) mates.push(m);
   }
   // Highest-rated roster players first (likeliest to be online-active), capped.
