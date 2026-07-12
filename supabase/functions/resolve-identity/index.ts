@@ -14,6 +14,12 @@ import {
   type UscfSearchRow,
   type OnlineSection,
 } from "./uscf.ts";
+import {
+  findSchoolForPlayer,
+  fetchSchoolRoster,
+  fetchChesscomFriends,
+} from "./school.ts";
+import type { SchoolLookupRequest } from "../../../src/lib/identity/schoolTypes.ts";
 
 // ============================================================================
 // Edge function: resolve-identity
@@ -469,6 +475,29 @@ serve(async (req) => {
     // --- Find-username mode (Google-index search for a person's handles) -----
     if (body?.findUsername && typeof body.findUsername === "object") {
       return await handleFindUsername(body.findUsername as Record<string, unknown>);
+    }
+
+    // --- School-affiliation mode (NWSRS / state assns / registration / web) --
+    if (body?.findSchool && typeof body.findSchool === "object") {
+      const req = body.findSchool as SchoolLookupRequest;
+      if (!req.name || !String(req.name).trim()) return json({ available: false, affiliations: [], notes: ["Missing name."] });
+      const result = await findSchoolForPlayer(req, (m) => console.log("[resolve-identity] findSchool:", m));
+      console.log("[resolve-identity] findSchool:", JSON.stringify({ name: req.name, schools: result.affiliations.map((a) => a.school) }));
+      return json(result);
+    }
+
+    // --- School-roster mode (a school's schoolmates) -------------------------
+    if (body?.schoolRoster && typeof body.schoolRoster === "object") {
+      const r = body.schoolRoster as { school?: string; state?: string; source?: string };
+      if (!r.school || !String(r.school).trim()) return json({ available: false, schoolmates: [], notes: ["Missing school."] });
+      const result = await fetchSchoolRoster(r.school, r.state, r.source, (m) => console.log("[resolve-identity] schoolRoster:", m));
+      return json(result);
+    }
+
+    // --- Friends mode (chess.com member-public friends; needs a session) -----
+    if (typeof body?.chesscomFriends === "string" && body.chesscomFriends.trim()) {
+      const friends = await fetchChesscomFriends(body.chesscomFriends.trim(), (m) => console.log("[resolve-identity] friends:", m));
+      return json({ available: true, friends });
     }
 
     const query: PlayerQuery = body?.query || {};

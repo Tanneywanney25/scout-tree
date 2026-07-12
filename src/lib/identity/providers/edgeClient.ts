@@ -15,6 +15,7 @@
 import { supabase } from "@/integrations/supabase/client";
 import type { Evidence, PartialIdentity, PlayerQuery, Platform, Federation, Provider } from "../types";
 import type { GraphEvent, TournamentGraph, EventPlatformInfo, UsernameSearchRequest, UsernameCandidate } from "../graphTypes";
+import type { SchoolAffiliation, SchoolLookupRequest, Schoolmate, OnlinePlatform } from "../schoolTypes";
 import { nameSimilarity, nameMatchWeight, ratingMatchWeight } from "../confidence";
 
 // Graph shapes live in ../graphTypes (shared with the engine); re-export for
@@ -263,6 +264,62 @@ export function findUsernameCandidates(req: UsernameSearchRequest, signal?: Abor
   })();
 
   usernameCache.set(key, promise);
+  return promise;
+}
+
+// ---------------------------------------------------------------------------
+// School-based fallback: the edge is where school-affiliation sources (NWSRS /
+// state associations / registration platforms / LinkedIn / web — all needing
+// server-side fetch or an AI/search key) and the authenticated chess.com
+// friends list live. Each is memoized per key for the session.
+// ---------------------------------------------------------------------------
+
+const schoolCache = new Map<string, Promise<SchoolAffiliation[]>>();
+export function findSchoolAffiliation(req: SchoolLookupRequest, signal?: AbortSignal): Promise<SchoolAffiliation[]> {
+  const key = JSON.stringify([req.name.toLowerCase(), req.state, req.uscfId]);
+  const existing = schoolCache.get(key);
+  if (existing) return existing;
+  const promise = (async (): Promise<SchoolAffiliation[]> => {
+    if (signal?.aborted) return [];
+    const data = await invokeEdge({ findSchool: req }, 90_000);
+    if (!data || data.available === false || !Array.isArray(data.affiliations)) return [];
+    return data.affiliations as SchoolAffiliation[];
+  })();
+  schoolCache.set(key, promise);
+  return promise;
+}
+
+const rosterCache = new Map<string, Promise<Schoolmate[]>>();
+export function fetchSchoolmates(school: string, state?: string, source?: string, signal?: AbortSignal): Promise<Schoolmate[]> {
+  const key = JSON.stringify([school.toLowerCase(), state, source]);
+  const existing = rosterCache.get(key);
+  if (existing) return existing;
+  const promise = (async (): Promise<Schoolmate[]> => {
+    if (signal?.aborted) return [];
+    const data = await invokeEdge({ schoolRoster: { school, state, source } }, 60_000);
+    if (!data || data.available === false || !Array.isArray(data.schoolmates)) return [];
+    return data.schoolmates as Schoolmate[];
+  })();
+  rosterCache.set(key, promise);
+  return promise;
+}
+
+// Chess.com friends are member-public but the endpoint needs an authenticated
+// session (fetched server-side). Lichess has no equivalent list, so the crawler
+// only asks for chess.com friends; a lichess request resolves to [].
+const friendsCache = new Map<string, Promise<string[]>>();
+export function fetchFriends(platform: OnlinePlatform, username: string, signal?: AbortSignal): Promise<string[]> {
+  if (platform !== "chesscom") return Promise.resolve([]);
+  const key = `chesscom:${username.toLowerCase()}`;
+  const existing = friendsCache.get(key);
+  if (existing) return existing;
+  const promise = (async (): Promise<string[]> => {
+    if (signal?.aborted) return [];
+    const data = await invokeEdge({ chesscomFriends: username }, 20_000);
+    if (!data || !Array.isArray(data.friends)) return [];
+    return data.friends as string[];
+  })();
+  friendsCache.set(key, promise);
   return promise;
 }
 

@@ -45,6 +45,7 @@ import type {
 import { PROVIDERS, NAME_FALLBACK_PROVIDERS } from "./providers";
 import { getTournamentGraph, findUsernameCandidates } from "./providers/edgeClient";
 import { runGraphTraversal, type TraversalResult } from "./providers/uscfGraph";
+import { runSchoolResolver } from "./providers/schoolResolver";
 import {
   scoreFromEvidence,
   nameSimilarity,
@@ -522,8 +523,45 @@ export async function resolveIdentity(
       /* Google fallback is best-effort */
     }
 
-    // --- 3b. ABSOLUTE LAST RESORT: platform name search ----------------------
+    // --- 3a½. SCHOOL-BASED SOCIAL-GRAPH FALLBACK -----------------------------
+    // For a player with no online tournament history AND no Google-indexed
+    // handle, trace them through their SCHOOL: find the school, resolve
+    // schoolmates to handles, and identify the account socially tied to that
+    // cohort (friends / frequent opponents / clubs), confirmed by rating,
+    // location and a federation-ID cross-check. Runs before name search because
+    // a social-graph identification is far stronger than a same-name guess.
+    let schoolVerified = 0;
     if (googleVerified === 0 && !signal?.aborted) {
+      const targetUscfId = idDigits(fragments.find((f) => f.source === "uscf")?.uscfId) || idDigits(query.uscfId) || undefined;
+      const schoolState = query.state || fragments.find((f) => f.source === "uscf")?.state;
+      emit("Nothing indexed either — tracing the player through their school's social graph…", "info", "school-graph");
+      try {
+        const school = await runSchoolResolver(
+          {
+            name: query.name,
+            state: schoolState,
+            city: undefined,
+            uscfId: targetUscfId,
+            targetRating,
+            targetFideId,
+            excludeHandles: pool.map((p) => p.account.username),
+          },
+          { signal, budgetMs: 4 * 60_000, log: (m) => emit(m, "running", "school-graph") }
+        );
+        for (const acc of school.accounts) {
+          addToPool(acc, query.name);
+          schoolVerified++;
+        }
+        providerStatus.push({ name: "school-graph", label: "School social graph", available: true, notes: school.notes });
+        if (schoolVerified) emit(`Identified ${schoolVerified} account(s) via ${school.school || "the school"}'s social graph.`, "done", "school-graph");
+        else emit("The school social graph produced no confident match.", "info", "school-graph");
+      } catch {
+        providerStatus.push({ name: "school-graph", label: "School social graph", available: false, notes: ["School resolver error."] });
+      }
+    }
+
+    // --- 3b. ABSOLUTE LAST RESORT: platform name search ----------------------
+    if (googleVerified === 0 && schoolVerified === 0 && !signal?.aborted) {
       emit("The Google index gave nothing verifiable — falling back to platform name search (results may be a namesake).", "info");
 
       const demote = (acc: DiscoveredAccount): DiscoveredAccount => {
@@ -575,13 +613,17 @@ export async function resolveIdentity(
           if (acc) addToPool(demote(acc), s.attachName);
         });
       }
-    } else if (googleVerified > 0) {
+    } else if (googleVerified > 0 || schoolVerified > 0) {
       for (const p of NAME_FALLBACK_PROVIDERS) {
         providerStatus.push({
           name: p.name,
           label: p.label,
           available: true,
-          notes: ["Skipped — the Google index already produced verified leads."],
+          notes: [
+            schoolVerified > 0
+              ? "Skipped — the school social graph already produced a verified match."
+              : "Skipped — the Google index already produced verified leads.",
+          ],
         });
       }
     }
