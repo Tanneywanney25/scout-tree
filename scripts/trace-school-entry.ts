@@ -17,19 +17,30 @@
 //
 // School web search (LinkedIn / state assns / registration) needs an AI/search
 // key (AI_PROXY_*, GEMINI_API_KEY or ANTHROPIC_API_KEY). NWSRS needs none.
+// Schoolmate resolution is USCF-anchored and keyless: roster name + state →
+// USCF ID (public ratings search) → the tournament-graph traversal; the
+// Google name→handle route is only the fallback and does need a key.
 // Chess.com friends need CHESSCOM_COOKIE (a logged-in member session); without
 // it the crawl leans on the fully public game-overlap signal.
 // ============================================================================
 
-import { fetchUscfMember, searchUscfByName, type UscfMember } from "../supabase/functions/resolve-identity/uscf";
+import {
+  fetchUscfMember,
+  searchUscfByName,
+  findMemberId,
+  buildOnlineGraphForMember,
+  type UscfMember,
+} from "../supabase/functions/resolve-identity/uscf";
 import {
   findSchoolForPlayer,
   fetchSchoolRoster,
   fetchChesscomFriends,
 } from "../supabase/functions/resolve-identity/school";
-import { findUsernamesOnWeb } from "../supabase/functions/resolve-identity/googleSearch";
+import { findUsernamesOnWeb, discoverEventOnWeb } from "../supabase/functions/resolve-identity/googleSearch";
 import { readEnv } from "../supabase/functions/_shared/ai";
 import { runSchoolResolution, type SchoolResolverHooks } from "../src/lib/identity/schoolResolver";
+import { runGraphTraversal, type TraversalHooks } from "../src/lib/identity/uscfGraphEngine";
+import type { TournamentGraph } from "../src/lib/identity/graphTypes";
 import type { OnlinePlatform } from "../src/lib/identity/schoolTypes";
 
 interface Args {
@@ -93,9 +104,44 @@ async function main() {
   const hasFriendsCookie = !!(readEnv("CHESSCOM_COOKIE") || readEnv("CHESSCOM_SESSION"));
   console.log(
     `Discovery backends: web-school=${args.noWeb ? "off (--no-web)" : hasAiKey ? "on" : "off (no AI key)"}  ` +
-      `name→handle=${hasAiKey || hasCse ? "on" : "off (no key)"}  chess.com-friends=${hasFriendsCookie ? "on" : "off (no CHESSCOM_COOKIE)"}`
+      `uscf-id-lookup=on (keyless)  name→handle-fallback=${hasAiKey || hasCse ? "on" : "off (no key)"}  ` +
+      `chess.com-friends=${hasFriendsCookie ? "on" : "off (no CHESSCOM_COOKIE)"}`
   );
   if (args.seedMates.length) console.log(`Seeded schoolmate handle(s): ${args.seedMates.map((s) => `@${s.username}(${s.platform})`).join(", ")}`);
+
+  // Same hooks the browser wires via the edge function — here they hit MUIR
+  // directly. The schoolmate traversal (resolveUscfIdentity) gets its own
+  // expand hook so pairing-chain recursion works, plus the web hooks when keys
+  // exist — mirroring scripts/trace-entry.ts.
+  const mateGraphFor = async (memberId: string, maxSections: number, maxEvents: number): Promise<TournamentGraph | null> => {
+    const m = await fetchUscfMember(memberId);
+    if (!m) return null;
+    const secs = await buildOnlineGraphForMember(m, { maxSections, maxEvents });
+    return { rootUscfId: m.id, rootName: m.name, rootState: m.state, onlineEvents: secs, graphTraversalReady: secs.length > 0 };
+  };
+  const mateTraversalHooks: TraversalHooks = {
+    expandMember: (memberId) => mateGraphFor(memberId, 4, 16).catch(() => null),
+    ...(hasAiKey || hasCse
+      ? { findUsernames: (req) => findUsernamesOnWeb(req, () => {}).then((r) => r.candidates) }
+      : {}),
+    ...(hasAiKey
+      ? {
+          discoverPlatform: (ev) =>
+            discoverEventOnWeb(ev).then((info) =>
+              info
+                ? {
+                    platform: info.platform,
+                    chesscomSlugs: info.chesscomSlugs,
+                    lichessSwissIds: info.lichessSwissIds,
+                    lichessArenaIds: info.lichessArenaIds,
+                    confidence: info.confidence,
+                    note: info.note,
+                  }
+                : null
+            ),
+        }
+      : {}),
+  };
 
   const hooks: SchoolResolverHooks = {
     findSchool: args.noWeb
@@ -103,6 +149,22 @@ async function main() {
       : async (req) => (await findSchoolForPlayer(req, (m) => console.log(`  ${m}`))).affiliations,
     findSchoolmates: async (school, st, source) => (await fetchSchoolRoster(school, st, source, (m) => console.log(`  ${m}`))).schoolmates,
     fetchFriends: (_platform, username) => fetchChesscomFriends(username, (m) => console.log(`  ${m}`)),
+    findUscfId: ({ firstName, lastName, state: st, rating }) => findMemberId(firstName, lastName, st, rating),
+    resolveUscfIdentity: async ({ uscfId: mateId, name: mateName, rating }) => {
+      const graph = await mateGraphFor(mateId, 6, 24);
+      if (!graph?.graphTraversalReady || !graph.onlineEvents.length) return null;
+      const traversal = await runGraphTraversal(graph, {
+        targetName: graph.rootName || mateName,
+        targetRating: rating,
+        budgetMs: 25_000,
+        log: (m) => console.log(`    [mate #${mateId}] ${m}`),
+        hooks: mateTraversalHooks,
+      });
+      const best = [...traversal.accounts]
+        .filter((a) => a.platform === "chesscom" || a.platform === "lichess")
+        .sort((a, b) => b.confidence - a.confidence)[0];
+      return best ? { platform: best.platform as OnlinePlatform, username: best.username, confidence: best.confidence } : null;
+    },
     ...(hasAiKey || hasCse
       ? { findUsernames: (req) => findUsernamesOnWeb(req, (m) => console.log(`  [google] ${m}`)).then((r) => r.candidates) }
       : {}),

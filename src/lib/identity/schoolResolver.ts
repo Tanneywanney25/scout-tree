@@ -8,9 +8,12 @@
 //   1. SCHOOL — resolve the target's school (NWSRS / state assns / registration
 //      / LinkedIn / web) via injected hooks (server-backed; see school.ts).
 //   2. COHORT — pull that school's roster and resolve the schoolmates to online
-//      handles the SAME way the main engine discovers any player's handle
-//      (Google-index username search + live verification). These are the
-//      "known-school players the engine has already resolved".
+//      handles the SAME way the main engine resolves a player it has a USCF ID
+//      for: look the schoolmate's USCF ID up by name + state (the public
+//      ratings search), then run the identity engine's tournament-graph
+//      traversal on that ID. Google-index username search + live verification
+//      remains the fallback for mates the USCF route can't resolve. These are
+//      the "known-school players the engine has already resolved".
 //   3. SOCIAL GRAPH — for each resolved schoolmate, gather who they are
 //      connected to, from three public/member-public signals:
 //        • FRIENDS — chess.com's friends list (member-public; fetched through a
@@ -57,6 +60,11 @@ import {
 // ---------------------------------------------------------------------------
 
 const SCHOOLMATE_RESOLVE_POOL = 6; // schoolmates resolved to handles concurrently
+const USCF_MATE_POOL = 4; // schoolmates pushed through the identity engine at once
+const USCF_MATE_TIMEOUT_MS = 30_000; // one schoolmate's identity-engine budget
+const USCF_MATE_PHASE_MS = 90_000; // the whole USCF-anchored resolution phase
+const USCF_MATE_TARGET = 2; // resolved schoolmates are enough to crawl on — stop here
+const USCF_MATE_MIN_CONFIDENCE = 0.7; // the engine's bar for accepting a schoolmate's handle
 const CRAWL_POOL = 6; // schoolmate graphs walked concurrently
 const CANDIDATE_VERIFY_POOL = 8; // candidate accounts verified concurrently
 const CC_ARCHIVE_MONTHS = 18; // months of chess.com archive scanned per schoolmate
@@ -87,9 +95,31 @@ export interface SchoolResolverHooks {
     state: string | undefined,
     source: string | undefined
   ) => Promise<Schoolmate[] | null>;
-  /** Google-index username discovery — THE way a name resolves to a handle.
-   *  Reused verbatim from the main engine (edge `findUsername`). */
+  /** Google-index username discovery — the FALLBACK way a name resolves to a
+   *  handle (many schoolmates use non-obvious handles no index ties to their
+   *  real name). Reused verbatim from the main engine (edge `findUsername`). */
   findUsernames?: (req: UsernameSearchRequest) => Promise<UsernameCandidate[] | null>;
+  /** Name + state → USCF member ID, via the public USCF ratings search (the
+   *  same lookup the main search runs when given a name instead of an ID;
+   *  server-backed because MUIR sends no CORS headers). The bridge that lets
+   *  the engine run the ID-based identity resolution on a schoolmate known
+   *  only as a roster name. */
+  findUscfId?: (req: {
+    firstName: string;
+    lastName: string;
+    state?: string;
+    rating?: number;
+  }) => Promise<{ uscfId: string; rating?: number } | null>;
+  /** USCF ID → best verified online handle, via the identity engine's
+   *  tournament-graph traversal — the exact machinery that resolves the main
+   *  search's target once a USCF ID is known (e.g. #16538484 → the member's
+   *  online events → @tanneywanney25). Bounded by the caller; returns the
+   *  strongest account with its confidence, or null when nothing traces. */
+  resolveUscfIdentity?: (req: {
+    uscfId: string;
+    name: string;
+    rating?: number;
+  }) => Promise<{ platform: OnlinePlatform; username: string; confidence: number } | null>;
   /** A player's chess.com friends (member-public; needs an authenticated
    *  session, so it is fetched server-side). Returns friend usernames, or []
    *  when no session is configured — the crawl then leans on game overlap. */
@@ -338,6 +368,35 @@ interface ResolvedMate {
   platform: OnlinePlatform;
   username: string;
   profile: VerifiedProfile;
+  /** Set when the mate was resolved through their USCF ID (the anchored route). */
+  uscfId?: string;
+  /** The identity engine's confidence in the name→handle link, when it ran. */
+  confidence?: number;
+}
+
+/** Roster names are "First [Middle] Last" — split for the USCF search. */
+function splitName(name: string): { first: string; last: string } | null {
+  const t = name.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  if (t.length < 2) return null;
+  return { first: t[0], last: t[t.length - 1] };
+}
+
+/** Resolve to null after `ms` — one expensive schoolmate resolution must never
+ *  pin the whole phase. The late result is dropped, not awaited. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(t);
+        resolve(null);
+      }
+    );
+  });
 }
 
 async function verify(platform: OnlinePlatform, username: string, signal?: AbortSignal): Promise<VerifiedProfile | null> {
@@ -612,15 +671,85 @@ export async function runSchoolResolution(
     const profile = await verify(s.platform, s.username, signal);
     if (profile) resolved.push({ name: s.name || s.username, platform: s.platform, username: profile.username, profile });
   }
-  await pool(
-    pickedMates,
-    SCHOOLMATE_RESOLVE_POOL,
-    async (mate) => {
-      const r = await resolveSchoolmate(mate, school, input, hooks, signal);
-      if (r && !resolved.some((x) => x.platform === r.platform && lc(x.username) === lc(r.username))) resolved.push(r);
-    },
-    halted
-  );
+
+  // 2a. USCF-ANCHORED RESOLUTION (primary): roster name + state → USCF member
+  //     ID (the public ratings search) → the identity engine's tournament-graph
+  //     traversal — the same route the main search takes once it has a USCF ID.
+  //     Runs a few mates at a time, each on a hard timeout (the engine is
+  //     expensive), and stops as soon as the crawl has enough anchors.
+  if (hooks.findUscfId && hooks.resolveUscfIdentity && resolved.length < USCF_MATE_TARGET && !halted()) {
+    const phaseDeadline = Date.now() + USCF_MATE_PHASE_MS;
+    const phaseHalted = () => halted() || Date.now() > phaseDeadline || resolved.length >= USCF_MATE_TARGET;
+    await pool(
+      pickedMates,
+      USCF_MATE_POOL,
+      async (mate) => {
+        const parts = splitName(mate.name);
+        if (!parts) return;
+        const mateState = mate.state || affiliations[0]?.state || input.state;
+        const found = await hooks
+          .findUscfId!({ firstName: parts.first, lastName: parts.last, state: mateState, rating: mate.rating })
+          .catch(() => null);
+        if (!found) {
+          log(`School resolver: no USCF member found for ${mate.name}${mateState ? ` (${mateState})` : ""} — skipping.`);
+          return;
+        }
+        log(`School resolver: found USCF ID ${found.uscfId} for ${mate.name}${found.rating ? ` (~${found.rating} USCF)` : ""}.`);
+        if (phaseHalted()) return;
+        const hit = await withTimeout(
+          hooks.resolveUscfIdentity!({ uscfId: found.uscfId, name: mate.name, rating: found.rating ?? mate.rating }),
+          USCF_MATE_TIMEOUT_MS
+        );
+        if (!hit) {
+          log(`School resolver: couldn't trace USCF #${found.uscfId} (${mate.name}) to an online handle — continuing.`);
+          return;
+        }
+        if (hit.confidence < USCF_MATE_MIN_CONFIDENCE) {
+          log(
+            `School resolver: @${hit.username} for ${mate.name} scored ${Math.round(hit.confidence * 100)}% — below the ` +
+              `${Math.round(USCF_MATE_MIN_CONFIDENCE * 100)}% bar, discarded.`
+          );
+          return;
+        }
+        if (resolved.some((x) => x.platform === hit.platform && lc(x.username) === lc(hit.username))) return;
+        const profile = await verify(hit.platform, hit.username, signal);
+        if (!profile) {
+          log(`School resolver: @${hit.username} (${mate.name}) did not verify live — skipping.`);
+          return;
+        }
+        if (resolved.length >= USCF_MATE_TARGET) return; // target filled while we verified
+        resolved.push({
+          name: mate.name,
+          platform: hit.platform,
+          username: profile.username,
+          profile,
+          uscfId: found.uscfId,
+          confidence: hit.confidence,
+        });
+        log(`School resolver: resolved ${mate.name} to @${profile.username} at ${Math.round(hit.confidence * 100)}% (USCF #${found.uscfId}).`);
+      },
+      phaseHalted
+    );
+  }
+
+  // 2b. FALLBACK: Google-index / platform name search, only when the anchored
+  //     route resolved nobody (non-obvious handles rarely index by real name,
+  //     which is exactly why 2a exists — but a mate with no USCF record can
+  //     still surface here).
+  if (!resolved.length) {
+    if (hooks.findUscfId && hooks.resolveUscfIdentity) {
+      log("School resolver: the USCF route resolved no schoolmate — falling back to name-based handle discovery.");
+    }
+    await pool(
+      pickedMates,
+      SCHOOLMATE_RESOLVE_POOL,
+      async (mate) => {
+        const r = await resolveSchoolmate(mate, school, input, hooks, signal);
+        if (r && !resolved.some((x) => x.platform === r.platform && lc(x.username) === lc(r.username))) resolved.push(r);
+      },
+      halted
+    );
+  }
   if (!resolved.length) {
     log("School resolver: couldn't resolve any schoolmate to an online handle — cannot trace the social graph.");
     return { accounts: [], notes: [`Found school (${school}) but resolved no schoolmate handles.`], found: false, school, schoolmatesResolved: 0 };

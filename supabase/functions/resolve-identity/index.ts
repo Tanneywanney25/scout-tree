@@ -9,6 +9,7 @@ import {
 import {
   searchUscfByName,
   fetchUscfMember,
+  findMemberId,
   buildOnlineGraphForMember,
   type UscfMember,
   type UscfSearchRow,
@@ -475,6 +476,26 @@ serve(async (req) => {
     // --- Find-username mode (Google-index search for a person's handles) -----
     if (body?.findUsername && typeof body.findUsername === "object") {
       return await handleFindUsername(body.findUsername as Record<string, unknown>);
+    }
+
+    // --- USCF-ID lookup mode (name + state → member ID; the school resolver's
+    //     bridge from a roster name to the ID-based identity engine) ----------
+    if (body?.findUscfId && typeof body.findUscfId === "object") {
+      const r = body.findUscfId as { firstName?: string; lastName?: string; state?: string; rating?: number };
+      const firstName = typeof r.firstName === "string" ? r.firstName.trim() : "";
+      const lastName = typeof r.lastName === "string" ? r.lastName.trim() : "";
+      if (!firstName || !lastName) return json({ available: false, uscfId: null });
+      const found = await findMemberId(
+        firstName,
+        lastName,
+        typeof r.state === "string" && r.state.trim() ? r.state.trim() : undefined,
+        typeof r.rating === "number" && isFinite(r.rating) ? r.rating : undefined
+      );
+      console.log(
+        "[resolve-identity] findUscfId:",
+        JSON.stringify({ name: `${firstName} ${lastName}`, state: r.state, uscfId: found?.uscfId ?? null })
+      );
+      return json(found ? { available: true, uscfId: found.uscfId, rating: found.rating } : { available: true, uscfId: null });
     }
 
     // --- School-affiliation mode (NWSRS / state assns / registration / web) --
