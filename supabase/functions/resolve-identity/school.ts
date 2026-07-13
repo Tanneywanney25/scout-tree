@@ -149,15 +149,15 @@ interface NwsrsRow {
   rating?: number;
 }
 
-// A row: three text cells, then the id <span> (whose Tip attribute carries the
-// school), then the rating cell. We capture the span's ATTRIBUTES as a whole and
-// pull the Tip out separately — an inline optional Tip group lets the lazy match
-// skip it, which silently drops the school from every row.
-const NWSRS_ROW_RE =
-  /<td>\s*([^<]*?)\s*<\/td>\s*<td>\s*([^<]*?)\s*<\/td>\s*<td>\s*([^<]*?)\s*<\/td>\s*<td>\s*<span\s+([^>]*)>\s*([A-Za-z0-9]+)\s*<\/span>\s*<\/td>\s*<td>\s*([0-9]+)\s*<\/td>/gi;
-
-/** Pull the school out of an id-span's attributes (the onmouseover Tip). */
+/** Pull the school out of an id cell's onmouseover Tip (the tooltip text). */
 const TIP_RE = /Tip\('([^']*)'\)/i;
+
+/** An NWSRS regional id: three school letters, then the player's initials and a
+ *  serial that always carries at least one DIGIT ("SKNLH30T"). This SHAPE is
+ *  how we find the id column regardless of where it sits or how it's wrapped —
+ *  far more robust than a fixed position. Requiring a digit also keeps a header
+ *  word like "Rating" (3+ letters, no digit) from being mistaken for an id. */
+const NWSRS_ID_RE = /^[A-Z]{3}[A-Z0-9]*[0-9][A-Z0-9]*$/i;
 
 /** School name out of a "Skyline High School, 11th grade" tooltip. */
 function schoolFromTip(tip?: string): string | undefined {
@@ -168,23 +168,59 @@ function schoolFromTip(tip?: string): string | undefined {
   return school || undefined;
 }
 
+/** One <td> cell: both its stripped TEXT and its raw inner HTML (the Tip lives
+ *  in an attribute, so it survives only in the raw form). */
+interface NwsrsCell {
+  text: string;
+  raw: string;
+}
+
+/** Split a <tr>…</tr> block into cells, tolerating attributes on <td>/<th> and
+ *  any inner markup (the id may be bare, or wrapped in a <span>/<a>/<font>). */
+function rowCells(rowHtml: string): NwsrsCell[] {
+  const cells: NwsrsCell[] = [];
+  const re = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(rowHtml))) {
+    cells.push({ raw: m[1], text: decodeEntities(m[1].replace(/<[^>]*>/g, " ")) });
+  }
+  return cells;
+}
+
+// Parse the ratings/roster table STRUCTURALLY rather than with one rigid
+// pattern. The old single regex demanded bare <td> tags and an id wrapped in a
+// <span> in fixed positions; the live page varies (cell attributes, the id as
+// plain text or inside an <a>/<font>), so every row silently failed to match
+// and the player was reported "not found". Now: pull each row's cells, locate
+// the id by its SHAPE, read last/first from the first two cells, and lift the
+// school from the id cell's Tip when present — deriving the code from the id
+// either way, so a missing tooltip never drops the player.
 function parseNwsrsRows(html: string): NwsrsRow[] {
   const rows: NwsrsRow[] = [];
-  NWSRS_ROW_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = NWSRS_ROW_RE.exec(html))) {
-    const last = decodeEntities(m[1]);
-    const first = decodeEntities(m[2]);
-    if (!last || !/[a-z]/i.test(last)) continue; // skip header / junk rows
-    const tip = TIP_RE.exec(m[4] || "")?.[1];
-    rows.push({
-      last,
-      first,
-      grade: decodeEntities(m[3]) || undefined,
-      school: schoolFromTip(tip),
-      id: m[5].toUpperCase(),
-      rating: Number(m[6]) || undefined,
-    });
+  const trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let tr: RegExpExecArray | null;
+  while ((tr = trRe.exec(html))) {
+    const cells = rowCells(tr[1]);
+    if (cells.length < 4) continue; // need at least last, first, grade, id
+    const last = cells[0].text;
+    const first = cells[1].text;
+    if (!last || !/[a-z]/i.test(last)) continue; // header / junk row
+    if (!first || !/[a-z]/i.test(first)) continue;
+    // The id is the first cell (after the name) whose text is id-shaped.
+    const idIdx = cells.findIndex((c, i) => i >= 2 && NWSRS_ID_RE.test(c.text.trim()));
+    if (idIdx < 0) continue;
+    const id = cells[idIdx].text.trim().toUpperCase();
+    // School: the Tip lives in the id cell's attributes; fall back to scanning
+    // the whole row's raw HTML in case the markup nests it differently.
+    const tip = TIP_RE.exec(cells[idIdx].raw)?.[1] ?? TIP_RE.exec(tr[1])?.[1];
+    // Grade: a "K"/number cell sitting between the name and the id.
+    const grade = cells.slice(2, idIdx).find((c) => /^(K|\d{1,2})$/i.test(c.text.trim()))?.text.trim();
+    // Rating: the first plausible number in a cell after the id.
+    const rating = cells
+      .slice(idIdx + 1)
+      .map((c) => Number(c.text.replace(/[^0-9]/g, "")))
+      .find((n) => n >= 100 && n <= 3000);
+    rows.push({ last, first, grade, school: schoolFromTip(tip), id, rating });
   }
   return rows;
 }
@@ -197,40 +233,84 @@ function schoolCodeOf(id: string): string | undefined {
   return m ? m[1] : undefined;
 }
 
-/** NWSRS: find the target's row (school + regional id), keyless. */
+/** Fetch one ratings letter page and return the rows matching the player. */
+async function nwsrsRowsFor(
+  letter: string,
+  req: SchoolLookupRequest,
+  log: (m: string) => void
+): Promise<{ url: string; matches: NwsrsRow[] } | null> {
+  const L = letter.toUpperCase();
+  if (!/[A-Z]/.test(L)) return null;
+  const url = `${NWSRS_BASE}/ratings/ratings${L}.php`;
+  const html = await fetchText(url, 20000);
+  if (!html) {
+    log(`NWSRS: ratings page ${L} unreachable.`);
+    return null;
+  }
+  const all = parseNwsrsRows(html);
+  const matches = all.filter((r) => samePerson(`${r.first} ${r.last}`, req.name));
+  if (matches.length) {
+    log(`NWSRS: found last name "${matches[0].last}" on the ${L} page (${all.length} rows scanned, ${matches.length} name match(es)).`);
+  }
+  return { url, matches };
+}
+
+/** NWSRS: find the target's row (school + regional id), keyless. Reads the
+ *  ratings page for the surname's first letter, and — if the player isn't on
+ *  it — scans the rest of A–Z as a fallback (a hyphenated/compound surname can
+ *  bucket under a different letter than we guessed). */
 async function nwsrsLookup(req: SchoolLookupRequest, log: (m: string) => void): Promise<SchoolAffiliation | null> {
   const { last } = nameTokens(req.name);
   if (!last) return null;
-  const letter = last[0].toUpperCase();
-  if (!/[A-Z]/.test(letter)) return null;
-  const url = `${NWSRS_BASE}/ratings/ratings${letter}.php`;
-  log(`NWSRS: scanning ${url} for "${req.name}"…`);
-  const html = await fetchText(url, 20000);
-  if (!html) {
-    log("NWSRS: ratings page unreachable.");
+  const firstLetter = last[0].toUpperCase();
+  if (!/[A-Z]/.test(firstLetter)) return null;
+
+  log(`NWSRS: scanning ${NWSRS_BASE}/ratings/ratings${firstLetter}.php for "${req.name}"…`);
+  let found = await nwsrsRowsFor(firstLetter, req, log);
+
+  if (!found || !found.matches.length) {
+    log(`NWSRS: no "${req.name}" on the ${firstLetter} page — scanning the other letters as a fallback…`);
+    const others = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").filter((l) => l !== firstLetter);
+    for (const l of others) {
+      const r = await nwsrsRowsFor(l, req, log);
+      if (r && r.matches.length) {
+        found = r;
+        break;
+      }
+    }
+  }
+
+  if (!found || !found.matches.length) {
+    log(`NWSRS: "${req.name}" not found on any ratings page.`);
     return null;
   }
-  const rows = parseNwsrsRows(html).filter((r) => samePerson(`${r.first} ${r.last}`, req.name) && r.school);
-  if (!rows.length) {
-    log(`NWSRS: no "${req.name}" on the ${letter} ratings page.`);
-    return null;
-  }
+
   // Prefer the highest-rated matching row (a serious player over a namesake).
-  rows.sort((a, b) => (b.rating || 0) - (a.rating || 0));
-  const hit = rows[0];
-  log(`NWSRS: "${req.name}" → ${hit.school} (id ${hit.id}, NWSRS ${hit.rating ?? "?"}).`);
+  const matches = [...found.matches].sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  const hit = matches[0];
+  const code = schoolCodeOf(hit.id);
+  // The school report is keyed by the CODE, so the code (always derivable from
+  // the id) is what the roster needs; the tooltip name is for display. Fall
+  // back to the code as the display name when the tooltip is absent.
+  const schoolName = hit.school || (code ? `NWSRS school ${code}` : undefined);
+  if (!schoolName || !code) {
+    log(`NWSRS: matched ${hit.first} ${hit.last} but couldn't derive a school code from id ${hit.id} — skipping.`);
+    return null;
+  }
+  log(`NWSRS: found ${hit.last}, ${hit.first} (id ${hit.id}, school ${code}${hit.school ? ` — ${hit.school}` : ""}, NWSRS ${hit.rating ?? "?"}).`);
   return {
-    school: hit.school!,
+    school: schoolName,
     state: req.state,
     source: "nwsrs",
     sourceLabel: "Chess Ratings NorthWest (NWSRS)",
-    sourceUrl: url,
+    sourceUrl: found.url,
     // Deterministic exact-name hit in a structured DB — a strong single source.
-    confidence: 0.8,
+    // Slightly lower when the tooltip school name was missing (code-only).
+    confidence: hit.school ? 0.8 : 0.7,
     regionalId: hit.id,
-    schoolCode: schoolCodeOf(hit.id),
+    schoolCode: code,
     grade: hit.grade,
-    note: `NWSRS id ${hit.id} encodes ${hit.school}.`,
+    note: `NWSRS id ${hit.id} encodes school ${code}${hit.school ? ` (${hit.school})` : ""}.`,
   };
 }
 
