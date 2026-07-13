@@ -77,6 +77,23 @@ const FIXTURES: Record<string, string> = {
   "https://www.kshsaa.org/Public/Chess/Main.cfm": `<table>
     <tr><td>Wilson, Emma</td><td>Blue Valley North High School</td><td>4.5</td></tr>
   </table>`,
+
+  // --- MSHSL (MN) — team standings by school (tier 2) ------------------------
+  "https://www.mshsl.org/activities/chess": `<table>
+    <tr><td>Olson, Henrik</td><td>12</td><td>Edina High School</td><td>6.5</td></tr>
+  </table>`,
+
+  // --- VSCA (VA) — tournament crosstable naming the school (tier 3) ----------
+  "https://vschess.org/results": `<table>
+    <tr><td>Carter, Naomi</td><td>1380</td><td>Thomas Jefferson High School</td><td>W</td></tr>
+  </table>`,
+
+  // --- OSCF (OR) — school from tournament results (tier 3). Oregon is an
+  //     NWSRS state, but its coverage is thinning, so this exercises the
+  //     tier-1 → tier-3 fallback: NWSRS returns nothing, OSCF answers.
+  "https://oscf.org/": `<table>
+    <tr><td>Willamette, Noah</td><td>10</td><td>Lincoln High School</td></tr>
+  </table>`,
 };
 
 globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
@@ -158,6 +175,30 @@ async function ksAgreement() {
   check("KS3 agreement lifts confidence ≥ 70%", (top?.confidence ?? 0) >= 0.7, `conf=${top?.confidence}`);
 }
 
+async function mnMshsl() {
+  console.log("\n=== MN — MSHSL (tier 2) ===\n");
+  const r = await findSchoolForPlayer({ name: "Henrik Olson", state: "MN" }, log);
+  const top = r.affiliations[0];
+  check("MN1 MSHSL infers the school", top?.school === "Edina High School" && top?.sourceId === "mn-mshsl", JSON.stringify(top));
+}
+
+async function vaVsca() {
+  console.log("\n=== VA — VSCA (tier 3) ===\n");
+  const r = await findSchoolForPlayer({ name: "Naomi Carter", state: "VA", uscfRating: 1380 }, log);
+  const top = r.affiliations[0];
+  check("VA1 VSCA crosstable names the school", top?.school === "Thomas Jefferson High School" && top?.sourceId === "va-vsca", JSON.stringify(top));
+  check("VA2 tier 3 (state archive) confidence", (top?.confidence ?? 0) >= 0.6, `conf=${top?.confidence}`);
+}
+
+async function orOscfFallthrough() {
+  console.log("\n=== OR — NWSRS (tier 1) empty → OSCF (tier 3) fallback ===\n");
+  const before = fetched.length;
+  const r = await findSchoolForPlayer({ name: "Noah Willamette", state: "OR" }, log);
+  const top = r.affiliations[0];
+  check("OR1 tier 1 NWSRS was tried first", fetched.slice(before).some((u) => u.includes("ratingsnw.com")));
+  check("OR2 fell through to OSCF (tier 3)", top?.school === "Lincoln High School" && top?.sourceId === "or-oscf", JSON.stringify(top));
+}
+
 async function nhNothing() {
   console.log("\n=== NH — no state source, nationwide tier 4 only ===\n");
   const r = await findSchoolForPlayer({ name: "Zoe Adams", state: "NH" }, log);
@@ -186,6 +227,9 @@ async function main() {
   await ilIhsa();
   await azAia();
   await ksAgreement();
+  await mnMshsl();
+  await vaVsca();
+  await orOscfFallthrough();
   await nhNothing();
   ratingSanity();
   console.log(`\n${failures ? `${failures} check(s) FAILED` : "All checks passed"}`);
