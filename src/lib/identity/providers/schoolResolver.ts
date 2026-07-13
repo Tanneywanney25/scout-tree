@@ -43,13 +43,13 @@ export type { SchoolResolverInput, SchoolResolverResult } from "../schoolResolve
  *  tournament graph (the edge builds it with the SAME generous section/event
  *  limits as a main-search target) and run the tournament-graph traversal over
  *  it, with the same edge-backed discovery hooks (flyer search, Google-index
- *  usernames, member expansion) runGraphTraversal always wires in. The budget
- *  comes from the school engine's per-mate allowance — we stay slightly under
- *  it so the traversal winds down and returns before the engine's outer
- *  timeout would drop a late result. Traversal chatter stays out of the
- *  detective UI. */
+ *  usernames, member expansion) runGraphTraversal always wires in. NO time
+ *  budget — like the main search, the trace runs until the mate's graph is
+ *  exhausted (fixed budgets kept killing traces that were seconds from an
+ *  answer); the abort signal is the only external stop. Traversal chatter
+ *  stays out of the detective UI. */
 async function resolveUscfIdentity(
-  req: { uscfId: string; name: string; rating?: number; budgetMs?: number },
+  req: { uscfId: string; name: string; rating?: number },
   signal?: AbortSignal
 ): Promise<{ platform: OnlinePlatform; username: string; confidence: number } | null> {
   const graph = await expandMemberGraph(req.uscfId, signal);
@@ -58,7 +58,6 @@ async function resolveUscfIdentity(
     targetName: graph.rootName || req.name,
     targetRating: req.rating,
     signal,
-    budgetMs: Math.max(30_000, (req.budgetMs ?? 120_000) - 10_000),
     log: () => {},
   });
   const best = [...traversal.accounts]
@@ -79,7 +78,8 @@ export function runSchoolResolver(
     ...opts,
     hooks: {
       findSchool: (req) => findSchoolAffiliation(req, opts.signal),
-      findSchoolmates: (school, state, source, schoolCode) => fetchSchoolmates(school, state, source, schoolCode, opts.signal),
+      findSchoolmates: (school, state, source, schoolCode, sourceId) =>
+        fetchSchoolmates(school, state, source, schoolCode, sourceId, opts.signal),
       findUsernames: (req) => findUsernameCandidates(req, opts.signal),
       fetchFriends: (platform, username) => fetchFriends(platform, username, opts.signal),
       findUscfId: (req) => findUscfMemberId(req, opts.signal),

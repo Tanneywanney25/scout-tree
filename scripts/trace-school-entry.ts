@@ -159,19 +159,18 @@ async function main() {
     findSchool: args.noWeb
       ? async (req) => (await findSchoolForPlayer({ ...req }, (m) => console.log(`  ${m}`))).affiliations.filter((x) => x.source === "nwsrs")
       : async (req) => (await findSchoolForPlayer(req, (m) => console.log(`  ${m}`))).affiliations,
-    findSchoolmates: async (school, st, source, schoolCode) =>
-      (await fetchSchoolRoster(school, schoolCode, st, source, (m) => console.log(`  ${m}`))).schoolmates,
+    findSchoolmates: async (school, st, source, schoolCode, sourceId) =>
+      (await fetchSchoolRoster(school, schoolCode, st, source, sourceId, (m) => console.log(`  ${m}`))).schoolmates,
     fetchFriends: (_platform, username) => fetchChesscomFriends(username, (m) => console.log(`  ${m}`)),
     findUscfId: ({ firstName, lastName, state: st, rating }) => findMemberId(firstName, lastName, st, rating),
-    resolveUscfIdentity: async ({ uscfId: mateId, name: mateName, rating, budgetMs }) => {
+    resolveUscfIdentity: async ({ uscfId: mateId, name: mateName, rating }) => {
       const graph = await mateGraphFor(mateId, 16, 100);
       if (!graph?.graphTraversalReady || !graph.onlineEvents.length) return null;
+      // No time budget — the trace runs until the mate's graph is exhausted,
+      // exactly like the main search (the engine's default is unbounded).
       const traversal = await runGraphTraversal(graph, {
         targetName: graph.rootName || mateName,
         targetRating: rating,
-        // Stay under the school engine's per-mate allowance so the traversal
-        // returns before the outer timeout drops the late result.
-        budgetMs: Math.max(30_000, (budgetMs ?? 120_000) - 10_000),
         log: (m) => console.log(`    [mate #${mateId}] ${m}`),
         hooks: mateTraversalHooks,
       });

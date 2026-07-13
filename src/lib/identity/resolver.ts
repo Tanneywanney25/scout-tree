@@ -546,10 +546,11 @@ export async function resolveIdentity(
             targetFideId,
             excludeHandles: pool.map((p) => p.account.username),
           },
-          // Room for the 180s USCF-anchored schoolmate phase plus a full
-          // archive/clubs crawl — 4min starved the crawl once the anchor
-          // phase was given main-search-sized traversal budgets.
-          { signal, budgetMs: 7 * 60_000, log: (m) => emit(m, "running", "school-graph") }
+          // NO time budget: the school route is the last deterministic chance
+          // for a zero-history player, and fixed budgets kept cutting mate
+          // traces off seconds from an answer. The engine stops on its own
+          // once enough anchors resolve; the abort signal is the user's stop.
+          { signal, log: (m) => emit(m, "running", "school-graph") }
         );
         for (const acc of school.accounts) {
           addToPool(acc, query.name);

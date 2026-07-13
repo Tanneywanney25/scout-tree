@@ -61,14 +61,16 @@ import {
 
 const SCHOOLMATE_RESOLVE_POOL = 6; // schoolmates resolved to handles concurrently
 // The USCF-anchored phase runs the SAME tournament-graph engine the main search
-// runs on its target — and the main search regularly needs 60-120s per member
-// (observed live: Tanush #16538484 resolves in under 60s, but never in 30s
-// with cold caches). The old 30s per-mate budget timed out on every mate and
-// starved the crawl, so these now mirror the main search's allowances.
+// runs on its target — and the main search runs UNBOUNDED (it grinds until the
+// graph is exhausted). Fixed per-mate budgets kept killing traces mid-flight:
+// observed live, Tanush #16538484 resolved in 76-120s+ when two traces shared
+// the rate-limit gates, and a 120s cap + 180s phase cap left the crawl with one
+// anchor (or none), so the target's account was never seen. There are NO time
+// budgets here any more — a trace ends when the engine exhausts the mate's
+// graph, and the phase ends when enough anchors are resolved (or the roster
+// runs out). The caller's abort signal remains the only external stop.
 const USCF_MATE_POOL = 2; // schoolmates traced at once (each trace fans out MUIR + chess.com calls of its own — more than 2 in flight earns 429s)
 const USCF_MATE_SPACING_MS = 1_000; // pause between successive traces per worker (rate-limit hygiene)
-const USCF_MATE_TIMEOUT_MS = 120_000; // one schoolmate's identity-engine budget (matches the main search's per-member pace)
-const USCF_MATE_PHASE_MS = 180_000; // the whole USCF-anchored resolution phase
 const USCF_MATE_TARGET = 2; // resolved schoolmates are enough to crawl on — stop here
 // A schoolmate's handle only needs to be USABLE FOR THE CRAWL — the target is
 // crowned by the social graph's own evidence bar (≥2 mutuals + verification),
@@ -85,7 +87,10 @@ const HEAVY_OPP_GAMES = 12; // one schoolmate playing a handle this much = stron
 const MAX_CANDIDATES = 40; // candidate handles carried into verification
 const BIG_CLUB_MEMBERS = 2000; // clubs bigger than this are too generic to link on
 const SMALL_CLUB_FOR_MEMBERS = 200; // only surface members from a club this small
-const DEFAULT_SCHOOL_BUDGET_MS = 8 * 60_000; // wall-clock ceiling for the whole crawl (≥ the 180s anchor phase + a full archive crawl)
+// Effectively unbounded (matches the traversal engine's own default): the
+// school route is the LAST deterministic chance for a zero-history player, so
+// it must be allowed to finish. The abort signal is the real stop.
+const DEFAULT_SCHOOL_BUDGET_MS = 6 * 60 * 60_000;
 
 /** A purely-social identification (no federation-ID anchor) is capped here: it
  *  is a strong lead, but "the account your schoolmates all play" is not the same
@@ -101,12 +106,15 @@ export interface SchoolResolverHooks {
   findSchool?: (req: SchoolLookupRequest) => Promise<SchoolAffiliation[] | null>;
   /** Fetch a school's roster (schoolmates). Server-backed. `schoolCode` is the
    *  regional roster key (NWSRS: the id's three-letter school code, "SKN") —
-   *  the school report is queried by it, not by the school's name. */
+   *  the school report is queried by it, not by the school's name. `sourceId`
+   *  names the adapter that found the school, so the roster comes from the
+   *  same source (WSCF list, results archive, …). */
   findSchoolmates?: (
     school: string,
     state: string | undefined,
     source: string | undefined,
-    schoolCode?: string
+    schoolCode?: string,
+    sourceId?: string
   ) => Promise<Schoolmate[] | null>;
   /** Google-index username discovery — the FALLBACK way a name resolves to a
    *  handle (many schoolmates use non-obvious handles no index ties to their
@@ -132,11 +140,6 @@ export interface SchoolResolverHooks {
     uscfId: string;
     name: string;
     rating?: number;
-    /** The engine's per-mate allowance. Implementations should run the
-     *  traversal with (slightly under) this — the SAME machinery and discovery
-     *  hooks as the main search, just time-boxed — so it winds down and returns
-     *  before the caller's outer timeout drops the late result. */
-    budgetMs?: number;
   }) => Promise<{ platform: OnlinePlatform; username: string; confidence: number } | null>;
   /** A player's chess.com friends (member-public; needs an authenticated
    *  session, so it is fetched server-side). Returns friend usernames, or []
@@ -400,24 +403,6 @@ function splitName(name: string): { first: string; last: string } | null {
   return { first: t[0], last: t[t.length - 1] };
 }
 
-/** Resolve to null after `ms` — one expensive schoolmate resolution must never
- *  pin the whole phase. The late result is dropped, not awaited. */
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
-  return new Promise((resolve) => {
-    const t = setTimeout(() => resolve(null), ms);
-    p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      () => {
-        clearTimeout(t);
-        resolve(null);
-      }
-    );
-  });
-}
-
 async function verify(platform: OnlinePlatform, username: string, signal?: AbortSignal): Promise<VerifiedProfile | null> {
   const p = platform === "lichess" ? await verifyLichess(username, signal) : await verifyChesscom(username, signal);
   return p || null; // null-or-undefined both mean "not usable here"
@@ -677,7 +662,13 @@ export async function runSchoolResolution(
   if (hooks.findSchoolmates && affiliations[0]) {
     const roster =
       (await hooks
-        .findSchoolmates(affiliations[0].school, affiliations[0].state, affiliations[0].source, affiliations[0].schoolCode)
+        .findSchoolmates(
+          affiliations[0].school,
+          affiliations[0].state,
+          affiliations[0].source,
+          affiliations[0].schoolCode,
+          affiliations[0].sourceId
+        )
         .catch(() => null)) || [];
     for (const m of roster) if (!sameName(m.name, input.name)) mates.push(m);
   }
@@ -699,12 +690,11 @@ export async function runSchoolResolution(
   //     Runs a few mates at a time, each on a hard timeout (the engine is
   //     expensive), and stops as soon as the crawl has enough anchors.
   if (hooks.findUscfId && hooks.resolveUscfIdentity && resolved.length < USCF_MATE_TARGET && !halted()) {
-    const phaseDeadline = Date.now() + USCF_MATE_PHASE_MS;
-    const phaseHalted = () => halted() || Date.now() > phaseDeadline || resolved.length >= USCF_MATE_TARGET;
+    const phaseHalted = () => halted() || resolved.length >= USCF_MATE_TARGET;
     log(
       `School resolver: USCF-anchored resolution — ${USCF_MATE_POOL} mate(s) at a time, ` +
-        `${Math.round(USCF_MATE_TIMEOUT_MS / 1000)}s per trace (same engine + discovery as the main search), ` +
-        `phase cap ${Math.round(USCF_MATE_PHASE_MS / 1000)}s, stopping at ${USCF_MATE_TARGET} resolved.`
+        `no time budget (each trace runs until the mate's graph is exhausted, same engine + discovery ` +
+        `as the main search), stopping at ${USCF_MATE_TARGET} resolved.`
     );
     await pool(
       pickedMates,
@@ -727,25 +717,15 @@ export async function runSchoolResolution(
         if (phaseHalted()) return;
         log(
           `School resolver: resolveUscfIdentity(uscfId=${found.uscfId}, name="${mate.name}", ` +
-            `rating=${found.rating ?? mate.rating ?? "?"}, budgetMs=${USCF_MATE_TIMEOUT_MS})…`
+            `rating=${found.rating ?? mate.rating ?? "?"}) — no time budget, tracing until exhausted…`
         );
         const t0 = Date.now();
-        const hit = await withTimeout(
-          hooks.resolveUscfIdentity!({
-            uscfId: found.uscfId,
-            name: mate.name,
-            rating: found.rating ?? mate.rating,
-            budgetMs: USCF_MATE_TIMEOUT_MS,
-          }),
-          USCF_MATE_TIMEOUT_MS
-        );
+        const hit = await hooks
+          .resolveUscfIdentity!({ uscfId: found.uscfId, name: mate.name, rating: found.rating ?? mate.rating })
+          .catch(() => null);
         const secs = Math.round((Date.now() - t0) / 1000);
         if (!hit) {
-          const timedOut = Date.now() - t0 >= USCF_MATE_TIMEOUT_MS;
-          log(
-            `School resolver: couldn't trace USCF #${found.uscfId} (${mate.name}) to an online handle ` +
-              `after ${secs}s${timedOut ? " — timed out" : ""} — continuing.`
-          );
+          log(`School resolver: couldn't trace USCF #${found.uscfId} (${mate.name}) to an online handle after ${secs}s — continuing.`);
           return;
         }
         log(
