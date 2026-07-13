@@ -139,8 +139,13 @@ export function ratingMatchWeight(approx: number, candidate: number): number {
   if (diff <= 250) return 0.8;
   if (diff <= 450) return 0.4; // ~USCF↔online offset — still corroborating
   if (diff <= 700) return 0.05;
-  if (diff <= 1000) return -0.2;
-  return -0.6;
+  // Beyond the plausible cross-system offset the gap is real counter-evidence,
+  // not noise: a ~1300 USCF junior does not sit at ~250 online after dozens of
+  // games (observed live: a 242-rated namesake account scored 62% on a name
+  // match alone). A >1000pt gap must roughly cancel even a perfect name match
+  // so the account surfaces as a weak lead, never a "probable".
+  if (diff <= 1000) return -0.5;
+  return -1.8;
 }
 
 /**
