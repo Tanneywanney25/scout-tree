@@ -489,6 +489,29 @@ export const EXTERNAL_ADAPTERS: SchoolAdapter[] = [
     sourceKind: "state-assoc",
     urls: ["https://www.kshsaa.org/Public/Chess/Main.cfm"],
   }),
+
+  // --- Tier 3: state chess association result archives (name + school appear
+  //     together on results pages). High-scholastic-volume states first.
+  makeScanAdapter({ id: "va-vsca", label: "VSCA results (Virginia)", tier: 3, states: ["VA"], sourceKind: "state-assoc", urls: ["https://vschess.org/results", "https://www.vschess.org/results"] }),
+  makeScanAdapter({ id: "va-vcf", label: "Virginia Chess Federation", tier: 3, states: ["VA"], sourceKind: "state-assoc", urls: ["https://vachess.org/"] }),
+  makeScanAdapter({ id: "or-oscf", label: "OSCF (Oregon scholastic)", tier: 3, states: ["OR"], sourceKind: "state-assoc", urls: ["https://oscf.org/", "https://www.oscf.org/"] }),
+  makeScanAdapter({ id: "il-ica", label: "Illinois Chess Association", tier: 3, states: ["IL"], sourceKind: "state-assoc", urls: ["https://il-chess.org/"] }),
+  makeScanAdapter({ id: "ks-kca", label: "Kansas Chess Association", tier: 3, states: ["KS"], sourceKind: "state-assoc", urls: ["https://kansaschess.org/"] }),
+  makeScanAdapter({ id: "wi-wca", label: "Wisconsin Chess Association", tier: 3, states: ["WI"], sourceKind: "state-assoc", urls: ["https://wischess.org/"] }),
+  makeScanAdapter({ id: "tx-tca", label: "Texas Chess Association", tier: 3, states: ["TX"], sourceKind: "state-assoc", urls: ["https://texaschess.org/"] }),
+  makeScanAdapter({ id: "ca-calchess", label: "CalChess (Northern California)", tier: 3, states: ["CA"], sourceKind: "state-assoc", urls: ["https://calchess.org/", "https://www.bayareachess.com/results/"] }),
+  makeScanAdapter({ id: "ca-scchess", label: "Southern California Chess Federation", tier: 3, states: ["CA"], sourceKind: "state-assoc", urls: ["https://scchess.com/"] }),
+  makeScanAdapter({ id: "ny-nysca", label: "New York State Chess Association", tier: 3, states: ["NY"], sourceKind: "state-assoc", urls: ["https://www.nysca.net/", "https://nyschess.org/"] }),
+  makeScanAdapter({ id: "fl-fca", label: "Florida Chess Association", tier: 3, states: ["FL"], sourceKind: "state-assoc", urls: ["https://floridachess.org/"] }),
+  makeScanAdapter({ id: "ga-gca", label: "Georgia Chess Association", tier: 3, states: ["GA"], sourceKind: "state-assoc", urls: ["https://georgiachess.org/"] }),
+  makeScanAdapter({ id: "nc-ncca", label: "North Carolina Chess Association", tier: 3, states: ["NC"], sourceKind: "state-assoc", urls: ["https://www.ncchess.org/"] }),
+  makeScanAdapter({ id: "oh-oca", label: "Ohio Chess Association", tier: 3, states: ["OH"], sourceKind: "state-assoc", urls: ["https://ohchess.org/"] }),
+  makeScanAdapter({ id: "mi-mca", label: "Michigan Chess Association", tier: 3, states: ["MI"], sourceKind: "state-assoc", urls: ["https://michess.org/"] }),
+  makeScanAdapter({ id: "co-csca", label: "Colorado State Chess Association", tier: 3, states: ["CO"], sourceKind: "state-assoc", urls: ["https://colorado-chess.com/"] }),
+  makeScanAdapter({ id: "ma-maca", label: "Massachusetts Chess Association", tier: 3, states: ["MA"], sourceKind: "state-assoc", urls: ["https://masschess.org/"] }),
+  makeScanAdapter({ id: "nj-njscf", label: "New Jersey State Chess Federation", tier: 3, states: ["NJ"], sourceKind: "state-assoc", urls: ["https://njscf.org/"] }),
+  makeScanAdapter({ id: "pa-pscf", label: "Pennsylvania State Chess Federation", tier: 3, states: ["PA"], sourceKind: "state-assoc", urls: ["https://pscfchess.org/"] }),
+  makeScanAdapter({ id: "wa-wcf", label: "Washington Chess Federation", tier: 3, states: ["WA"], sourceKind: "state-assoc", urls: ["https://wachess.org/"] }),
 ];
 
 /** Adapters eligible for a state (or the wildcard ones when state is unknown),
