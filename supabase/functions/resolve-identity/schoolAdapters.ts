@@ -417,6 +417,21 @@ const wscfAdapter: SchoolAdapter = {
 
 export const EXTERNAL_ADAPTERS: SchoolAdapter[] = [
   wscfAdapter,
+
+  // --- Tier 1: CXR (Chess Express Ratings) — OK is CXR-first (OSCO rates all
+  //     sections through it); per-player profile pages carry the school.
+  makeScanAdapter({
+    id: "cxr",
+    label: "Chess Express Ratings (CXR)",
+    tier: 1,
+    states: ["OK", "AR", "KS", "MO", "TX"],
+    sourceKind: "cxr",
+    searchUrls: [
+      "https://www.cxrchess.com/search.php?last={last}&first={first}",
+      "https://www.cxrchess.com/players/?q={full}",
+    ],
+    confidence: 0.8, // CXR profiles state the school in a structured field
+  }),
 ];
 
 /** Adapters eligible for a state (or the wildcard ones when state is unknown),
