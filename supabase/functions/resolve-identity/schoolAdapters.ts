@@ -512,6 +512,42 @@ export const EXTERNAL_ADAPTERS: SchoolAdapter[] = [
   makeScanAdapter({ id: "nj-njscf", label: "New Jersey State Chess Federation", tier: 3, states: ["NJ"], sourceKind: "state-assoc", urls: ["https://njscf.org/"] }),
   makeScanAdapter({ id: "pa-pscf", label: "Pennsylvania State Chess Federation", tier: 3, states: ["PA"], sourceKind: "state-assoc", urls: ["https://pscfchess.org/"] }),
   makeScanAdapter({ id: "wa-wcf", label: "Washington Chess Federation", tier: 3, states: ["WA"], sourceKind: "state-assoc", urls: ["https://wachess.org/"] }),
+
+  // --- Tier 4: registration platforms (public advance-entry lists: name +
+  //     school + section before the event even runs).
+  makeScanAdapter({
+    id: "reg-king",
+    label: "KingRegistration entry lists",
+    tier: 4,
+    states: ["KS", "MO", "OK", "AR", "NE", "IA"],
+    sourceKind: "registration",
+    searchUrls: ["https://kingregistration.com/search?q={full}"],
+    urls: ["https://kingregistration.com/"],
+  }),
+  makeScanAdapter({
+    id: "reg-caissa",
+    label: "caissachess.net entry lists",
+    tier: 4,
+    states: ["*"],
+    sourceKind: "registration",
+    searchUrls: ["https://caissachess.net/online-registration/search?name={full}"],
+  }),
+  makeScanAdapter({
+    id: "reg-tristate",
+    label: "Tri-State Chess advance entries (NYC)",
+    tier: 4,
+    states: ["NY", "NJ", "CT"],
+    sourceKind: "registration",
+    urls: ["https://tristatechess.com/advance-entries", "https://www.tristatechess.com/advance-entries"],
+  }),
+  makeScanAdapter({
+    id: "reg-officialchess",
+    label: "officialchess.org entries (VA / mid-Atlantic)",
+    tier: 4,
+    states: ["VA", "MD", "DC"],
+    sourceKind: "registration",
+    urls: ["https://officialchess.org/", "https://www.officialchess.org/"],
+  }),
 ];
 
 /** Adapters eligible for a state (or the wildcard ones when state is unknown),
