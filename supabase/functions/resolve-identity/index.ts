@@ -509,9 +509,9 @@ serve(async (req) => {
 
     // --- School-roster mode (a school's schoolmates) -------------------------
     if (body?.schoolRoster && typeof body.schoolRoster === "object") {
-      const r = body.schoolRoster as { school?: string; schoolCode?: string; state?: string; source?: string };
+      const r = body.schoolRoster as { school?: string; schoolCode?: string; state?: string; source?: string; sourceId?: string };
       if (!r.school || !String(r.school).trim()) return json({ available: false, schoolmates: [], notes: ["Missing school."] });
-      const result = await fetchSchoolRoster(r.school, r.schoolCode, r.state, r.source, (m) => console.log("[resolve-identity] schoolRoster:", m));
+      const result = await fetchSchoolRoster(r.school, r.schoolCode, r.state, r.source, r.sourceId, (m) => console.log("[resolve-identity] schoolRoster:", m));
       return json(result);
     }
 

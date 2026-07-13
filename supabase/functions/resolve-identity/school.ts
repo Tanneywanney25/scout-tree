@@ -26,6 +26,13 @@
 // ============================================================================
 
 import { callAIWithSearch, geminiQuotaCoolingDown, readEnv } from "../_shared/ai.ts";
+import {
+  EXTERNAL_ADAPTERS,
+  adaptersForState,
+  type AdapterPlayer,
+  type AdapterSchoolHit,
+  type SchoolAdapter,
+} from "./schoolAdapters.ts";
 import type {
   SchoolAffiliation,
   SchoolLookupRequest,
@@ -71,6 +78,8 @@ const STATE_SOURCE_HINTS: Record<string, string[]> = {
   VA: ["vachess.org", "vschess.org/results", "officialchess.org"],
   OR: ["oscf.org", "ratingsnw.com"], WA: ["ratingsnw.com", "wachess.org"],
 };
+// KSCA runs Kansas' scholastic databases — feed it to the AI ladder too.
+STATE_SOURCE_HINTS.KS.push("ksca.us");
 
 // ---------------------------------------------------------------------------
 // Small utilities
@@ -383,6 +392,55 @@ function consolidate(affs: SchoolAffiliation[]): SchoolAffiliation[] {
 }
 
 // ---------------------------------------------------------------------------
+// The adapter registry — NWSRS plus every external source (Tiers 1-4).
+// ---------------------------------------------------------------------------
+
+/** NWSRS expressed through the common adapter contract (the template every
+ *  other adapter follows). Roster stays on the code-keyed school report via
+ *  fetchSchoolRoster's dedicated path, which preserves full roster names. */
+const nwsrsAdapter: SchoolAdapter = {
+  id: "nwsrs",
+  label: "Chess Ratings NorthWest (NWSRS)",
+  tier: 1,
+  states: [...NWSRS_STATES],
+  sourceKind: "nwsrs",
+  async findSchool(p: AdapterPlayer, log: (m: string) => void): Promise<AdapterSchoolHit | null> {
+    const aff = await nwsrsLookup({ name: p.fullName, state: p.state, uscfRating: p.rating }, log);
+    if (!aff) return null;
+    return {
+      schoolName: aff.school,
+      schoolCode: aff.schoolCode,
+      confidence: aff.confidence,
+      sourceUrl: aff.sourceUrl,
+      grade: aff.grade,
+      regionalId: aff.regionalId,
+      note: aff.note,
+    };
+  },
+};
+
+const REGISTRY: SchoolAdapter[] = [nwsrsAdapter, ...EXTERNAL_ADAPTERS];
+
+/** A tier-1 (or better) hit at/above this skips the lower tiers entirely. */
+const TIER_SKIP_CONFIDENCE = 0.7;
+
+function hitToAffiliation(adapter: SchoolAdapter, hit: AdapterSchoolHit, state?: string): SchoolAffiliation {
+  return {
+    school: hit.schoolName,
+    state,
+    source: adapter.sourceKind,
+    sourceId: adapter.id,
+    sourceLabel: adapter.label,
+    sourceUrl: hit.sourceUrl,
+    confidence: Math.max(0, Math.min(1, hit.confidence)),
+    regionalId: hit.regionalId,
+    schoolCode: hit.schoolCode,
+    grade: hit.grade,
+    note: hit.note,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
 
@@ -393,18 +451,59 @@ export async function findSchoolForPlayer(
   const notes: string[] = [];
   const affs: SchoolAffiliation[] = [];
   const state = req.state?.trim().toUpperCase();
+  const { first, last } = nameTokens(req.name);
+  const player: AdapterPlayer = {
+    firstName: first,
+    lastName: last,
+    fullName: req.name,
+    state,
+    rating: req.uscfRating,
+  };
 
-  // Run the deterministic keyless source (NWSRS, when the state is in range)
-  // and the AI web source concurrently — they never depend on each other.
-  const runNwsrs = !state || NWSRS_STATES.has(state);
-  const [nwsrs, web] = await Promise.all([
-    runNwsrs ? nwsrsLookup(req, log).catch(() => null) : Promise.resolve(null),
-    webFindSchool(req, log).catch(() => [] as SchoolAffiliation[]),
-  ]);
+  // The AI web/LinkedIn search runs CONCURRENTLY with the tier ladder — it is
+  // slow, keyed and independent, and its findings merge in at the end whatever
+  // the deterministic tiers produced.
+  const webPromise = webFindSchool(req, log).catch(() => [] as SchoolAffiliation[]);
 
-  if (nwsrs) affs.push(nwsrs);
-  affs.push(...web);
-  if (!runNwsrs) notes.push(`NWSRS skipped — it does not cover ${state}.`);
+  // Deterministic sources, tier by tier: 1 regional rating systems, 2 HS
+  // activity associations, 3 state-association archives, 4 registration
+  // platforms. A confident hit (≥70%) stops the ladder.
+  const tiers = adaptersForState(state, REGISTRY);
+  if (!state) {
+    // No state on record: NWSRS still scans keylessly by surname (the common
+    // NW case), plus whatever nationwide sources exist.
+    tiers[0].unshift(nwsrsAdapter);
+    notes.push("No state on record — queried NWSRS and nationwide sources only.");
+  } else if (!tiers.some((t) => t.length)) {
+    notes.push(`No structured scholastic source registered for ${state} — relying on the web/AI search.`);
+  }
+
+  for (let t = 0; t < tiers.length; t++) {
+    const group = tiers[t];
+    if (!group.length) continue;
+    const best = affs.reduce((m, a) => Math.max(m, a.confidence), 0);
+    if (best >= TIER_SKIP_CONFIDENCE) {
+      log(`School lookup: tier ${t + 1} skipped — a higher tier already answered at ${Math.round(best * 100)}%.`);
+      notes.push(`Tier ${t + 1} skipped (higher-tier hit at ${Math.round(best * 100)}%).`);
+      break;
+    }
+    log(`School lookup: tier ${t + 1} — ${group.map((g) => g.label).join("; ")}.`);
+    const hits = await Promise.all(
+      group.map(async (a) => {
+        try {
+          const hit = await a.findSchool(player, log);
+          if (hit) log(`School lookup: ${a.label} → ${hit.schoolName} (${Math.round(hit.confidence * 100)}%).`);
+          return hit ? hitToAffiliation(a, hit, state) : null;
+        } catch (e) {
+          log(`School lookup: ${a.label} failed (${e instanceof Error ? e.message : "error"}) — continuing.`);
+          return null;
+        }
+      })
+    );
+    for (const h of hits) if (h) affs.push(h);
+  }
+
+  affs.push(...(await webPromise));
 
   const schools = consolidate(affs);
   if (schools.length) notes.push(`Found ${schools.length} candidate school(s): ${schools.map((s) => s.school).join("; ")}.`);
@@ -507,25 +606,44 @@ export async function fetchSchoolRoster(
   schoolCode: string | undefined,
   state: string | undefined,
   source: string | undefined,
+  sourceId: string | undefined,
   log: (m: string) => void = () => {}
 ): Promise<SchoolRosterResult> {
   const notes: string[] = [];
   let schoolmates: Schoolmate[] = [];
-
-  // NWSRS is the only source with a directly-fetchable roster today; for a
-  // school it named (or any NW-state school) use its school-report page. The
-  // report is keyed by the three-letter school code the NWSRS id encodes —
-  // without a code there is no report (querying by name returns the WRONG
-  // school's roster, which is worse than none).
   const st = state?.trim().toUpperCase();
   const code = schoolCode?.trim().toUpperCase();
-  if (source === "nwsrs" || !st || NWSRS_STATES.has(st)) {
+
+  // 1. Adapter-routed roster: the affiliation carries WHICH source named the
+  //    school (sourceId), and that source knows how to enumerate its players
+  //    (WSCF's master list, a results archive's co-listed rows, …). NWSRS is
+  //    handled below on its dedicated code-keyed path.
+  const adapter = sourceId && sourceId !== "nwsrs" ? REGISTRY.find((a) => a.id === sourceId) : undefined;
+  if (adapter?.fetchRoster) {
+    const entries = await adapter.fetchRoster({ name: school, code }, log).catch(() => []);
+    schoolmates = entries.map((e) => ({
+      name: `${e.firstName} ${e.lastName}`.replace(/\s+/g, " ").trim(),
+      rating: e.rating,
+      regionalId: e.regionalId,
+      grade: e.grade,
+      state: st,
+      source: `${adapter.id}-roster`,
+    }));
+    if (schoolmates.length) log(`School roster: ${adapter.label} → ${schoolmates.length} player(s) for "${school}".`);
+  }
+
+  // 2. NWSRS school report (also the fallback for any NW-state school): keyed
+  //    by the three-letter school code the NWSRS id encodes — without a code
+  //    there is no report (querying by name returns the WRONG school's
+  //    roster, which is worse than none).
+  if (!schoolmates.length && (sourceId === "nwsrs" || source === "nwsrs" || !st || NWSRS_STATES.has(st))) {
     if (code && /^[A-Z]{2,5}$/.test(code)) {
       schoolmates = await nwsrsSchoolRoster(code, log).catch(() => []);
     } else {
       log(`NWSRS: no school code for "${school}" — skipping its school report.`);
     }
   }
+
   if (schoolmates.length) notes.push(`Roster: ${schoolmates.length} schoolmate(s) from ${school}.`);
   else notes.push(`No roster available for ${school}.`);
 

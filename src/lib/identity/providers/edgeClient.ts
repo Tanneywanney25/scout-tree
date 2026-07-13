@@ -323,13 +323,13 @@ export function findSchoolAffiliation(req: SchoolLookupRequest, signal?: AbortSi
 }
 
 const rosterCache = new Map<string, Promise<Schoolmate[]>>();
-export function fetchSchoolmates(school: string, state?: string, source?: string, schoolCode?: string, signal?: AbortSignal): Promise<Schoolmate[]> {
-  const key = JSON.stringify([school.toLowerCase(), state, source, schoolCode]);
+export function fetchSchoolmates(school: string, state?: string, source?: string, schoolCode?: string, sourceId?: string, signal?: AbortSignal): Promise<Schoolmate[]> {
+  const key = JSON.stringify([school.toLowerCase(), state, source, schoolCode, sourceId]);
   const existing = rosterCache.get(key);
   if (existing) return existing;
   const promise = (async (): Promise<Schoolmate[]> => {
     if (signal?.aborted) return [];
-    const data = await invokeEdge({ schoolRoster: { school, schoolCode, state, source } }, 60_000);
+    const data = await invokeEdge({ schoolRoster: { school, schoolCode, state, source, sourceId } }, 60_000);
     if (!data || data.available === false || !Array.isArray(data.schoolmates)) return [];
     return data.schoolmates as Schoolmate[];
   })();

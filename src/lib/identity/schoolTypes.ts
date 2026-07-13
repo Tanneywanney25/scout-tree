@@ -40,6 +40,9 @@ export interface SchoolAffiliation {
   state?: string;
   city?: string;
   source: SchoolSource;
+  /** Which adapter produced this affiliation ("nwsrs", "wscf", "cxr",
+   *  "il-ihsa", …) — the roster lookup routes back to the same source. */
+  sourceId?: string;
   /** Human label for logs/UI ("Chess Ratings NorthWest (NWSRS)"). */
   sourceLabel: string;
   /** The page that made the connection, when known. */
