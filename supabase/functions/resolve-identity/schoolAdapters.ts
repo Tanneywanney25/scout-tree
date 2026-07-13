@@ -288,12 +288,136 @@ function makeScanAdapter(cfg: ScanConfig): SchoolAdapter {
 }
 
 // ---------------------------------------------------------------------------
+// WSCF (Wisconsin) — tier 1. Master rating lists carry name, rating, grade and
+// team/school in explicit columns, so this adapter maps columns by header and
+// reads the school field directly (0.8), and the same table IS the roster.
+// ---------------------------------------------------------------------------
+
+const WSCF_URLS = [
+  "https://www.wisconsinscholasticchess.org/tournaments/ratings-look-up",
+  "https://wisconsinscholasticchess.org/tournaments/ratings-look-up",
+];
+
+interface ColumnMap {
+  name?: number;
+  last?: number;
+  first?: number;
+  school?: number;
+  rating?: number;
+  grade?: number;
+}
+
+function mapColumns(header: string[]): ColumnMap | null {
+  const map: ColumnMap = {};
+  header.forEach((h, i) => {
+    const k = norm(h);
+    if (/^(player|name|player name)$/.test(k)) map.name = i;
+    else if (/last/.test(k)) map.last = i;
+    else if (/first/.test(k)) map.first = i;
+    else if (/school|team|club/.test(k)) map.school = i;
+    else if (/rating|rtg/.test(k)) map.rating ??= i;
+    else if (/grade|gr\b/.test(k)) map.grade = i;
+  });
+  const hasName = map.name !== undefined || (map.last !== undefined && map.first !== undefined);
+  return hasName && map.school !== undefined ? map : null;
+}
+
+function wscfRows(html: string): { first: string; last: string; school: string; rating?: number; grade?: string }[] {
+  const out: { first: string; last: string; school: string; rating?: number; grade?: string }[] = [];
+  const rows = tableRows(html);
+  let cols: ColumnMap | null = null;
+  for (const cells of rows) {
+    const asHeader = mapColumns(cells);
+    if (asHeader) {
+      cols = asHeader; // a new table's header row
+      continue;
+    }
+    if (!cols) continue;
+    const school = (cells[cols.school!] || "").trim();
+    if (!school) continue;
+    let first = "";
+    let last = "";
+    if (cols.name !== undefined) {
+      const name = nameFromCell(cells[cols.name] || "");
+      if (!name) continue;
+      first = name.first;
+      last = name.last;
+    } else {
+      first = (cells[cols.first!] || "").trim().split(" ")[0];
+      last = (cells[cols.last!] || "").trim().split(" ").pop() || "";
+    }
+    if (!first || !last) continue;
+    const ratingRaw = cols.rating !== undefined ? Number((cells[cols.rating] || "").replace(/\D/g, "")) : NaN;
+    out.push({
+      first,
+      last,
+      school,
+      rating: ratingRaw >= 100 && ratingRaw <= 3000 ? ratingRaw : undefined,
+      grade: cols.grade !== undefined ? (cells[cols.grade] || "").trim() || undefined : undefined,
+    });
+  }
+  return out;
+}
+
+const wscfAdapter: SchoolAdapter = {
+  id: "wscf",
+  label: "Wisconsin Scholastic Chess Federation (WSCF)",
+  tier: 1,
+  states: ["WI"],
+  sourceKind: "wscf",
+  async findSchool(p, log) {
+    for (const url of WSCF_URLS) {
+      const html = await fetchText(url, 20000);
+      if (!html) {
+        log(`[tier 1] WSCF: ${url} unreachable — skipping.`);
+        continue;
+      }
+      const rows = wscfRows(html);
+      const mine = rows.filter((r) => norm(r.last) === norm(p.lastName) && norm(r.first).startsWith(norm(p.firstName)));
+      if (!mine.length) {
+        log(`[tier 1] WSCF: no "${p.fullName}" in the master rating list (${rows.length} rows).`);
+        return null;
+      }
+      // Rating-closest row wins when homonyms exist (mirrors findMemberId).
+      mine.sort((a, b) => Math.abs((a.rating || 0) - (p.rating || 0)) - Math.abs((b.rating || 0) - (p.rating || 0)));
+      const hit = mine[0];
+      log(`[tier 1] WSCF: "${p.fullName}" → ${hit.school} (explicit school column, 80%).`);
+      return {
+        schoolName: hit.school,
+        schoolCode: hit.school,
+        confidence: 0.8,
+        sourceUrl: url,
+        grade: hit.grade,
+        note: `WSCF master rating list ties ${p.fullName} to ${hit.school}.`,
+      };
+    }
+    return null;
+  },
+  async fetchRoster(school, log) {
+    const want = norm(school.code || school.name);
+    for (const url of WSCF_URLS) {
+      const html = await fetchText(url, 20000);
+      if (!html) continue;
+      const rows = wscfRows(html).filter((r) => norm(r.school) === want);
+      if (rows.length) {
+        log(`[tier 1] WSCF: roster for "${school.name}" → ${rows.length} player(s).`);
+        return rows.map((r) => ({ firstName: r.first, lastName: r.last, rating: r.rating, grade: r.grade }));
+      }
+    }
+    log(`[tier 1] WSCF: no roster rows for "${school.name}".`);
+    return [];
+  },
+};
+
+// ---------------------------------------------------------------------------
 // The registry (everything except NWSRS, which school.ts registers itself).
 // URLs beyond the verified tier-1 systems are the source list's leads — every
 // one fails soft, so a stale lead costs a log line, never a wrong answer.
 // ---------------------------------------------------------------------------
 
-export const EXTERNAL_ADAPTERS: SchoolAdapter[] = [];
+export const EXTERNAL_ADAPTERS: SchoolAdapter[] = [
+  wscfAdapter,
+];
 
 /** Adapters eligible for a state (or the wildcard ones when state is unknown),
  *  grouped and ordered by tier. */
