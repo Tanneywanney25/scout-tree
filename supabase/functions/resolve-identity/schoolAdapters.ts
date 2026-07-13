@@ -432,6 +432,63 @@ export const EXTERNAL_ADAPTERS: SchoolAdapter[] = [
     ],
     confidence: 0.8, // CXR profiles state the school in a structured field
   }),
+
+  // --- Tier 1: KSCA (Kansas) — school/player databases + results.
+  makeScanAdapter({
+    id: "ksca",
+    label: "Kansas Scholastic Chess Association (KSCA)",
+    tier: 1,
+    states: ["KS"],
+    sourceKind: "state-assoc",
+    urls: ["https://www.ksca.us/", "https://ksca.us/"],
+    confidence: 0.6,
+  }),
+
+  // --- Tier 2: state HS activities associations (chess as an official sport).
+  makeScanAdapter({
+    id: "il-ihsa",
+    label: "IHSA chess (Illinois HS)",
+    tier: 2,
+    states: ["IL"],
+    sourceKind: "state-assoc",
+    urls: [
+      "https://www.ihsa.org/Sports-Activities/Chess",
+      "https://ilchesscoach.org/results/",
+      "https://www.ilchesscoach.org/results/",
+    ],
+  }),
+  makeScanAdapter({
+    id: "il-iesa",
+    label: "IESA chess (Illinois grades 5-8)",
+    tier: 2,
+    states: ["IL"],
+    sourceKind: "state-assoc",
+    urls: ["https://www.iesa.org/activities/ch/", "https://www.iesa.org/activities/chess/"],
+  }),
+  makeScanAdapter({
+    id: "az-aia",
+    label: "AIA chess (Arizona HS)",
+    tier: 2,
+    states: ["AZ"],
+    sourceKind: "state-assoc",
+    urls: ["https://aiaonline.org/activities/chess", "https://www.aiaonline.org/activities/chess"],
+  }),
+  makeScanAdapter({
+    id: "mn-mshsl",
+    label: "MSHSL chess (Minnesota HS)",
+    tier: 2,
+    states: ["MN"],
+    sourceKind: "state-assoc",
+    urls: ["https://www.mshsl.org/activities/chess"],
+  }),
+  makeScanAdapter({
+    id: "ks-kshsaa",
+    label: "KSHSAA chess (Kansas HS)",
+    tier: 2,
+    states: ["KS"],
+    sourceKind: "state-assoc",
+    urls: ["https://www.kshsaa.org/Public/Chess/Main.cfm"],
+  }),
 ];
 
 /** Adapters eligible for a state (or the wildcard ones when state is unknown),
