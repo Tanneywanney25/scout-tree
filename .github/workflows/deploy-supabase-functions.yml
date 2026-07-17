@@ -1,0 +1,98 @@
+name: Deploy Supabase Edge Functions
+
+# Deploys the edge functions (and, if provided, configures their AI secret) to
+# the ScoutTree Supabase project, then smoke-tests the Find Player AI detective.
+# Runs on pushes to main that touch the functions, or on demand via "Run workflow".
+#
+# Required repository secret:
+#   SUPABASE_ACCESS_TOKEN  — a Supabase personal access token (sbp_...),
+#                            from https://supabase.com/dashboard/account/tokens
+# Optional repository secret (only needed if you did NOT already set it in the
+# Supabase dashboard — unlocks the AI detective):
+#   GEMINI_API_KEY         — Google Gemini API key (or ANTHROPIC_API_KEY)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "supabase/functions/**"
+      - "supabase/config.toml"
+      - ".github/workflows/deploy-supabase-functions.yml"
+  workflow_dispatch:
+
+env:
+  PROJECT_REF: xqyszdjczchlgyisvtvo
+  # Publishable (anon) key — safe to expose; used only to invoke the function.
+  ANON_KEY: sb_publishable_BH3AoBttItAuh4mpSvgFTw_oKmPpKBU
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Configure AI secret (optional — skip if already set in dashboard)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$GEMINI_API_KEY" ]; then
+            supabase secrets set GEMINI_API_KEY="$GEMINI_API_KEY" --project-ref "$PROJECT_REF"
+            echo "Set GEMINI_API_KEY."
+          elif [ -n "$ANTHROPIC_API_KEY" ]; then
+            supabase secrets set ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" --project-ref "$PROJECT_REF"
+            echo "Set ANTHROPIC_API_KEY."
+          else
+            echo "No AI key in GitHub secrets; assuming it is already set in the Supabase dashboard."
+          fi
+
+      - name: Configure hosted auth (instant email signup + OAuth redirects)
+        run: |
+          # Instant email/password signup (no confirmation email) and an allow-list
+          # that lets Google OAuth return to the real app instead of localhost.
+          echo "Patching auth config…"
+          curl -sS -X PATCH "https://api.supabase.com/v1/projects/${PROJECT_REF}/config/auth" \
+            -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+            -H "content-type: application/json" \
+            -d '{
+              "mailer_autoconfirm": true,
+              "external_email_enabled": true,
+              "external_google_enabled": true,
+              "site_url": "https://chess-scout.vercel.app",
+              "uri_allow_list": "https://*.vercel.app/**,https://chess-scout.vercel.app/**,http://localhost:8080/**,http://localhost:5173/**"
+            }' -w $'\nHTTP %{http_code}\n' | tail -3
+
+      - name: Deploy edge functions
+        run: |
+          supabase functions deploy resolve-identity --project-ref "$PROJECT_REF" --no-verify-jwt
+          supabase functions deploy explain-move --project-ref "$PROJECT_REF" --no-verify-jwt
+          supabase functions deploy training-hint --project-ref "$PROJECT_REF" --no-verify-jwt
+
+      - name: Smoke test the AI detective
+        run: |
+          echo "Invoking resolve-identity with a known player…"
+          resp=$(curl -sS -X POST "https://${PROJECT_REF}.supabase.co/functions/v1/resolve-identity" \
+            -H "apikey: ${ANON_KEY}" \
+            -H "Authorization: Bearer ${ANON_KEY}" \
+            -H "content-type: application/json" \
+            -d '{"query":{"name":"Hikaru Nakamura","federation":"USCF","country":"US"}}')
+          echo "Response:"; echo "$resp" | head -c 1200; echo
+          echo "$resp" | grep -q '"available":true' || { echo "::error::Function returned no candidates (available:false). Is GEMINI_API_KEY set in Supabase?"; exit 1; }
+          echo "$resp" | grep -q 'suggestedUsernames' || echo "::warning::available:true but no AI suggestedUsernames — USCF lookup may have answered without Gemini."
+          echo "AI detective is responding."
+
+      - name: Smoke test USCF deep search (debug)
+        run: |
+          echo "Invoking resolve-identity USCF deep search with debug…"
+          resp=$(curl -sS -X POST "https://${PROJECT_REF}.supabase.co/functions/v1/resolve-identity" \
+            -H "apikey: ${ANON_KEY}" -H "Authorization: Bearer ${ANON_KEY}" -H "content-type: application/json" \
+            -d '{"query":{"name":"Hans Niemann","federation":"USCF"},"debug":true}')
+          echo "$resp" | python3 -m json.tool 2>/dev/null | head -80 || { echo "$resp" | head -c 2000; }
+          echo "$resp" | grep -q '"uscf"' && echo "USCF member match OK" || echo "::warning::No USCF member matched (scraper may need tuning; check debug above)."
+          echo "$resp" | grep -q 'tournamentGraph' && echo "tournamentGraph present" || true

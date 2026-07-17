@@ -1,0 +1,30 @@
+{
+  "_comment": "Real ground truth: Grigor Dilanyan (#30076756) in WASHINGTON CLASS BLITZ CHAMPIONSHIPS (event 202011294812, 2020-11-29, OB). Crosstable = 9 rounds; chess.com @grigordilanyan archive on 2020-11-30 = 10 blitz games (one leading warm-up vs a ChessMood coach). Dropping the warm-up aligns all 9 rounds on BOTH colour and outcome, mapping 9 section players to handles. Old exact-count alignRounds discards this (10 != 9); the tolerant version recovers it.",
+  "rounds": [
+    { "round": 1, "color": "white", "outcome": "l", "opponentUscfId": "16624387", "opponentName": "Vihaan Jammalamadaka" },
+    { "round": 2, "color": "white", "outcome": "w", "opponentUscfId": "17262565", "opponentName": "Valentin Razmov" },
+    { "round": 3, "color": "black", "outcome": "l", "opponentUscfId": "16857692", "opponentName": "Yiding Lu" },
+    { "round": 4, "color": "black", "outcome": "w", "opponentUscfId": "16245754", "opponentName": "Aditya Ramkumar" },
+    { "round": 5, "color": "white", "outcome": "l", "opponentUscfId": "17088783", "opponentName": "Stephen Willy" },
+    { "round": 6, "color": "white", "outcome": "w", "opponentUscfId": "30072552", "opponentName": "Adwaya Bage" },
+    { "round": 7, "color": "white", "outcome": "w", "opponentUscfId": "16467346", "opponentName": "Wade Suess" },
+    { "round": 8, "color": "black", "outcome": "w", "opponentUscfId": "15531192", "opponentName": "Owen Xuan" },
+    { "round": 9, "color": "black", "outcome": "l", "opponentUscfId": "12787646", "opponentName": "Aleksandr Lenderman" }
+  ],
+  "scoped": [
+    { "oppHandle": "Shahinyan_ChessMood", "sourceColor": "black", "sourceOutcome": "w", "endMs": 1606703729000, "rated": false, "timeClass": "blitz" },
+    { "oppHandle": "joyfulchub", "sourceColor": "white", "sourceOutcome": "l", "endMs": 1606706216000, "rated": false, "timeClass": "blitz" },
+    { "oppHandle": "Coach_Valentin", "sourceColor": "white", "sourceOutcome": "w", "endMs": 1606707367000, "rated": false, "timeClass": "blitz" },
+    { "oppHandle": "YidingL1", "sourceColor": "black", "sourceOutcome": "l", "endMs": 1606708382000, "rated": false, "timeClass": "blitz" },
+    { "oppHandle": "adi0708", "sourceColor": "black", "sourceOutcome": "w", "endMs": 1606709356000, "rated": false, "timeClass": "blitz" },
+    { "oppHandle": "Practical-Play", "sourceColor": "white", "sourceOutcome": "l", "endMs": 1606710592000, "rated": false, "timeClass": "blitz" },
+    { "oppHandle": "SN_Shadows", "sourceColor": "white", "sourceOutcome": "w", "endMs": 1606711323000, "rated": false, "timeClass": "blitz" },
+    { "oppHandle": "TheDarkChessGod", "sourceColor": "white", "sourceOutcome": "w", "endMs": 1606712321000, "rated": false, "timeClass": "blitz" },
+    { "oppHandle": "nwchess2016", "sourceColor": "black", "sourceOutcome": "w", "endMs": 1606713542000, "rated": false, "timeClass": "blitz" },
+    { "oppHandle": "AlexanderL", "sourceColor": "black", "sourceOutcome": "l", "endMs": 1606714619000, "rated": false, "timeClass": "blitz" }
+  ],
+  "expected": {
+    "matched": 9,
+    "opponentHandles": ["joyfulchub", "Coach_Valentin", "YidingL1", "adi0708", "Practical-Play", "SN_Shadows", "TheDarkChessGod", "nwchess2016", "AlexanderL"]
+  }
+}
