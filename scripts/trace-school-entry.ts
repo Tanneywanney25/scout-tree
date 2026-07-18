@@ -163,14 +163,16 @@ async function main() {
       (await fetchSchoolRoster(school, schoolCode, st, source, sourceId, (m) => console.log(`  ${m}`))).schoolmates,
     fetchFriends: (_platform, username) => fetchChesscomFriends(username, (m) => console.log(`  ${m}`)),
     findUscfId: ({ firstName, lastName, state: st, rating }) => findMemberId(firstName, lastName, st, rating),
-    resolveUscfIdentity: async ({ uscfId: mateId, name: mateName, rating }) => {
+    resolveUscfIdentity: async ({ uscfId: mateId, name: mateName, rating, stopWhen }) => {
       const graph = await mateGraphFor(mateId, 16, 100);
       if (!graph?.graphTraversalReady || !graph.onlineEvents.length) return null;
       // No time budget — the trace runs until the mate's graph is exhausted,
-      // exactly like the main search (the engine's default is unbounded).
+      // exactly like the main search (the engine's default is unbounded). The
+      // phase's stopWhen stands a straggler down once enough anchors resolved.
       const traversal = await runGraphTraversal(graph, {
         targetName: graph.rootName || mateName,
         targetRating: rating,
+        stopWhen,
         log: (m) => console.log(`    [mate #${mateId}] ${m}`),
         hooks: mateTraversalHooks,
       });

@@ -70,7 +70,6 @@ const SCHOOLMATE_RESOLVE_POOL = 6; // schoolmates resolved to handles concurrent
 // graph, and the phase ends when enough anchors are resolved (or the roster
 // runs out). The caller's abort signal remains the only external stop.
 const USCF_MATE_POOL = 2; // schoolmates traced at once (each trace fans out MUIR + chess.com calls of its own — more than 2 in flight earns 429s)
-const USCF_MATE_SPACING_MS = 1_000; // pause between successive traces per worker (rate-limit hygiene)
 const USCF_MATE_TARGET = 2; // resolved schoolmates are enough to crawl on — stop here
 // A schoolmate's handle only needs to be USABLE FOR THE CRAWL — the target is
 // crowned by the social graph's own evidence bar (≥2 mutuals + verification),
@@ -140,6 +139,11 @@ export interface SchoolResolverHooks {
     uscfId: string;
     name: string;
     rating?: number;
+    /** Cooperative stand-down: once the phase has enough anchors, an in-flight
+     *  trace should wind down instead of running its graph to exhaustion —
+     *  without this, the anchor phase blocked on stragglers for minutes after
+     *  the answer was already in hand. */
+    stopWhen?: () => boolean;
   }) => Promise<{ platform: OnlinePlatform; username: string; confidence: number } | null>;
   /** A player's chess.com friends (member-public; needs an authenticated
    *  session, so it is fetched server-side). Returns friend usernames, or []
@@ -187,7 +191,6 @@ export interface SchoolResolverResult {
 
 const lc = (s: string) => s.trim().toLowerCase();
 const digits = (s?: string) => (s ? s.replace(/\D/g, "") : "");
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const norm = (s: string) =>
   s.toLowerCase().normalize("NFD").replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 
@@ -266,24 +269,30 @@ async function chesscomOpponents(handle: string, signal?: AbortSignal): Promise<
     if (!res.ok) return tally;
     const data = await res.json();
     const months: string[] = (Array.isArray(data?.archives) ? data.archives : []).slice(-CC_ARCHIVE_MONTHS);
-    // Sequential per schoolmate (the outer crawl pool provides the parallelism)
-    // so one player never floods the shared chess.com gate.
-    for (const url of months) {
-      if (signal?.aborted) break;
-      try {
-        const gr = await politeFetch(url, { headers: { Accept: "application/json" }, signal }, "chesscom", 20000);
-        if (!gr.ok) continue;
-        const gd = await gr.json();
-        for (const g of Array.isArray(gd?.games) ? gd.games : []) {
-          for (const side of ["white", "black"] as const) {
-            const u = lc(String(g?.[side]?.username || ""));
-            if (u && u !== lc(handle)) tally.set(u, (tally.get(u) || 0) + 1);
+    // 6 months in flight per schoolmate: the shared chess.com gate (12) is the
+    // real flood control, and a strictly serial walk of 24 archives cost ~24
+    // RTTs of pure latency per schoolmate crawled.
+    await pool(
+      months,
+      6,
+      async (url) => {
+        if (signal?.aborted) return;
+        try {
+          const gr = await politeFetch(url, { headers: { Accept: "application/json" }, signal }, "chesscom", 20000);
+          if (!gr.ok) return;
+          const gd = await gr.json();
+          for (const g of Array.isArray(gd?.games) ? gd.games : []) {
+            for (const side of ["white", "black"] as const) {
+              const u = lc(String(g?.[side]?.username || ""));
+              if (u && u !== lc(handle)) tally.set(u, (tally.get(u) || 0) + 1);
+            }
           }
+        } catch {
+          /* one month is a hole, not fatal */
         }
-      } catch {
-        /* one month is a hole, not fatal */
-      }
-    }
+      },
+      () => !!signal?.aborted
+    );
   } catch {
     /* archives unreachable — no opponents from this schoolmate */
   }
@@ -428,12 +437,23 @@ async function resolveSchoolmate(
   const leads = (await hooks
     .findUsernames({ name: mate.name, state: input.state, clubOrSchool: school, uscfRating: mate.rating })
     .catch(() => null)) || [];
-  // Verify leads in the index's order; keep the first live, non-foreign hit.
-  for (const lead of leads.slice(0, 8)) {
-    if (signal?.aborted) break;
-    const profile = await verify(lead.platform, lead.username, signal);
+  // Verify every lead concurrently, then ACCEPT in the index's order — same
+  // winner as the old serial walk, without paying one round-trip per lead.
+  const top: UsernameCandidate[] = leads.slice(0, 8);
+  const profiles = new Array<Awaited<ReturnType<typeof verify>>>(top.length);
+  await pool(
+    top,
+    4,
+    async (lead, i) => {
+      if (signal?.aborted) return;
+      profiles[i] = await verify(lead.platform, lead.username, signal);
+    },
+    () => !!signal?.aborted
+  );
+  for (let i = 0; i < top.length; i++) {
+    const profile = profiles[i];
     if (profile && !isForeign(profile.country)) {
-      return { name: mate.name, platform: lead.platform, username: profile.username, profile };
+      return { name: mate.name, platform: top[i].platform, username: profile.username, profile };
     }
   }
   return null;
@@ -699,10 +719,10 @@ export async function runSchoolResolution(
     await pool(
       pickedMates,
       USCF_MATE_POOL,
-      async (mate, idx) => {
-        // Space successive traces out — each one fans out its own MUIR and
-        // chess.com requests, and back-to-back starts invite 429s.
-        if (idx >= USCF_MATE_POOL) await sleep(USCF_MATE_SPACING_MS);
+      async (mate) => {
+        // (No spacing sleep here any more: the adaptive MUIR pacer and the
+        // platform gates in net.ts are the flood control, and they see every
+        // request — a blind 1s stagger only added latency on top of them.)
         const parts = splitName(mate.name);
         if (!parts) return;
         const mateState = mate.state || affiliations[0]?.state || input.state;
@@ -721,7 +741,7 @@ export async function runSchoolResolution(
         );
         const t0 = Date.now();
         const hit = await hooks
-          .resolveUscfIdentity!({ uscfId: found.uscfId, name: mate.name, rating: found.rating ?? mate.rating })
+          .resolveUscfIdentity!({ uscfId: found.uscfId, name: mate.name, rating: found.rating ?? mate.rating, stopWhen: phaseHalted })
           .catch(() => null);
         const secs = Math.round((Date.now() - t0) / 1000);
         if (!hit) {
@@ -805,34 +825,36 @@ export async function runSchoolResolution(
     CRAWL_POOL,
     async (mate) => {
       if (signal?.aborted) return;
-      const opp = mate.platform === "lichess" ? await lichessOpponents(mate.username, signal) : await chesscomOpponents(mate.username, signal);
+      // The three signals (archive opponents, friends list, clubs) hit
+      // independent endpoints — fetch them together instead of back-to-back
+      // (the serial order tripled each mate's crawl latency for no ordering
+      // benefit; results are folded into `conns` identically either way).
+      const [opp, friends, clubs] = await Promise.all([
+        mate.platform === "lichess" ? lichessOpponents(mate.username, signal) : chesscomOpponents(mate.username, signal),
+        hooks.fetchFriends ? hooks.fetchFriends(mate.platform, mate.username).catch(() => null) : Promise.resolve(null),
+        // Shared clubs — chess.com only, since that is the one platform whose
+        // club member lists are public (lichess team rosters aren't walked
+        // here, so fetching them would be wasted work).
+        mate.platform === "chesscom" ? fetchClubs("chesscom", mate.username, signal) : Promise.resolve(new Map<string, number | undefined>()),
+      ]);
       for (const [h, n] of opp) {
         if (n < MIN_OPP_GAMES) continue;
         const c = get(h);
         c.weight.set(mate.username, (c.weight.get(mate.username) || 0) + n);
       }
       // Authoritative friends (member-public, server-fetched) — strongest tie.
-      if (hooks.fetchFriends) {
-        const friends = (await hooks.fetchFriends(mate.platform, mate.username).catch(() => null)) || [];
-        for (const f of friends) {
-          const h = lc(f);
-          if (!h) continue;
-          const c = get(h);
-          c.friends.add(mate.username);
-          if (!c.weight.has(mate.username)) c.weight.set(mate.username, MIN_OPP_GAMES); // register the tie
-        }
-        if (friends.length) log(`School resolver: @${mate.username} has ${friends.length} chess.com friend(s).`);
+      for (const f of friends || []) {
+        const h = lc(f);
+        if (!h) continue;
+        const c = get(h);
+        c.friends.add(mate.username);
+        if (!c.weight.has(mate.username)) c.weight.set(mate.username, MIN_OPP_GAMES); // register the tie
       }
-      // Shared clubs — chess.com only, since that is the one platform whose
-      // club member lists are public (lichess team rosters aren't walked here,
-      // so fetching them would be wasted work). A mate's small clubs are noted;
-      // their members are folded in below.
-      if (mate.platform === "chesscom") {
-        const clubs = await fetchClubs("chesscom", mate.username, signal);
-        for (const [id, members] of clubs) {
-          if (members && members > BIG_CLUB_MEMBERS) continue;
-          get(`club:chesscom:${id}`).clubs.set(mate.username, members);
-        }
+      if (friends?.length) log(`School resolver: @${mate.username} has ${friends.length} chess.com friend(s).`);
+      // A mate's small clubs are noted; their members are folded in below.
+      for (const [id, members] of clubs) {
+        if (members && members > BIG_CLUB_MEMBERS) continue;
+        get(`club:chesscom:${id}`).clubs.set(mate.username, members);
       }
     },
     halted
@@ -844,24 +866,33 @@ export async function runSchoolResolution(
   // with 2+ schoolmates clears the bar even if they never showed up as a game
   // opponent. Capped to genuinely small clubs so a big regional club (which
   // links nobody) can't flood the candidate pool.
-  for (const [key, rec] of [...conns]) {
-    if (!key.startsWith("club:")) continue;
-    conns.delete(key);
-    if (halted()) continue;
-    const [, platform, clubId] = key.split(":");
-    if (platform !== "chesscom") continue;
-    const members = await chesscomClubMembers(clubId, signal);
-    if (!members.length || members.length > SMALL_CLUB_FOR_MEMBERS) continue;
-    const clubSchoolmates = [...rec.clubs.keys()]; // schoolmates in this small club
-    for (const m of members) {
-      const h = lc(m);
-      if (exclude.has(h)) continue;
-      const c = get(h);
-      for (const mate of clubSchoolmates) {
-        if (!c.weight.has(mate)) c.weight.set(mate, MIN_OPP_GAMES); // register the (weak) club tie
-        c.sharedClubs.add(clubId);
-      }
-    }
+  {
+    const clubEntries = [...conns].filter(([key]) => key.startsWith("club:"));
+    for (const [key] of clubEntries) conns.delete(key);
+    // Member lists are independent fetches — pull several at once (was one
+    // club at a time; the chess.com gate is the real flood control).
+    await pool(
+      clubEntries,
+      4,
+      async ([key, rec]) => {
+        if (halted()) return;
+        const [, platform, clubId] = key.split(":");
+        if (platform !== "chesscom") return;
+        const members = await chesscomClubMembers(clubId, signal);
+        if (!members.length || members.length > SMALL_CLUB_FOR_MEMBERS) return;
+        const clubSchoolmates = [...rec.clubs.keys()]; // schoolmates in this small club
+        for (const m of members) {
+          const h = lc(m);
+          if (exclude.has(h)) continue;
+          const c = get(h);
+          for (const mate of clubSchoolmates) {
+            if (!c.weight.has(mate)) c.weight.set(mate, MIN_OPP_GAMES); // register the (weak) club tie
+            c.sharedClubs.add(clubId);
+          }
+        }
+      },
+      halted
+    );
   }
 
   // --- 4. Candidates → verify → score ---------------------------------------
@@ -898,9 +929,9 @@ export async function runSchoolResolution(
         .join(", ");
       // Verify on both platforms: whichever the target is on, plus the
       // cross-platform consistency check. Prefer the platform the connections
-      // came from, but a handle live on both is a stronger identity.
-      const cc = await verify("chesscom", cand.handle, signal);
-      const li = await verify("lichess", cand.handle, signal);
+      // came from, but a handle live on both is a stronger identity. The two
+      // lookups are independent — fetch them together.
+      const [cc, li] = await Promise.all([verify("chesscom", cand.handle, signal), verify("lichess", cand.handle, signal)]);
       if (!cc && !li) {
         log(`School resolver: candidate @${cand.handle} — connected to ${[...cand.mates].join(", ")} via ${via} — no live account, dropped.`);
         return;

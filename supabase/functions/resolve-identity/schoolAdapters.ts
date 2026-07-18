@@ -84,7 +84,36 @@ export interface SchoolAdapter {
 // Shared fetch + HTML utilities (tolerant by design — these pages are wild)
 // ---------------------------------------------------------------------------
 
-async function fetchText(url: string, timeoutMs = 15000): Promise<string | null> {
+// Page cache: findSchool and fetchRoster read the SAME pages moments apart
+// (the WSCF master list is both the lookup table and the roster; NWSRS letter
+// pages are re-read for the roster), and every re-download of these slow,
+// small-nonprofit-hosted pages costs seconds. Successes are kept 10 minutes on
+// the warm instance; failures 60s (so one request's tier ladder doesn't
+// re-time-out the same dead URL over and over, but a later request retries).
+const pageCache = new Map<string, { at: number; p: Promise<string | null> }>();
+const PAGE_OK_TTL_MS = 10 * 60_000;
+const PAGE_FAIL_TTL_MS = 60_000;
+
+function fetchText(url: string, timeoutMs = 15000): Promise<string | null> {
+  const hit = pageCache.get(url);
+  if (hit && Date.now() - hit.at < PAGE_OK_TTL_MS) return hit.p;
+  const p = fetchTextUncached(url, timeoutMs);
+  const entry = { at: Date.now(), p };
+  pageCache.set(url, entry);
+  void p.then((text) => {
+    if (text === null) {
+      // Re-stamp failures with the short TTL by expiry-shifting the entry.
+      entry.at = Date.now() - (PAGE_OK_TTL_MS - PAGE_FAIL_TTL_MS);
+    }
+  });
+  if (pageCache.size > 150) {
+    const entries = [...pageCache.entries()].sort((a, b) => a[1].at - b[1].at);
+    for (const [k] of entries.slice(0, 75)) pageCache.delete(k);
+  }
+  return p;
+}
+
+async function fetchTextUncached(url: string, timeoutMs: number): Promise<string | null> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -221,8 +250,14 @@ function makeScanAdapter(cfg: ScanConfig): SchoolAdapter {
     p: AdapterPlayer,
     log: (m: string) => void
   ): Promise<{ hit: AdapterSchoolHit; url: string } | null> => {
-    for (const url of pagesFor(p)) {
-      const html = await fetchText(url);
+    // Fetch every page at once (≤4), then evaluate IN ORDER — identical
+    // winner to the old serial walk, but a dead site costs one timeout in
+    // parallel instead of 15s × pages in series.
+    const urls = pagesFor(p);
+    const bodies = await Promise.all(urls.map((url) => fetchText(url)));
+    for (let i = 0; i < urls.length; i++) {
+      const url = urls[i];
+      const html = bodies[i];
       if (!html) {
         log(`[tier ${cfg.tier}] ${cfg.label}: ${url} unreachable — skipping.`);
         continue;
@@ -264,8 +299,9 @@ function makeScanAdapter(cfg: ScanConfig): SchoolAdapter {
       const seen = new Set<string>();
       const want = norm(school.name);
       const pages = [...(cfg.urls || [])].slice(0, cfg.maxPages ?? SCAN_PAGE_CAP);
-      for (const url of pages) {
-        const html = await fetchText(url);
+      const bodies = await Promise.all(pages.map((url) => fetchText(url)));
+      for (let i = 0; i < pages.length; i++) {
+        const html = bodies[i];
         if (!html) continue;
         for (const cells of tableRows(html)) {
           if (!cells.some((c) => norm(c) === want)) continue;

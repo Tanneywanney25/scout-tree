@@ -49,7 +49,7 @@ export type { SchoolResolverInput, SchoolResolverResult } from "../schoolResolve
  *  answer); the abort signal is the only external stop. Traversal chatter
  *  stays out of the detective UI. */
 async function resolveUscfIdentity(
-  req: { uscfId: string; name: string; rating?: number },
+  req: { uscfId: string; name: string; rating?: number; stopWhen?: () => boolean },
   signal?: AbortSignal
 ): Promise<{ platform: OnlinePlatform; username: string; confidence: number } | null> {
   const graph = await expandMemberGraph(req.uscfId, signal);
@@ -58,6 +58,9 @@ async function resolveUscfIdentity(
     targetName: graph.rootName || req.name,
     targetRating: req.rating,
     signal,
+    // Cooperative stand-down: once the school phase has enough anchors, an
+    // in-flight mate trace winds down instead of grinding to exhaustion.
+    stopWhen: req.stopWhen,
     log: () => {},
   });
   const best = [...traversal.accounts]

@@ -271,8 +271,27 @@ async function nwsrsLookup(req: SchoolLookupRequest, log: (m: string) => void): 
   if (!found || !found.matches.length) {
     log(`NWSRS: no "${req.name}" on the ${firstLetter} page — scanning the other letters as a fallback…`);
     const others = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").filter((l) => l !== firstLetter);
-    for (const l of others) {
-      const r = await nwsrsRowsFor(l, req, log);
+    // 6 letters in flight; results picked in A–Z order (same winner as the
+    // serial walk). The old one-at-a-time scan cost up to 25 × 20s against a
+    // down site; now a dead NWSRS bails after the first burst of failures.
+    const results = new Array<Awaited<ReturnType<typeof nwsrsRowsFor>>>(others.length);
+    let hitAt = others.length; // lowest index with matches — later fetches stop
+    let fails = 0;
+    let idx = 0;
+    await Promise.all(
+      Array.from({ length: 6 }, async () => {
+        while (idx < others.length) {
+          const i = idx++;
+          if (i > hitAt || fails >= 8) return; // already found earlier in order / site is down
+          const r = await nwsrsRowsFor(others[i], req, log);
+          results[i] = r;
+          if (r === null) fails++;
+          if (r && r.matches.length && i < hitAt) hitAt = i;
+        }
+      })
+    );
+    if (fails >= 8) log(`NWSRS: the ratings pages look unreachable — abandoning the letter scan.`);
+    for (const r of results) {
       if (r && r.matches.length) {
         found = r;
         break;
