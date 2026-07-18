@@ -82,6 +82,45 @@ function realCountry(v: unknown): string | undefined {
 // NOTHING about the account, so callers may retry it or fall back to
 // structural evidence, but must never file it as "account doesn't exist".
 
+/**
+ * Bulk existence prefilter for SPECULATIVE Lichess handle scans (guessed
+ * handles). One POST to /api/users (up to 300 ids per call) answers "which of
+ * these accounts exist at all?" in a single pacer slot, where probing each
+ * guess individually costs one paced GET apiece — for a 24-guess scan that is
+ * a 24x cut in Lichess traffic.
+ *
+ * Returns the lowercase usernames that exist, or null when the bulk call
+ * failed or came back unusable — callers MUST treat null as "prefilter
+ * unavailable" and fall back to individual verification, never as a verdict.
+ * Handles absent from a SUCCESSFUL response are skipped only as speculative
+ * guesses; nothing records "no such account" from a bulk miss, so an
+ * evidence-bearing path that later names the same handle still gets its own
+ * full verification.
+ */
+export async function lichessExistingSubset(usernames: string[], signal?: AbortSignal): Promise<Set<string> | null> {
+  const ids = Array.from(new Set(usernames.map((u) => u.trim().replace(/^@/, "").toLowerCase()).filter(Boolean))).slice(0, 300);
+  if (!ids.length) return new Set();
+  try {
+    const res = await politeFetch(
+      "https://lichess.org/api/users",
+      { method: "POST", headers: { "Content-Type": "text/plain", Accept: "application/json" }, body: ids.join(","), signal },
+      "lichess",
+      15_000
+    );
+    if (!res.ok) return null; // endpoint unhappy — fall back to singular probes
+    const arr = await res.json();
+    if (!Array.isArray(arr)) return null;
+    const found = new Set<string>();
+    for (const u of arr) {
+      const uname = typeof u?.username === "string" ? u.username : typeof u?.id === "string" ? u.id : "";
+      if (uname && !u?.disabled && !u?.closed) found.add(uname.toLowerCase());
+    }
+    return found;
+  } catch {
+    return null; // network failure / circuit open — prefilter unavailable
+  }
+}
+
 /** Verify and enrich a Lichess account. Null = no such account; undefined =
  *  the fetch failed (a data hole, not a verdict). */
 export async function verifyLichess(

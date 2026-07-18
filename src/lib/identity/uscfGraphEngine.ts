@@ -81,7 +81,7 @@ import type {
   UsernameSearchRequest,
   UsernameCandidate,
 } from "./graphTypes";
-import { verifyChesscom, verifyLichess, type VerifiedProfile } from "./verify";
+import { verifyChesscom, verifyLichess, lichessExistingSubset, type VerifiedProfile } from "./verify";
 import { pool, politeFetch, lichessSlot } from "./net";
 import {
   nameSimilarity,
@@ -800,7 +800,15 @@ function gameInLink(g: ArchiveGame, link: EventLink): boolean {
 // Lichess name autocomplete (used ONLY to seed opponents — never the target)
 // ---------------------------------------------------------------------------
 
+// Memoized: the seed pipeline is keyed per (member, event), so a member who
+// appears in several events used to re-query the same terms once per event —
+// each costing a paced Lichess slot. Failures are NOT memoized (a term that
+// errored can be retried by a later event).
+const autocompleteMemo = new Map<string, string[]>();
 async function lichessAutocomplete(term: string, signal?: AbortSignal): Promise<string[]> {
+  const key = term.toLowerCase();
+  const hit = autocompleteMemo.get(key);
+  if (hit) return hit;
   try {
     const res = await politeFetch(
       `https://lichess.org/api/player/autocomplete?term=${encodeURIComponent(term)}&object=true`,
@@ -810,7 +818,9 @@ async function lichessAutocomplete(term: string, signal?: AbortSignal): Promise<
     if (!res.ok) return [];
     const data = await res.json();
     const arr = Array.isArray(data?.result) ? data.result : [];
-    return arr.map((u: { id?: string; name?: string }) => String(u.name || u.id)).filter(Boolean);
+    const out = arr.map((u: { id?: string; name?: string }) => String(u.name || u.id)).filter(Boolean);
+    autocompleteMemo.set(key, out);
+    return out;
   } catch {
     return [];
   }
@@ -1797,9 +1807,25 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       const gate = (prof: VerifiedProfile): boolean =>
         !!prof.displayName && nameSimilarity(name, prof.displayName) >= 0.72;
       const guesses = guessHandles(name).filter((h) => !dudHandles.has(`${platform}:${h.toLowerCase()}`));
+      // Lichess: one bulk POST answers existence for every uncached guess in a
+      // single paced slot, where probing each guess costs a paced GET apiece.
+      // Null = the prefilter is unavailable (endpoint failure / circuit open) —
+      // fall back to individual probes. Absent handles are dropped only as
+      // speculative GUESSES; no "doesn't exist" verdict is recorded, so an
+      // evidence-bearing lead naming the same handle still verifies fully.
+      let effGuesses = guesses;
+      if (platform === "lichess" && guesses.length > 2 && !stopHere()) {
+        const uncached = guesses.filter((h) => !verifyCache.has(`lichess:${h.toLowerCase()}`));
+        const existing = uncached.length > 2 ? await lichessExistingSubset(uncached, signal) : null;
+        if (existing) {
+          effGuesses = guesses.filter(
+            (h) => verifyCache.has(`lichess:${h.toLowerCase()}`) || existing.has(h.toLowerCase())
+          );
+        }
+      }
       const guessProfs = new Map<string, VerifiedProfile | null>();
       await pool(
-        guesses,
+        effGuesses,
         VERIFY_POOL,
         async (h) => {
           if (stopHere()) return;
@@ -1809,7 +1835,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       );
       const seenGuess = new Set<string>();
       const guessPassers: VerifiedProfile[] = [];
-      for (const h of guesses) {
+      for (const h of effGuesses) {
         const prof = guessProfs.get(h);
         if (!prof || !gate(prof) || dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) continue;
         const k = prof.username.toLowerCase();
