@@ -205,13 +205,6 @@ export async function verifyChesscom(
 ): Promise<VerifiedProfile | null | undefined> {
   const clean = username.trim().replace(/^@/, "").toLowerCase();
   if (!clean) return null;
-  // The profile and /stats calls are independent — fire both at once (the
-  // stats fetch for a nonexistent user is a cheap fast 404).
-  const statsP = politeFetch(
-    `https://api.chess.com/pub/player/${encodeURIComponent(clean)}/stats`,
-    { headers: { Accept: "application/json" }, signal },
-    "chesscom"
-  ).catch(() => null);
   let res: Response;
   for (let attempt = 0; ; attempt++) {
     try {
@@ -243,10 +236,19 @@ export async function verifyChesscom(
     return undefined;
   }
   try {
-    const statsRes = await statsP;
     const data = await res.json();
     if (!data) return undefined;
     if (data.status === "closed:abuse") return null;
+    // Stats are fetched only for accounts that EXIST: speculative scans
+    // (guessed handles, roster sweeps) are overwhelmingly misses, and the old
+    // fire-both-upfront pattern doubled Chess.com volume through the shared
+    // gate for every one of them. One extra RTT on the rare hit is far
+    // cheaper than a wasted gate slot on every miss.
+    const statsRes = await politeFetch(
+      `https://api.chess.com/pub/player/${encodeURIComponent(clean)}/stats`,
+      { headers: { Accept: "application/json" }, signal },
+      "chesscom"
+    ).catch(() => null);
 
     // ISO-2 country code lives at the end of the country URL.
     let country: string | undefined;
