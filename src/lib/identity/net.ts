@@ -97,6 +97,79 @@ export type NetPlatform = "chesscom" | "lichess";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// ---------------------------------------------------------------------------
+// Platform-outage circuit breaker.
+//
+// When a platform is DOWN at the transport level (connect timeouts, DNS
+// failures — fetch THROWS, no HTTP response at all), every probe pays the
+// full timeout×retry ladder (~30s) before surfacing its hole. A traversal
+// makes hundreds of speculative probes, so an outage multiplies into HOURS of
+// wall-clock spent waiting on a dead socket (observed live: a Lichess outage
+// turned a 30-second pairing proof into a 12-minute run).
+//
+// So each platform gets a breaker: after BREAK_THRESHOLD consecutive
+// transport failures the circuit OPENS and politeFetch fast-fails instantly
+// for BREAK_COOLDOWN_MS, then lets exactly ONE probe through (half-open) to
+// test recovery — success closes the circuit, failure re-opens it. An HTTP
+// response of any status (even 429/5xx) is the platform TALKING and resets
+// the count; it never opens the circuit.
+//
+// Fast-fails look to callers exactly like an exhausted retry ladder (a thrown
+// error), so the engine's hole-vs-verdict semantics are untouched: an outage
+// yields the same retryable holes as before, just in 0ms instead of 30s.
+// ---------------------------------------------------------------------------
+
+const BREAK_THRESHOLD = 6;
+const BREAK_COOLDOWN_MS = 45_000;
+
+interface Breaker {
+  fails: number;
+  openUntil: number;
+  probing: boolean;
+}
+
+const breakers: Record<NetPlatform, Breaker> = {
+  chesscom: { fails: 0, openUntil: 0, probing: false },
+  lichess: { fails: 0, openUntil: 0, probing: false },
+};
+
+/** Throws when the platform's circuit is open (unless this caller wins the
+ *  half-open probe slot). Returns whether this attempt IS the probe. */
+function breakerAdmit(platform: NetPlatform): boolean {
+  const b = breakers[platform];
+  if (b.fails < BREAK_THRESHOLD) return false;
+  if (Date.now() >= b.openUntil && !b.probing) {
+    b.probing = true; // this caller probes recovery for everyone
+    return true;
+  }
+  throw new Error(`${platform} unreachable (circuit open) — fast-failing instead of waiting on a dead socket`);
+}
+
+function breakerSuccess(platform: NetPlatform): void {
+  const b = breakers[platform];
+  b.fails = 0;
+  b.openUntil = 0;
+  b.probing = false;
+}
+
+function breakerFailure(platform: NetPlatform): void {
+  const b = breakers[platform];
+  b.fails++;
+  if (b.fails >= BREAK_THRESHOLD) {
+    b.openUntil = Date.now() + BREAK_COOLDOWN_MS;
+    b.probing = false;
+  }
+}
+
+/** TEST-ONLY: reset breaker state between test scenarios. */
+export function _resetBreakers(): void {
+  for (const b of Object.values(breakers)) {
+    b.fails = 0;
+    b.openUntil = 0;
+    b.probing = false;
+  }
+}
+
 /**
  * Fetch with the platform's politeness discipline applied:
  *   • Chess.com attempts hold a slot in the global gate; Lichess attempts wait
@@ -131,6 +204,10 @@ export async function politeFetch(
         outer?.removeEventListener("abort", onAbort);
       }
     };
+    // Outage fast-path: an open circuit fails the call NOW (0ms) instead of
+    // paying the timeout ladder against a dead socket. Checked before pacing
+    // so fast-fails also never consume a Lichess pacer slot.
+    const isProbe = breakerAdmit(platform);
     let res: Response;
     try {
       if (platform === "lichess") {
@@ -139,7 +216,13 @@ export async function politeFetch(
       } else {
         res = await chesscomGate.run(attemptOnce);
       }
+      breakerSuccess(platform); // any HTTP response = the platform is talking
     } catch (e) {
+      // Transport failure (timeout / network error), not an HTTP status. An
+      // outer abort is the CALLER stopping — it says nothing about the
+      // platform, so it must not trip the breaker.
+      if (!outer?.aborted) breakerFailure(platform);
+      else if (isProbe) breakers[platform].probing = false; // free the probe slot
       // Timeouts / transient network errors: retry a couple of times before
       // giving up — but an outer abort propagates immediately.
       if (outer?.aborted || attempt >= 2) throw e;

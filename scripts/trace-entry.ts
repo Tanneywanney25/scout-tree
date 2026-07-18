@@ -86,7 +86,13 @@ async function main() {
     process.exit(1);
   }
 
+  // Wall-clock stopwatch for profiling every phase of the run.
+  const traceStart = Date.now();
+  const elapsed = () => ((Date.now() - traceStart) / 1000).toFixed(1).padStart(5);
+
+  const tPick = Date.now();
   const member = await pickMember(args);
+  console.log(`[+${elapsed()}s] USCF profile fetch/search took ${((Date.now() - tPick) / 1000).toFixed(1)}s`);
   if (!member) {
     console.error("No USCF member found for that query.");
     process.exit(2);
@@ -112,7 +118,9 @@ async function main() {
   }
   if (!sections) {
     console.log("Building the online tournament graph from MUIR…");
+    const tBuild = Date.now();
     sections = await buildOnlineGraphForMember(member, { maxSections: 16, maxEvents: 100 });
+    console.log(`[+${elapsed()}s] Tournament graph build took ${((Date.now() - tBuild) / 1000).toFixed(1)}s`);
     try {
       fs.writeFileSync(cachePath, JSON.stringify(sections));
     } catch {
@@ -235,10 +243,10 @@ async function main() {
     ...(unlimited ? {} : { budgetMs: args.budget * 1000 }),
     hooks,
     seedMappings: args.seeds,
-    log: (m) => console.log(`  ${m}`),
+    log: (m) => console.log(`  [+${elapsed()}s] ${m}`),
   });
 
-  console.log(`\n=== Result (${Math.round((Date.now() - t0) / 1000)}s) ===`);
+  console.log(`\n=== Result (traversal ${Math.round((Date.now() - t0) / 1000)}s, total ${Math.round((Date.now() - traceStart) / 1000)}s) ===`);
   console.log(`found=${result.found}  notes: ${result.notes.join(" | ")}`);
   for (const acc of result.accounts) {
     console.log(`\n@${acc.username} on ${acc.platform} — confidence ${(acc.confidence * 100).toFixed(0)}%`);
