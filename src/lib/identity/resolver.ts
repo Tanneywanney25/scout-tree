@@ -181,6 +181,20 @@ export async function resolveIdentity(
 
   emit("Starting identity resolution…", "info");
 
+  // Per-phase wall-clock: every major phase is timed and narrated, so a slow
+  // search tells you WHERE the time went (and the result carries the numbers).
+  const phaseTimings: Record<string, number> = {};
+  const timePhase = async <T>(label: string, fn: () => Promise<T>): Promise<T> => {
+    const t0 = performance.now();
+    try {
+      return await fn();
+    } finally {
+      const ms = Math.round(performance.now() - t0);
+      phaseTimings[label] = (phaseTimings[label] || 0) + ms;
+      emit(`⏱ ${label}: ${(ms / 1000).toFixed(1)}s`, "info");
+    }
+  };
+
   const results: ProviderResult[] = [];
   const providerStatus: ResolutionResult["providerStatus"] = [];
 
@@ -211,7 +225,7 @@ export async function resolveIdentity(
   };
 
   // --- 1. ANCHOR PHASE: who is this person? ----------------------------------
-  await runProviders(PROVIDERS);
+  await timePhase("Anchor phase (USCF/FIDE/AI profile fetch)", () => runProviders(PROVIDERS));
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
   const fragments: PartialIdentity[] = results.flatMap((r) => r.identities);
@@ -356,7 +370,7 @@ export async function resolveIdentity(
   let graphAvailable = false;
   let partialOpponents = 0;
   if (!hintStrong && !signal?.aborted) {
-    const graph = await getTournamentGraph(query, signal).catch(() => null);
+    const graph = await timePhase("Tournament graph fetch", () => getTournamentGraph(query, signal).catch(() => null));
     if (graph && graph.graphTraversalReady && graph.onlineEvents.length) {
       graphAvailable = true;
       emit("Tracing the player's USCF online events to uncover their real usernames…", "running", "uscf-graph");
@@ -395,7 +409,7 @@ export async function resolveIdentity(
       let traversal: TraversalResult;
       let hardTimer: ReturnType<typeof setTimeout> | undefined;
       try {
-        traversal = await Promise.race([
+        traversal = await timePhase("Tournament-graph traversal", () => Promise.race([
           runGraphTraversal(graph, {
             targetName: graph.rootName || query.name,
             targetRating,
@@ -415,7 +429,7 @@ export async function resolveIdentity(
               resolve({ accounts: [], notes: ["Traversal exceeded its hard time limit."], found: false, mappedOpponents: 0 });
             }, TRAVERSAL_BUDGET_MS + 30_000);
           }),
-        ]);
+        ]));
       } catch {
         traversal = { accounts: [], notes: ["Tournament-graph traversal failed."], found: false, mappedOpponents: 0 };
       } finally {
@@ -473,6 +487,7 @@ export async function resolveIdentity(
     );
 
     let googleVerified = 0;
+    const googleT0 = performance.now();
     try {
       const leads = await findUsernameCandidates(
         {
@@ -527,6 +542,11 @@ export async function resolveIdentity(
     } catch {
       /* Google fallback is best-effort */
     }
+    {
+      const ms = Math.round(performance.now() - googleT0);
+      phaseTimings["Google-index username search"] = ms;
+      emit(`⏱ Google-index username search: ${(ms / 1000).toFixed(1)}s`, "info");
+    }
 
     // --- 3a½. SCHOOL-BASED SOCIAL-GRAPH FALLBACK -----------------------------
     // For a player with no online tournament history AND no Google-indexed
@@ -541,7 +561,7 @@ export async function resolveIdentity(
       const schoolState = query.state || fragments.find((f) => f.source === "uscf")?.state;
       emit("Nothing indexed either — tracing the player through their school's social graph…", "info", "school-graph");
       try {
-        const school = await runSchoolResolver(
+        const school = await timePhase("School social-graph resolution", () => runSchoolResolver(
           {
             name: query.name,
             state: schoolState,
@@ -556,7 +576,7 @@ export async function resolveIdentity(
           // traces off seconds from an answer. The engine stops on its own
           // once enough anchors resolve; the abort signal is the user's stop.
           { signal, log: (m) => emit(m, "running", "school-graph") }
-        );
+        ));
         for (const acc of school.accounts) {
           addToPool(acc, query.name);
           schoolVerified++;
@@ -572,6 +592,7 @@ export async function resolveIdentity(
     // --- 3b. ABSOLUTE LAST RESORT: platform name search ----------------------
     if (googleVerified === 0 && schoolVerified === 0 && !signal?.aborted) {
       emit("The Google index gave nothing verifiable — falling back to platform name search (results may be a namesake).", "info");
+      const nameSearchT0 = performance.now();
 
       const demote = (acc: DiscoveredAccount): DiscoveredAccount => {
         const evidence: Evidence[] = [
@@ -621,6 +642,11 @@ export async function resolveIdentity(
           const acc = verified[i];
           if (acc) addToPool(demote(acc), s.attachName);
         });
+      }
+      {
+        const ms = Math.round(performance.now() - nameSearchT0);
+        phaseTimings["Platform name search"] = ms;
+        emit(`⏱ Platform name search: ${(ms / 1000).toFixed(1)}s`, "info");
       }
     } else if (googleVerified > 0 || schoolVerified > 0) {
       for (const p of NAME_FALLBACK_PROVIDERS) {
@@ -751,6 +777,7 @@ export async function resolveIdentity(
     identities: top,
     providerStatus,
     elapsedMs: Math.round(performance.now() - start),
+    phaseTimings,
     // Only flag partial-progress when we truly never confirmed the target: if a
     // later fallback DID produce a verified-identity account, drop the warning.
     partialOpponents:
