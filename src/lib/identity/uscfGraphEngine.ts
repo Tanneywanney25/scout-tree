@@ -1099,8 +1099,18 @@ interface Appearance {
 }
 
 export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalOptions): Promise<TraversalResult> {
-  const { targetName, signal, log, hooks = {} } = opts;
+  const { targetName, signal, hooks = {} } = opts;
   const depth = opts.depth ?? 0;
+  // Track when we last narrated anything: verification pools legitimately go
+  // quiet for minutes (dozens of gated/paced probes emit nothing until a
+  // verdict), and upstream watchdogs read silence as a wedged engine — the
+  // browser resolver stands the traversal down after 90s without a log line.
+  // The heartbeat below turns healthy silence into visible progress.
+  let lastNarrated = Date.now();
+  const log: TraversalOptions["log"] = (m) => {
+    lastNarrated = Date.now();
+    opts.log(m);
+  };
   const shared = opts.shared ?? makeSharedCaches();
   const totalBudgetMs = opts.budgetMs ?? DEFAULT_BUDGET_MS;
   const deadline = Date.now() + totalBudgetMs;
@@ -1267,6 +1277,27 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
     mapped.set(memberId, per);
   };
+
+  // HEARTBEAT (depth 0 only — sub-traversals share the parent's log and thus
+  // its heartbeat): whenever 25s pass without a narrated line, emit one with
+  // real progress counters. Guarantees no healthy stretch of work can ever
+  // look like a wedge to the resolver's stall watchdog.
+  const traversalStart = Date.now();
+  const heartbeat =
+    depth === 0
+      ? setInterval(() => {
+          if (signal?.aborted || opts.stopWhen?.()) {
+            clearInterval(heartbeat!);
+            return;
+          }
+          if (Date.now() - lastNarrated < 25_000) return;
+          const mappedCount = Array.from(mapped.values()).filter((per) => per.size > 0).length;
+          log(
+            `Still working (${Math.round((Date.now() - traversalStart) / 1000)}s in): ${mappedCount} player↔handle mapping(s) so far, ` +
+              `${verifyCache.size} profile lookup(s) memoized, ${gamesCache.size} game-archive window(s) pulled — the agents are grinding through candidates.`
+          );
+        }, 5_000)
+      : undefined;
   const unsetMapping = (memberId: string, platform: OnlinePlatform) => {
     const m = mapped.get(memberId)?.get(platform);
     if (!m) return;
@@ -1738,7 +1769,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         const judged: Judged[] = [];
         await pool(
           profs,
-          4,
+          VERIFY_POOL,
           async (prof, order) => {
             if (stopHere()) return;
             const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
@@ -3391,9 +3422,25 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
   }
 
-  for (let pass = 0; pass < 4 && !found && !outOfTime(mainDeadline); pass++) {
+  // Passes continue while they make PROGRESS (new mappings, newly-exhausted
+  // events), not for a fixed count — the old hard 4-pass cap abandoned events
+  // with open leads while budget remained. A pass that changes nothing proves
+  // further passes are futile (every remaining lead is stuck on the same
+  // holes), so the loop is guaranteed to terminate; the generous ceiling is
+  // pure runaway insurance.
+  const mappedTotal = () => {
+    let n = 0;
+    for (const per of mapped.values()) n += per.size;
+    return n;
+  };
+  for (let pass = 0; pass < 12 && !found && !outOfTime(mainDeadline); pass++) {
     const pending = events.filter((e) => !workStates.get(e.eventId)?.exhausted);
     if (!pending.length) break;
+    const beforeMapped = mappedTotal();
+    const beforeExhausted = events.filter((e) => workStates.get(e.eventId)?.exhausted).length;
+    if (pass >= 4) {
+      log(`Pass ${pass + 1}: earlier passes kept making progress, so the engine keeps going.`);
+    }
     if (pass > 0) {
       const secsLeft = Math.round((mainDeadline - Date.now()) / 1000);
       log(
@@ -3415,6 +3462,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       }
     };
     await Promise.all(Array.from({ length: Math.min(EVENT_AGENTS, pending.length) }, eventAgent));
+    // Futility check: a full pass that produced no new mapping and exhausted
+    // no event proves the remaining leads are all stuck on the same holes —
+    // stop passing (the pivot stage below is the productive next move).
+    if (
+      pass >= 3 &&
+      mappedTotal() === beforeMapped &&
+      events.filter((e) => workStates.get(e.eventId)?.exhausted).length === beforeExhausted
+    ) {
+      break;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -3451,8 +3508,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         // through the opponent's own opponents (no guessable seed anywhere)
         // regularly needs more than 5 minutes — observed live: a dive that
         // would have revealed the target's section was stood down at the old
-        // 300s cap mid-chain.
-        budgetMs: Math.min(600_000, Math.max(60_000, deadline - Date.now() - 15_000)),
+        // 300s cap mid-chain, and its 600s successor died the same way on an
+        // unbounded run. The dive now inherits ALL remaining time (minus a
+        // sliver for the post-dive trace-back); the parent's stopWhen stands
+        // it down the moment any sibling finds the target.
+        budgetMs: Math.max(60_000, deadline - Date.now() - 15_000),
         // Google-index + flyer search stay available; no further expansion.
         hooks: { discoverPlatform: hooks.discoverPlatform, findUsernames: hooks.findUsernames },
         depth: 1,
@@ -3495,13 +3555,23 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           if (!(appearances.get(targetId) || []).some((ta) => ta.event.eventId === app.event.eventId)) continue;
           const state: EventState = { links: new Map(), junkLinks: new Set(), linkSources: new Map(), frontier: [], visited: new Set(), oppSeen: new Map() };
           if (await traceFromSource(app.event, state, oppId, platform, mapped.get(oppId)!.get(platform)!, deadline)) found = true;
-          // Follow any frontier the trace opened up.
+          // Follow any frontier the trace opened up — drained by TRACE_AGENTS
+          // parallel tracers exactly like the main loop (the old serial drain
+          // left every other tracer idle through the whole deep phase).
           while (!found && state.frontier.length && !outOfTime()) {
-            const nxt = state.frontier.shift()!;
-            const vkey = `${nxt.memberId}:${nxt.platform}`;
-            if (state.visited.has(vkey)) continue;
-            state.visited.add(vkey);
-            if (await traceFromSource(app.event, state, nxt.memberId, nxt.platform, nxt.mapping, deadline)) found = true;
+            const batch = state.frontier.splice(0, state.frontier.length);
+            await pool(
+              batch,
+              TRACE_AGENTS,
+              async (nxt) => {
+                if (found || outOfTime()) return;
+                const vkey = `${nxt.memberId}:${nxt.platform}`;
+                if (state.visited.has(vkey)) return;
+                state.visited.add(vkey);
+                if (await traceFromSource(app.event, state, nxt.memberId, nxt.platform, nxt.mapping, deadline)) found = true;
+              },
+              () => found || outOfTime()
+            );
           }
         }
       }
@@ -3509,28 +3579,39 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
     /** Rank a candidate ring by REAL online volume (own graphs, windowed so a
      *  long list doesn't fetch everything before the first dive), dive best
-     *  first. */
+     *  first. While one window DIVES (platform-bound work), the next window's
+     *  graphs are already FETCHING (MUIR-bound work) — the two use disjoint
+     *  resources, so the overlap hides the ranking latency entirely. */
+    const fetchRankWindow = async (ids: string[]): Promise<Map<string, TournamentGraph | null>> => {
+      const graphs = new Map<string, TournamentGraph | null>();
+      await pool(
+        ids,
+        DEEP_AGENTS,
+        async (id) => {
+          if (deepStop()) return;
+          const g = await hooks.expandMember!(id).catch(() => null);
+          graphs.set(id, g);
+          // Narrate each fetch: the ranking window can take a while (MUIR
+          // paced) and a silent stretch reads as a wedged engine upstream.
+          log(
+            `Pivot: ${memberName.get(id) || id} has ${g?.onlineEvents.length || 0} online event(s) of their own${
+              g?.onlineEvents.length ? "" : " — not a useful pivot"
+            }.`
+          );
+        },
+        deepStop
+      );
+      return graphs;
+    };
     const pivotRing = async (candidates: string[], ring: string): Promise<void> => {
+      let prefetched: Promise<Map<string, TournamentGraph | null>> | null = null;
       for (let w = 0; w < candidates.length && !deepStop(); w += RANK_WINDOW) {
         const windowIds = candidates.slice(w, w + RANK_WINDOW);
-        const graphs = new Map<string, TournamentGraph | null>();
-        await pool(
-          windowIds,
-          DEEP_AGENTS,
-          async (id) => {
-            if (deepStop()) return;
-            const g = await hooks.expandMember!(id).catch(() => null);
-            graphs.set(id, g);
-            // Narrate each fetch: the ranking window can take a while (MUIR
-            // paced) and a silent stretch reads as a wedged engine upstream.
-            log(
-              `Pivot: ${memberName.get(id) || id} has ${g?.onlineEvents.length || 0} online event(s) of their own${
-                g?.onlineEvents.length ? "" : " — not a useful pivot"
-              }.`
-            );
-          },
-          deepStop
-        );
+        const graphs = await (prefetched ?? fetchRankWindow(windowIds));
+        // Kick off the NEXT window's MUIR fetches now so they overlap the
+        // dives below (deepStop still stands everything down on a find).
+        const nextIds = candidates.slice(w + RANK_WINDOW, w + 2 * RANK_WINDOW);
+        prefetched = nextIds.length && !deepStop() ? fetchRankWindow(nextIds) : null;
         const ranked = windowIds
           .map((id) => {
             const g = graphs.get(id) || null;
@@ -3605,6 +3686,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     await recordTarget(pend.platform, late, { ...pend.via, profileUnavailable: false });
   }
 
+  if (heartbeat !== undefined) clearInterval(heartbeat);
   accounts.sort((a, b) => b.confidence - a.confidence);
   const mappedOpponents = Array.from(mapped.values()).filter((per) => per.size > 0).length;
   if (accounts.length) {

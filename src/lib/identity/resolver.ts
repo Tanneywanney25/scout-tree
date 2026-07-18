@@ -372,7 +372,12 @@ export async function resolveIdentity(
       //      via stopWhen, keeping any accounts it already traced;
       //   2. a very generous hard ceiling + race as the last-ditch backstop,
       //      in case the engine somehow never returns at all.
-      const TRAVERSAL_BUDGET_MS = 60 * 60_000; // hard ceiling — effectively unbounded
+      // Matches the engine's own DEFAULT_BUDGET_MS (6h): the ceiling exists
+      // only so the Promise.race backstop below has a number, never to pace
+      // real work. The STALL watchdog is the actual wedge guard — and the
+      // engine now emits a heartbeat whenever it would otherwise be silent
+      // for 25s, so a healthy-but-quiet grind can no longer trip it.
+      const TRAVERSAL_BUDGET_MS = 6 * 60 * 60_000; // hard ceiling — effectively unbounded
       const TRAVERSAL_STALL_MS = 90_000; // no log line for 90s = wedged
       let lastLogAt = Date.now();
       let abandoned = false;
