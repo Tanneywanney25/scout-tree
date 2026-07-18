@@ -378,14 +378,31 @@ function json(payload: unknown): Response {
   });
 }
 
-/** Expand: build just the tournament graph for a specific USCF member ID. */
+/** Expand: build just the tournament graph for a specific USCF member ID.
+ *  Memoized per member for the life of the (warm) instance: the pivot stage
+ *  expands dozens of opponents and several browser clients can ask about the
+ *  same member — each rebuild costs a full MUIR walk (events + sections +
+ *  standings). Crosstables of 2020-era events never change; a short TTL only
+ *  bounds memory. Failures are not memoized. */
+const expandMemo = new Map<string, { at: number; payload: { available: boolean; tournamentGraph: unknown; graphTraversalReady: boolean } }>();
+const EXPAND_MEMO_TTL_MS = 15 * 60_000;
+
 async function handleExpand(memberId: string): Promise<Response> {
   const clean = memberId.replace(/\D/g, "");
+  const hit = clean ? expandMemo.get(clean) : undefined;
+  if (hit && Date.now() - hit.at < EXPAND_MEMO_TTL_MS) return json(hit.payload);
   const member = clean ? await fetchUscfMember(clean) : null;
   if (!member) return json({ available: false, tournamentGraph: null, graphTraversalReady: false });
   const sections = await buildOnlineGraphForMember(member);
   const graph = sectionsToGraph(member, sections);
-  return json({ available: true, tournamentGraph: graph, graphTraversalReady: graph.graphTraversalReady });
+  const payload = { available: true, tournamentGraph: graph, graphTraversalReady: graph.graphTraversalReady };
+  expandMemo.set(clean, { at: Date.now(), payload });
+  if (expandMemo.size > 200) {
+    // Bound memory on a long-lived instance: drop the stalest half.
+    const entries = [...expandMemo.entries()].sort((a, b) => a[1].at - b[1].at);
+    for (const [k] of entries.slice(0, 100)) expandMemo.delete(k);
+  }
+  return json(payload);
 }
 
 // ---------------------------------------------------------------------------

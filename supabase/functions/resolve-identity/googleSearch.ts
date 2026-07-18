@@ -264,11 +264,19 @@ async function searchViaCse(
   let idx = 0;
   let lastStart = 0;
   const enough = () => out.length >= 30;
+  // Page-1 result counts, so a page-2 fetch is skipped when page 1 came back
+  // short — a start=11 request against a <10-result query is a guaranteed
+  // empty page that still costs a paced Google call.
+  const page1Count = new Map<string, number>();
 
   await Promise.all(
     Array.from({ length: Math.min(CONCURRENCY, work.length) }, async () => {
       while (idx < work.length && !enough() && !quotaHit) {
         const { q, start } = work[idx++];
+        if (start > 1) {
+          const got = page1Count.get(q);
+          if (got !== undefined && got < 10) continue; // page 1 was short — page 2 is empty
+        }
         const wait = Math.max(0, lastStart + PACE_MS - Date.now());
         lastStart = Math.max(Date.now(), lastStart + PACE_MS);
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
@@ -280,6 +288,7 @@ async function searchViaCse(
           log?.(`Google CSE quota hit — cooling down and switching to AI web search.`);
           return;
         }
+        if (start === 1) page1Count.set(q, items.length);
         for (const item of items) {
           const blob = `${item.link || ""}\n${item.title || ""}\n${item.snippet || ""}`;
           for (const c of extractCandidatesFromText(blob, `Google: ${q}${start > 1 ? " (p2)" : ""}`)) {
@@ -391,7 +400,42 @@ async function searchViaAi(
 // Public entry — the ladder, CSE first, AI fallback
 // ---------------------------------------------------------------------------
 
-export async function findUsernamesOnWeb(
+// Memoized per person+context for the life of the (warm) process: the
+// traversal asks about the same member from several events and the resolver's
+// own fallback repeats the traversal's query — each repeat used to re-run the
+// whole ladder (up to ~30 paced CSE fetches or an AI web-search call).
+// Quota/failure results are NOT memoized, so a later call can retry once the
+// cooldown lifts.
+const usernameSearchMemo = new Map<string, Promise<UsernameSearchResult>>();
+
+export function findUsernamesOnWeb(
+  req: UsernameSearchRequest,
+  log?: (m: string) => void
+): Promise<UsernameSearchResult> {
+  const key = JSON.stringify([
+    (req.name || "").toLowerCase(),
+    req.state,
+    req.uscfRating,
+    req.fideId,
+    req.eventName,
+    [...(req.platforms || [])].sort(),
+  ]);
+  const hit = usernameSearchMemo.get(key);
+  if (hit) return hit;
+  const p = findUsernamesOnWebUncached(req, log);
+  usernameSearchMemo.set(key, p);
+  void p.then(
+    (r) => {
+      // Only a completed search (hits, or a clean whole-ladder miss) is a
+      // stable answer worth remembering.
+      if (!r.candidates.length && (r.quotaExhausted || r.backend === "none")) usernameSearchMemo.delete(key);
+    },
+    () => usernameSearchMemo.delete(key)
+  );
+  return p;
+}
+
+async function findUsernamesOnWebUncached(
   req: UsernameSearchRequest,
   log?: (m: string) => void
 ): Promise<UsernameSearchResult> {
@@ -483,7 +527,27 @@ function collectMatches(re: RegExp, text: string): string[] {
   return Array.from(out);
 }
 
-export async function discoverEventOnWeb(ev: DiscoverEventRequest): Promise<DiscoveredEventInfo | null> {
+// Memoized per event for the life of the (warm) process: the answer to "where
+// was this 2020 tournament hosted" never changes, and each miss costs a full
+// grounded AI web-search call. Failures are not memoized (retryable).
+const discoverEventMemo = new Map<string, Promise<DiscoveredEventInfo | null>>();
+
+export function discoverEventOnWeb(ev: DiscoverEventRequest): Promise<DiscoveredEventInfo | null> {
+  const key = JSON.stringify([ev.name, ev.sectionName, ev.startDate, ev.ratingSystem]);
+  const hit = discoverEventMemo.get(key);
+  if (hit) return hit;
+  const p = discoverEventOnWebUncached(ev);
+  discoverEventMemo.set(key, p);
+  void p.then(
+    (r) => {
+      if (r === null) discoverEventMemo.delete(key); // AI failure/quota — retryable
+    },
+    () => discoverEventMemo.delete(key)
+  );
+  return p;
+}
+
+async function discoverEventOnWebUncached(ev: DiscoverEventRequest): Promise<DiscoveredEventInfo | null> {
   const name = (ev.name || "").trim();
   if (!name) return null;
 

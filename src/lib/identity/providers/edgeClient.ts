@@ -116,7 +116,13 @@ export function fetchEdgeIdentity(query: PlayerQuery, signal?: AbortSignal): Pro
   if (existing) return existing;
 
   const promise = (async (): Promise<EdgeResponse> => {
-    const data = await invokeEdge({ query }, 150_000);
+    // The graph build behind this call can legitimately run for minutes on an
+    // active player (it walks the member's whole online-era event history).
+    // The old 150s client timeout was the single biggest trace-killer in the
+    // browser: it silently discarded a nearly-finished build AND the anchor
+    // identities with it. One in-flight retry covers a flaky first attempt.
+    let data = await invokeEdge({ query }, 480_000);
+    if (!data && !signal?.aborted) data = await invokeEdge({ query }, 480_000);
     if (!data) {
       // Most common cause: the edge function isn't deployed yet (or has no AI
       // key). The detective degrades to Lichess/Chess.com — surface why.
@@ -139,8 +145,17 @@ export function fetchEdgeIdentity(query: PlayerQuery, signal?: AbortSignal): Pro
   })();
 
   cache.set(key, promise);
-  // Don't cache forever; allow a retry on the next distinct search session.
-  promise.finally(() => setTimeout(() => cache.delete(key), 60_000));
+  // A FAILURE must never be remembered as "this player has no data" — evict it
+  // immediately so the next caller retries. A real response is kept long
+  // enough to cover the whole traversal that consumes it (the old 60s eviction
+  // could force a full multi-minute graph rebuild MID-RUN).
+  promise.then(
+    (r) => {
+      if (r === EMPTY) cache.delete(key);
+      else setTimeout(() => cache.delete(key), 15 * 60_000);
+    },
+    () => cache.delete(key)
+  );
   return promise;
 }
 
@@ -167,13 +182,21 @@ export function expandMemberGraph(memberId: string, signal?: AbortSignal): Promi
   if (existing) return existing;
 
   const promise = (async (): Promise<TournamentGraph | null> => {
-    const data = await invokeEdge({ expandMemberId: id }, 120_000);
+    const data = await invokeEdge({ expandMemberId: id }, 300_000);
     if (!data) return null;
     return (data.tournamentGraph as TournamentGraph | null) ?? null;
   })();
 
   expandCache.set(id, promise);
-  promise.finally(() => setTimeout(() => expandCache.delete(id), 120_000));
+  // Keep real graphs for the rest of the pivot stage (the same opponent is
+  // reached through several section-mates); never remember a failed call.
+  promise.then(
+    (g) => {
+      if (g === null) expandCache.delete(id);
+      else setTimeout(() => expandCache.delete(id), 10 * 60_000);
+    },
+    () => expandCache.delete(id)
+  );
   return promise;
 }
 
@@ -252,18 +275,29 @@ export function findUsernameCandidates(req: UsernameSearchRequest, signal?: Abor
   const existing = usernameCache.get(key);
   if (existing) return existing;
 
+  // A timed-out/failed call must not poison the session cache: "[] because
+  // the request died" and "[] because the index has nothing" are different
+  // answers, and the old code remembered both forever.
+  let requestFailed = false;
   const promise = (async (): Promise<UsernameCandidate[]> => {
     if (signal?.aborted) return [];
     await usernameThrottle();
     if (signal?.aborted) return [];
-    const data = await invokeEdge({ findUsername: req }, 90_000);
-    if (!data || data.available === false || !Array.isArray(data.candidates)) return [];
+    const data = await invokeEdge({ findUsername: req }, 180_000);
+    if (!data) {
+      requestFailed = true;
+      return [];
+    }
+    if (data.available === false || !Array.isArray(data.candidates)) return [];
     return (data.candidates as UsernameCandidate[])
       .filter((c) => c && (c.platform === "chesscom" || c.platform === "lichess") && typeof c.username === "string")
       .slice(0, 40);
   })();
 
   usernameCache.set(key, promise);
+  void promise.then(() => {
+    if (requestFailed && usernameCache.get(key) === promise) usernameCache.delete(key);
+  });
   return promise;
 }
 
