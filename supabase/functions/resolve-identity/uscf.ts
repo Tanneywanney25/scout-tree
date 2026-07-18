@@ -114,13 +114,30 @@ export interface OnlineSection {
 // ---------------------------------------------------------------------------
 
 // MUIR rate-limits bursts; space requests out so a graph build (which can make
-// dozens of section/standings calls) stays under its limiter.
+// dozens of section/standings calls) stays under its limiter. The pacing is
+// ADAPTIVE: a light 50ms base gap (measured: 36 requests at 6-concurrent with
+// no gap at all drew zero 429s, median 135ms) that backs off hard the moment
+// MUIR pushes back with a 429 and decays back to the base as calls succeed.
+// The old fixed 160ms gap serialized every graph build at ~6 req/s even when
+// MUIR was perfectly happy — the single biggest cost of building tournament
+// graphs and of ranking pivot candidates (each candidate is a full build).
+const MUIR_BASE_GAP_MS = 50;
+const MUIR_MAX_GAP_MS = 2_000;
+let muirGapMs = MUIR_BASE_GAP_MS;
 let muirNextSlot = 0;
 async function muirThrottle(): Promise<void> {
   const now = Date.now();
   const wait = Math.max(0, muirNextSlot - now);
-  muirNextSlot = Math.max(now, muirNextSlot) + 160;
+  muirNextSlot = Math.max(now, muirNextSlot) + muirGapMs;
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+/** MUIR answered 429 — quadruple the gap (up to a ceiling) until it calms. */
+function muirBackOff(): void {
+  muirGapMs = Math.min(MUIR_MAX_GAP_MS, Math.max(muirGapMs, MUIR_BASE_GAP_MS) * 4);
+}
+/** A successful response decays the gap back toward the base. */
+function muirCalm(): void {
+  if (muirGapMs > MUIR_BASE_GAP_MS) muirGapMs = Math.max(MUIR_BASE_GAP_MS, Math.round(muirGapMs * 0.8));
 }
 
 async function fetchJson(path: string, timeoutMs = 12000, retries = 3): Promise<any | null> {
@@ -135,6 +152,7 @@ async function fetchJson(path: string, timeoutMs = 12000, retries = 3): Promise<
       });
       clearTimeout(t);
       if (res.status === 429 || res.status >= 500) {
+        if (res.status === 429) muirBackOff(); // every in-flight caller slows down too
         if (attempt < retries) {
           // 429s can persist for a while — back off meaningfully.
           await new Promise((r) => setTimeout(r, (res.status === 429 ? 1500 : 500) * (attempt + 1)));
@@ -143,6 +161,7 @@ async function fetchJson(path: string, timeoutMs = 12000, retries = 3): Promise<
         return null;
       }
       if (!res.ok) return null;
+      muirCalm();
       return await res.json();
     } catch {
       clearTimeout(t);
@@ -513,11 +532,13 @@ export async function buildOnlineGraphForMember(
   }
   let foundCount = 0;
   let unnamedMisses = 0;
-  const perEvent = await mapLimit(candidates, 2, async (ev): Promise<Found[]> => {
+  // Concurrency 5 (was 2): the adaptive MUIR pacer is the real rate control —
+  // these workers just keep requests IN FLIGHT so RTT overlaps the gap.
+  const perEvent = await mapLimit(candidates, 5, async (ev): Promise<Found[]> => {
     if (foundCount >= maxSections || (unnamedMisses >= 20 && !named.has(ev))) return [];
     const { sections, startDate, endDate, name } = await fetchEventSections(ev.eventId);
     const evRef: UscfEventRef = { ...ev, name: ev.name || name || "", startDate: ev.startDate || startDate, endDate: ev.endDate || endDate };
-    const metas = await mapLimit(sections, 2, async (sec) => {
+    const metas = await mapLimit(sections, 3, async (sec) => {
       if (foundCount >= maxSections) return null;
       const meta = await fetchSectionMeta(ev.eventId, sec.number);
       return meta && meta.isOnline ? { ev: evRef, section: sec, meta } : null;
@@ -530,7 +551,7 @@ export async function buildOnlineGraphForMember(
   const foundSections = perEvent.flat().slice(0, maxSections);
 
   // Phase 2: pull the crosstable for each online section.
-  const online = await mapLimit(foundSections, 2, async ({ ev, section, meta }): Promise<OnlineSection | null> => {
+  const online = await mapLimit(foundSections, 5, async ({ ev, section, meta }): Promise<OnlineSection | null> => {
     const players = await fetchSectionPlayers(ev.eventId, section.number, member.id);
     if (!players.some((p) => p.isTarget)) return null; // target not actually here
     const evName = ev.name || "";
