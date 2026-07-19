@@ -1,0 +1,89 @@
+* [33m1086e94[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m perf: fetch Chess.com /stats only for accounts that exist
+* [33m1c0d135[m feat: per-phase performance logging in the resolver
+* [33m21aeea1[m perf: parallelize the school social-graph route end to end
+* [33m6db683d[m perf: never cache a failure, never rebuild what's known — edge client + server memos
+* [33m7b314d4[m perf: keep long traces alive — heartbeat, no dive cap, progress-driven passes, parallel deep drain
+* [33m3c23466[m perf: bulk Lichess existence prefilter + autocomplete memo
+* [33m8dfd09f[m perf: adaptive MUIR pacing + higher graph-build concurrency
+* [33m2ee55d2[m perf: platform-outage circuit breaker in politeFetch
+* [33m58de38c[m Baseline: ScoutTree identity resolver before performance audit
+*   [33m5674437[m[33m ([m[1;31morigin/claude/nwsrs-school-report-param-vcffvn[m[33m)[m Merge NWSRS table-parse fix + multi-tier adapter verification
+[32m|[m[33m\[m  
+[32m|[m * [33m9135f7c[m Verify platform adapters across tiers (MSHSL, VSCA, OSCF fall-through)
+[32m|[m * [33m1830293[m Fix NWSRS adapter: parse table rows, search by last name, extract school code
+[32m|[m[32m/[m  
+* [33m09faaaf[m Test harness: multi-state adapters, tier ladder and rating sanity
+* [33mf53fb08[m Add Tier 4 registration-platform adapters
+* [33m69bf5d4[m Add Tier 3 state chess association archive adapters
+* [33m2a56cae[m Add KSCA and Tier 2 HS-association adapters (IHSA, IESA, AIA, MSHSL, KSHSAA)
+* [33mf448a77[m Add CXR adapter for Oklahoma/Arkansas/Kansas/Missouri/Texas
+* [33mbed90a7[m Add WSCF adapter for Wisconsin
+* [33mdfe29b5[m Add multi-state school-source adapter framework with tiered orchestration
+* [33m8391d34[m Confidence: implausible USCF-online rating gaps sink name-search matches
+* [33mc09a78f[m School resolver: remove schoolmate trace time budgets entirely
+[33m|[m * [33m5368112[m[33m ([m[1;31morigin/claude/scoutree-identity-perf-t37sni[m[33m)[m Resolver: per-phase timing trail on every search
+[33m|[m * [33m6b9fe5a[m Edge function: AI pass concurrent with graph build, crosstables at 4, gzip
+[33m|[m * [33m56df2f4[m School resolver: fast path, 4-way 60s mate traces, cached parallel archive crawl
+[33m|[m * [33m6de76ad[m Search-wide cache: share fetch caches and resolved handles across traversals
+[33m|[m[33m/[m  
+*   [33m35ae3b9[m Merge school-resolver schoolmate resolution + social-crawl fixes
+[35m|[m[36m\[m  
+[35m|[m * [33m66b95a8[m Test harness: cover the 50% bar, call logging and the friends signal
+[35m|[m * [33mf6cc0a0[m School resolver: announce the chess.com friends auth mode
+[35m|[m * [33mab27d3c[m School resolver: give schoolmate traces main-search budgets and pacing
+[35m|[m[35m/[m  
+* [33mad6eb5b[m Fix NWSRS school report parameter
+*   [33m107cd9e[m Merge pull request #2 from Tanneywanney25/claude/school-resolver-uscf-lookup-csuzsp
+[1;31m|[m[1;32m\[m  
+[1;31m|[m * [33m186c8fb[m[33m ([m[1;31morigin/claude/school-resolver-uscf-lookup-csuzsp[m[33m)[m Identity: resolve schoolmates via USCF ID lookup, not just name search
+[1;31m|[m[1;31m/[m  
+*   [33m6be0552[m Merge pull request #1 from Tanneywanney25/feature/school-social-graph-fallback
+[1;33m|[m[1;34m\[m  
+[1;33m|[m * [33m3433177[m[33m ([m[1;31morigin/feature/school-social-graph-fallback[m[33m)[m Identity: harden the chess.com friends-response parser
+[1;33m|[m * [33m77ebec0[m Identity: school-based social-graph fallback for players with no online history
+[1;33m|[m[1;33m/[m  
+* [33mcc52943[m Harness: simulate a chess.com profile-shard outage around the real engine
+* [33m30f791d[m Engine: a failed profile fetch must never veto a pairing-chain vote
+* [33m75c7f22[m Engine: crown the primary target through cross-event pairing consensus
+* [33mcff09f2[m Engine: review fixes - partial-window holes, fail cooldown, lichess parity
+* [33m1f890fd[m Engine: pivot dives get up to 10 minutes when the budget allows
+* [33m36d79c5[m Engine: in-flight seed judgments observe their event's deadline
+* [33mf61f30d[m Budgets: finding the username outranks the clock
+* [33mbcbf418[m Engine: reserve a budget tail for the opponent pivot; narrate its ranking
+* [33mcdab115[m Engine: archive-shard holes are data gaps, never namesake verdicts
+* [33m0423a71[m Comment out all pricing-related code
+* [33me0f8dc4[m Engine: don't cache chess.com's 404-with-503-body archive flakes as empty months
+* [33me439f8d[m Engine: games-derived links are second-class until two members corroborate
+* [33mcb4a740[m Engine: junk-roster gate + underscore-name coverage + --events harness filter
+* [33ma9e9902[m Engine: opponent-pivot fallback - rank by real online history, dive best-first
+* [33md8fb573[m Engine: seed fan-out - every name-guess candidate event-screened in one pass
+* [33mdfddb2c[m Engine: verify like a careful human - country/state/club/USCF-ID corroboration
+* [33m8443924[m Engine: scope alignment pools to the event's exact time control
+* [33m41675cb[m Verify: current Lichess profile fields (realName/flag), published USCF IDs, per-player states
+* [33m4a2f9bf[m Engine: google-lead evidence carries the namesake caveat the UI keys on
+* [33mb0c768f[m Engine: google-lead namesake guards — strict structural proof, state contradiction, capped lead confidence
+* [33m2680740[m Engine: one-handle-one-player invariant + no target reveal from sparse link-scoped alignments
+* [33mb268343[m Discovery honesty: candidate hygiene, quotaExhausted flag, cooldown fast-fail, backend logging
+* [33mec95ea9[m Discovery AI: shared rate-limit discipline + env-driven unified-proxy backend with real grounding
+* [33mc0549fc[m Security: gitignore .env, untrack it, document backend env vars in .env.example
+* [33ma553703[m Find Player: regression tests, fixtures, --seed harness (test-only, guarded)
+* [33m3713f98[m Find Player: partial-progress state + stop re-deriving failing name-guess seeds
+* [33medb93c6[m Find Player: honest "verified" vs "unconfirmed" account labeling
+* [33m75e83f3[m Find Player: cross-corroborated, full-alignment-only target reveal
+* [33mb98883a[m Find Player: robust link scoping + roster gate (junk-arena fix)
+* [33m0617029[m Find Player: tolerant subsequence alignRounds (unrated-first + well-anchored guard)
+* [33m43c874e[m Find Player: full View Log dialog + anti-stall guards on the traversal
+* [33m766078f[m Slash scout time 5-10min -> <90s: game budget, parallel fetch, worker pool
+* [33mb406d1b[m Parallelize find-player traversal: agent pools, shared caches, instant stand-down
+* [33m2b77404[m Multi-candidate Google discovery with attribute scoring and name-uniqueness ordering
+* [33mbacf6ad[m Google-index username discovery replaces platform name search; unbounded traversal
+* [33m14598bb[m Commit changes after graph traversal and FIDE semantics updates
+* [33mce36b8d[m Agentic username discovery via USCF tournament-graph traversal
+* [33md37b8a8[m[33m ([m[1;31morigin/claude/find-player-identity-bflaw6[m[33m)[m Follow (See <id>) duplicate pointers on USCF member pages
+* [33m79c596d[m Tournament-graph traversal, deep phase, auth config, rating offset
+* [33m5957460[m USCF deep search + tournament graph in resolve-identity
+* [33mac89685[m Probe: dump USCF structures
+* [33m7c6fbd2[m Probe: python scraper prototype
+* [33mcddaa18[m Probe: extract API routes + confirm MSA backbone
+* [33m8261d9b[m Probe ratings-api.uschess.org routes
+* [33mb659fe6[m Add temporary USCF probe workflow (recon)
