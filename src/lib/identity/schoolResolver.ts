@@ -57,7 +57,7 @@ import type {
 import type { UsernameSearchRequest, UsernameCandidate } from "./graphTypes";
 import { politeFetch, pool } from "./net";
 import { verifyChesscom, verifyLichess, type VerifiedProfile } from "./verify";
-import { guessHandles, sharedChesscomMonthGames } from "./uscfGraphEngine";
+import { sharedChesscomMonthGames } from "./uscfGraphEngine";
 import { getSharedTraversalCaches, getCachedIdentity, cacheIdentity } from "./cache";
 import {
   scoreFromEvidence,
@@ -76,46 +76,44 @@ const SCHOOLMATE_RESOLVE_POOL = 6; // schoolmates resolved to handles concurrent
 // runs on its target — and the main search runs UNBOUNDED (it grinds until the
 // graph is exhausted). Fixed per-mate budgets kept killing traces mid-flight:
 // observed live, Tanush #16538484 resolved in 76-120s+ when two traces shared
-// the rate-limit gates, and a 120s cap + 180s phase cap left the crawl with one
-// anchor (or none), so the target's account was never seen. There are NO time
-// budgets here any more — a trace ends when the engine exhausts the mate's
-// graph, and the phase ends when enough anchors are resolved (or the roster
-// runs out). The caller's abort signal remains the only external stop.
+// the rate-limit gates, and a 120s cap left the crawl with one anchor (or none),
+// so the target's account was never seen. There are NO time budgets here any
+// more — a trace ends when the engine exhausts the mate's graph, and the phase
+// ends only when the WHOLE roster has been attempted. The caller's abort signal
+// remains the only external stop.
 //
-// The FAST PATH below (search-wide cache + a real-name Chess.com probe) still
-// lands most mates without any trace, so the pool stays at 2: those are the
-// only genuinely unbounded traces, and more than 2 full traces in flight earns
-// 429s regardless of how warm the caches are.
-const USCF_MATE_POOL = 2; // schoolmates traced at once (each trace fans out MUIR + chess.com calls of its own — more than 2 in flight earns 429s)
-const USCF_MATE_TARGET = 2; // resolved schoolmates are enough to crawl on — stop here
+// EVERY mate now earns a full tournament trace (the name-shaped Chess.com "fast
+// probe" was removed — it crowned wrong handles like Austin Liu → @austinliu1
+// when the real handle @ailopatricaliy only surfaces from the tournament graph,
+// and a wrong anchor poisons the social crawl). The one remaining shortcut is
+// the search-wide identity cache, whose entries are themselves ENGINE-CONFIRMED
+// (written only by a completed traversal), so it never introduces a guess.
+//
+// USCF_MATE_POOL bounds how many unbounded traces run at once: each trace fans
+// out MUIR + chess.com calls of its own, and more than a couple in flight earns
+// 429s regardless of how warm the caches are. It is a concurrency governor, NOT
+// a cap on how many mates we resolve — the pool drains the entire roster.
+const USCF_MATE_POOL = 2; // unbounded traces in flight at once (rate-limit governor, not a count cap)
 // A schoolmate's handle only needs to be USABLE FOR THE CRAWL — the target is
 // crowned by the social graph's own evidence bar (≥2 mutuals + verification),
 // not by this number. 50% keeps plausible mates in; a wrong mate contributes
 // noise the ≥2-mutual candidate bar filters out anyway.
 const USCF_MATE_MIN_CONFIDENCE = 0.5; // bar for accepting a schoolmate's handle
-// FAST PATH: before a mate earns a 60s tournament trace, probe a handful of
-// name-shaped Chess.com handles and accept one ONLY when the profile's REAL
-// name matches the roster name (a namey username alone proves nothing — the
-// main engine's discipline). The unsuffixed shapes carry nearly all the hit
-// rate, so the probe stays tiny.
-const FAST_PROBE_HANDLES = 8; // guessHandles() shapes checked per mate
-const FAST_PROBE_POOL = 4; // probe verifications in flight per mate
-const FAST_PROBE_MIN_CONFIDENCE = 0.7; // bar to skip the tournament trace
 const CRAWL_POOL = 6; // schoolmate graphs walked concurrently
 const CC_MONTH_POOL = 4; // archive months fetched at once per schoolmate (global gate still applies)
 const CANDIDATE_VERIFY_POOL = 8; // candidate accounts verified concurrently
 const CC_ARCHIVE_MONTHS = 24; // months of chess.com archive scanned per schoolmate (the last 2 years)
 const LICHESS_GAMES = 200; // recent lichess games scanned per schoolmate
-const MAX_SCHOOLMATES = 24; // roster players we try to resolve (highest-rated first)
+// Safety ceiling on roster size, not a "stop after N resolved" cap: we ATTEMPT
+// every roster player (highest-rated — likeliest online-active — first), and
+// only a pathologically large roster is trimmed here (logged when it happens).
+// Realistic NWSRS school reports sit well under this.
+const MAX_SCHOOLMATES = 250; // roster players we attempt to resolve (highest-rated first)
 const MIN_OPP_GAMES = 3; // games vs a handle before it counts as a "connection"
 const HEAVY_OPP_GAMES = 12; // one schoolmate playing a handle this much = strong tie
 const MAX_CANDIDATES = 40; // candidate handles carried into verification
 const BIG_CLUB_MEMBERS = 2000; // clubs bigger than this are too generic to link on
 const SMALL_CLUB_FOR_MEMBERS = 200; // only surface members from a club this small
-// Effectively unbounded (matches the traversal engine's own default): the
-// school route is the LAST deterministic chance for a zero-history player, so
-// it must be allowed to finish. The abort signal is the real stop.
-const DEFAULT_SCHOOL_BUDGET_MS = 6 * 60 * 60_000;
 
 /** A purely-social identification (no federation-ID anchor) is capped here: it
  *  is a strong lead, but "the account your schoolmates all play" is not the same
@@ -441,44 +439,6 @@ async function verify(platform: OnlinePlatform, username: string, signal?: Abort
   return p || null; // null-or-undefined both mean "not usable here"
 }
 
-interface FastProbeHit {
-  platform: OnlinePlatform;
-  profile: VerifiedProfile;
-  confidence: number;
-}
-
-/** FAST PATH probe: a schoolmate with a simple real-name handle resolves in a
- *  few profile GETs instead of a 60s tournament trace. Chess.com has no name
- *  search, so this is guess-and-verify over the top name shapes — and a guess
- *  only counts when the profile's REAL name matches the roster name (and it
- *  isn't confidently foreign). A state-naming location lifts the confidence.
- *  The tournament trace remains the fallback for every non-obvious handle. */
-async function fastNameProbe(
-  name: string,
-  state: string | undefined,
-  signal?: AbortSignal
-): Promise<FastProbeHit | null> {
-  const guesses = guessHandles(name).slice(0, FAST_PROBE_HANDLES);
-  if (!guesses.length) return null;
-  let best: FastProbeHit | null = null;
-  await pool(
-    guesses,
-    FAST_PROBE_POOL,
-    async (g) => {
-      if (signal?.aborted) return;
-      const profile = await verify("chesscom", g, signal);
-      if (!profile || !profile.displayName || isForeign(profile.country)) return;
-      const sim = nameSimilarity(name, profile.displayName);
-      if (sim < 0.85) return; // only a real-name match may claim the mate
-      let confidence = sim >= 0.95 ? 0.75 : 0.7;
-      if (locationNamesState(profile.location, state)) confidence += 0.05;
-      if (!best || confidence > best.confidence) best = { platform: "chesscom", profile, confidence };
-    },
-    () => !!signal?.aborted
-  );
-  return best && (best as FastProbeHit).confidence >= FAST_PROBE_MIN_CONFIDENCE ? best : null;
-}
-
 /** Resolve one schoolmate name to their best verified online handle via the
  *  Google-index discovery hook. A resolved schoolmate must be a live US-plausible
  *  account — a foreign-flagged namesake is not this WA junior's classmate. */
@@ -715,10 +675,12 @@ export async function runSchoolResolution(
   const exclude = new Set((input.excludeHandles || []).map(lc));
   const t0 = Date.now();
   const since = () => `${Math.round((Date.now() - t0) / 1000)}s`;
-  // Wall-clock ceiling for the whole crawl (the school phase iterates finite
-  // lists, but a full roster × months of archives can still run long). Stops
-  // gracefully — whatever was found so far is still ranked and returned.
-  const deadline = Date.now() + (options.budgetMs ?? DEFAULT_SCHOOL_BUDGET_MS);
+  // NO time budget by default: the school route is the LAST deterministic chance
+  // for a zero-history player, and fixed deadlines kept cutting mate traces off
+  // seconds from an answer. The abort signal is the only stop. A caller may pass
+  // an explicit budgetMs (tests / a bounded batch job) to opt back into a
+  // wall-clock ceiling; production passes none, so `deadline` is Infinity.
+  const deadline = options.budgetMs ? Date.now() + options.budgetMs : Infinity;
   const halted = () => !!signal?.aborted || Date.now() > deadline;
 
   // --- 1. School -------------------------------------------------------------
@@ -756,10 +718,19 @@ export async function runSchoolResolution(
         .catch(() => null)) || [];
     for (const m of roster) if (!sameName(m.name, input.name)) mates.push(m);
   }
-  // Highest-rated roster players first (likeliest to be online-active), capped.
+  // Highest-rated roster players first (likeliest to be online-active). We
+  // attempt the WHOLE roster — only a pathologically large one is trimmed to
+  // the safety ceiling (logged), never a "stop after N" cap.
   mates.sort((a, b) => (b.rating || 0) - (a.rating || 0));
   const pickedMates = mates.slice(0, MAX_SCHOOLMATES);
-  log(`School resolver: ${school} roster has ${mates.length} other player(s); resolving the top ${pickedMates.length} to online handles…`);
+  if (mates.length > pickedMates.length) {
+    log(
+      `School resolver: ${school} roster has ${mates.length} other player(s) — attempting the top ${pickedMates.length} ` +
+        `(safety ceiling ${MAX_SCHOOLMATES}; the rest are skipped).`
+    );
+  } else {
+    log(`School resolver: ${school} roster has ${mates.length} other player(s); attempting to resolve ALL of them to online handles…`);
+  }
 
   const resolved: ResolvedMate[] = [];
   // Seeded (already-known) schoolmates go in directly, verified for enrichment.
@@ -770,29 +741,30 @@ export async function runSchoolResolution(
 
   // 2a. USCF-ANCHORED RESOLUTION (primary): roster name + state → USCF member
   //     ID (the public ratings search) → the identity engine's tournament-graph
-  //     traversal — the same route the main search takes once it has a USCF ID.
-  //     Runs a few mates at a time, each on a hard timeout (the engine is
-  //     expensive), and stops as soon as the crawl has enough anchors.
-  if (hooks.findUscfId && hooks.resolveUscfIdentity && resolved.length < USCF_MATE_TARGET && !halted()) {
+  //     traversal — the SAME route (and the same full engine) the main search
+  //     takes once it has a USCF ID. Every mate earns a full, unbounded trace;
+  //     the ONLY shortcut is the engine-confirmed identity cache. Runs
+  //     USCF_MATE_POOL traces at a time (a rate-limit governor) and drains the
+  //     ENTIRE roster — the more mates resolved, the stronger the social graph.
+  if (hooks.findUscfId && hooks.resolveUscfIdentity && !halted()) {
     const phaseStart = Date.now();
-    // Enough anchors to crawl on: the target number of resolved schoolmates.
-    // No time component — the phase has no deadline (a trace ends when the
-    // engine exhausts the mate's graph, the phase when the target is met);
-    // the fast path below lands most mates before any trace is needed.
-    const enoughMates = () => resolved.length >= USCF_MATE_TARGET;
-    const phaseHalted = () => halted() || enoughMates();
+    let attempted = 0;
+    let noUscf = 0;
+    let traced = 0;
+    let fromCache = 0;
     log(
-      `School resolver: USCF-anchored resolution — ${USCF_MATE_POOL} mate(s) at a time, ` +
-        `fast path (search-wide cache + real-name probe) before each unbounded trace ` +
-        `(same engine + discovery as the main search), stopping at ${USCF_MATE_TARGET} resolved.`
+      `School resolver: USCF-anchored resolution — the FULL identity engine on every mate ` +
+        `(${USCF_MATE_POOL} unbounded trace(s) in flight; same engine + discovery as the main search), ` +
+        `attempting all ${pickedMates.length} roster player(s). No fast name-guess path, no count cap, no time budget.`
     );
     await pool(
       pickedMates,
       USCF_MATE_POOL,
       async (mate) => {
-        // (No spacing sleep here any more: the adaptive MUIR pacer and the
-        // platform gates in net.ts are the flood control, and they see every
-        // request — a blind 1s stagger only added latency on top of them.)
+        attempted++;
+        // (No spacing sleep here: the adaptive MUIR pacer and the platform gates
+        // in net.ts are the flood control, and they see every request — a blind
+        // 1s stagger only added latency on top of them.)
         const parts = splitName(mate.name);
         if (!parts) return;
         const mateState = mate.state || affiliations[0]?.state || input.state;
@@ -800,20 +772,24 @@ export async function runSchoolResolution(
           .findUscfId!({ firstName: parts.first, lastName: parts.last, state: mateState, rating: mate.rating })
           .catch(() => null);
         if (!found) {
+          noUscf++;
           log(`School resolver: no USCF member found for ${mate.name}${mateState ? ` (${mateState})` : ""} — skipping.`);
           return;
         }
         log(`School resolver: found USCF ID ${found.uscfId} for ${mate.name}${found.rating ? ` (~${found.rating} USCF)` : ""}.`);
-        if (phaseHalted()) return;
+        if (halted()) return;
 
-        // FAST PATH 1: the search-wide resolved-identity store — a mate any
-        // traversal already confirmed (this search or an earlier one) costs
-        // one verification, not a trace.
+        // SHORTCUT (engine-confirmed only): the search-wide resolved-identity
+        // store holds handles a COMPLETED traversal produced (this search, a
+        // sibling mate trace, or an earlier search this session). Reusing one is
+        // reusing the full engine's own output — never a guess — so it costs one
+        // verification instead of re-running an identical trace.
         const known = getCachedIdentity(found.uscfId);
         if (known && known.confidence >= USCF_MATE_MIN_CONFIDENCE) {
           if (resolved.some((x) => x.platform === known.platform && lc(x.username) === lc(known.username))) return;
           const profile = await verify(known.platform, known.username, signal);
-          if (profile && !enoughMates()) {
+          if (profile) {
+            fromCache++;
             resolved.push({
               name: mate.name,
               platform: known.platform,
@@ -823,46 +799,24 @@ export async function runSchoolResolution(
               confidence: known.confidence,
             });
             log(
-              `School resolver: resolved ${mate.name} to @${profile.username} from the search-wide cache ` +
-                `(${Math.round(known.confidence * 100)}%, no trace needed).`
+              `School resolver: resolved ${mate.name} to @${profile.username} from the engine-confirmed identity cache ` +
+                `(${Math.round(known.confidence * 100)}%, trace already run earlier).`
             );
             return;
           }
-          if (enoughMates()) return;
-          // Cached handle didn't verify live — fall through to the probes.
+          // Cached handle didn't verify live — fall through to a fresh trace.
         }
 
-        // FAST PATH 2: quick real-name guess-and-verify on Chess.com — lands
-        // simple handles in a few profile GETs instead of a tournament trace.
-        const fast = await fastNameProbe(mate.name, mateState, signal);
-        if (fast) {
-          if (resolved.some((x) => x.platform === fast.platform && lc(x.username) === lc(fast.profile.username))) return;
-          if (enoughMates()) return;
-          resolved.push({
-            name: mate.name,
-            platform: fast.platform,
-            username: fast.profile.username,
-            profile: fast.profile,
-            uscfId: found.uscfId,
-            confidence: fast.confidence,
-          });
-          cacheIdentity(found.uscfId, { platform: fast.platform, username: fast.profile.username, confidence: fast.confidence });
-          log(
-            `School resolver: fast path resolved ${mate.name} to @${fast.profile.username} ` +
-              `(real profile name matches, ${Math.round(fast.confidence * 100)}%) — no tournament trace needed.`
-          );
-          return;
-        }
-        if (phaseHalted()) return;
+        if (halted()) return;
         log(
           `School resolver: resolveUscfIdentity(uscfId=${found.uscfId}, name="${mate.name}", ` +
-            `rating=${found.rating ?? mate.rating ?? "?"}) — no time budget, tracing until exhausted…`
+            `rating=${found.rating ?? mate.rating ?? "?"}) — full engine, no time budget, tracing until the graph is exhausted…`
         );
-        const t0 = Date.now();
+        const traceStart = Date.now();
         const hit = await hooks
-          .resolveUscfIdentity!({ uscfId: found.uscfId, name: mate.name, rating: found.rating ?? mate.rating, stopWhen: phaseHalted })
+          .resolveUscfIdentity!({ uscfId: found.uscfId, name: mate.name, rating: found.rating ?? mate.rating, stopWhen: halted })
           .catch(() => null);
-        const secs = Math.round((Date.now() - t0) / 1000);
+        const secs = Math.round((Date.now() - traceStart) / 1000);
         if (!hit) {
           log(`School resolver: couldn't trace USCF #${found.uscfId} (${mate.name}) to an online handle after ${secs}s — continuing.`);
           return;
@@ -884,7 +838,7 @@ export async function runSchoolResolution(
           log(`School resolver: @${hit.username} (${mate.name}) did not verify live — skipping.`);
           return;
         }
-        if (enoughMates()) return; // target filled while we verified
+        traced++;
         resolved.push({
           name: mate.name,
           platform: hit.platform,
@@ -896,7 +850,11 @@ export async function runSchoolResolution(
         cacheIdentity(found.uscfId, { platform: hit.platform, username: profile.username, confidence: hit.confidence });
         log(`School resolver: resolved ${mate.name} to @${profile.username} at ${Math.round(hit.confidence * 100)}% (USCF #${found.uscfId}).`);
       },
-      phaseHalted
+      halted
+    );
+    log(
+      `School resolver: USCF-anchored phase — attempted ${attempted}, no USCF record ${noUscf}, ` +
+        `${fromCache} from cache, ${traced} freshly traced.`
     );
     log(
       `School resolver: USCF-anchored phase finished in ${Math.round((Date.now() - phaseStart) / 1000)}s — ` +
@@ -943,6 +901,8 @@ export async function runSchoolResolution(
     if (!c) conns.set(h, (c = { weight: new Map(), friends: new Set(), sharedClubs: new Set(), clubs: new Map() }));
     return c;
   };
+  let totalFriends = 0; // friends fetched across the whole cohort (dedup counts per mate)
+  let matesWithFriends = 0; // schoolmates the friends hook returned a non-empty list for
 
   await pool(
     resolved,
@@ -961,6 +921,7 @@ export async function runSchoolResolution(
         // here, so fetching them would be wasted work).
         mate.platform === "chesscom" ? fetchClubs("chesscom", mate.username, signal) : Promise.resolve(new Map<string, number | undefined>()),
       ]);
+      const oppTied = [...opp.values()].filter((n) => n >= MIN_OPP_GAMES).length;
       for (const [h, n] of opp) {
         if (n < MIN_OPP_GAMES) continue;
         const c = get(h);
@@ -974,15 +935,32 @@ export async function runSchoolResolution(
         c.friends.add(mate.username);
         if (!c.weight.has(mate.username)) c.weight.set(mate.username, MIN_OPP_GAMES); // register the tie
       }
-      if (friends?.length) log(`School resolver: @${mate.username} has ${friends.length} chess.com friend(s).`);
+      const clubCount = [...clubs].filter(([, members]) => !(members && members > BIG_CLUB_MEMBERS)).length;
       // A mate's small clubs are noted; their members are folded in below.
       for (const [id, members] of clubs) {
         if (members && members > BIG_CLUB_MEMBERS) continue;
         get(`club:chesscom:${id}`).clubs.set(mate.username, members);
       }
+      if (friends?.length) {
+        totalFriends += friends.length;
+        matesWithFriends++;
+      }
+      // Per-mate signal summary — makes it clear, for each anchor, how much of
+      // each signal fed the graph (and whether the friends list came back full).
+      log(
+        `School resolver: crawled @${mate.username} (${mate.name}) — ` +
+          `${friends ? `${friends.length} friend(s)` : "friends n/a"}, ` +
+          `${oppTied} frequent opponent(s) (≥${MIN_OPP_GAMES} games), ${clubCount} small club(s).`
+      );
     },
     halted
   );
+  if (hooks.fetchFriends) {
+    log(
+      `School resolver: chess.com friends signal — ${totalFriends} friend link(s) across ` +
+        `${matesWithFriends}/${resolved.length} schoolmate(s) (full lists, not just top-friends).`
+    );
+  }
 
   // Fold small-club co-membership into candidate connections: every member of a
   // schoolmate's small chess.com club becomes a candidate with a (weak) tie to
