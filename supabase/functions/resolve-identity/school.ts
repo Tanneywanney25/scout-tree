@@ -620,9 +620,22 @@ export async function findSchoolForPlayer(
 // With no cookie configured this returns [] and the crawler leans on the fully
 // public game-overlap signal instead. This is never CORS-accessible from the
 // browser, which is exactly why it lives behind the edge function.
+//
+// FULL LIST, not just the widget's default page. The endpoint's default page is
+// small (it powers the profile's top-friends widget — ~7 for a 28-friend
+// member, which is why the crawl was starved of second-connection evidence). It
+// accepts `page` and `per_page`, so we request a large page size and paginate
+// until the list is exhausted, deduping across pages. That turns the "7 of 28"
+// subset into every friend — the missing @Kai0627-style ties the social graph
+// needs to crown a target from a second independent connection.
 // ---------------------------------------------------------------------------
 
 const HANDLE_RE = /^[A-Za-z0-9_-]{2,30}$/;
+
+// Pagination bounds for the friends fetch. per_page is set high so a typical
+// member comes back in one request; the page loop covers members with hundreds.
+const FRIENDS_PER_PAGE = 100;
+const FRIENDS_MAX_PAGES = 25; // safety ceiling (≤ FRIENDS_PER_PAGE × this friends)
 
 /** Recursively pull friend usernames out of the callback response, whatever its
  *  shape. The exact JSON of /callback/friends/{u}/top-friends isn't documented
@@ -654,23 +667,42 @@ function collectUsernames(v: unknown, out: Set<string>, depth = 0, inArray = fal
   }
 }
 
-let friendsAuthMode: string | undefined; // last-logged cookie presence — announce the mode once, not per mate
-
-export async function fetchChesscomFriends(username: string, log: (m: string) => void = () => {}): Promise<string[]> {
-  const cookie = readEnv("CHESSCOM_COOKIE") || readEnv("CHESSCOM_SESSION");
-  const mode = cookie ? "cookie" : "none";
-  if (friendsAuthMode !== mode) {
-    friendsAuthMode = mode;
-    log(
-      cookie
-        ? "Chess.com friends: CHESSCOM_COOKIE is configured — using the authenticated top-friends endpoint."
-        : "Chess.com friends: no CHESSCOM_COOKIE in the environment — public game archives and clubs carry the crawl."
-    );
+/** Pull a "total friends" count out of the response's pagination metadata, if
+ *  it exposes one, for logging (how complete is the list we assembled?). The
+ *  JSON shape is undocumented, so this scans generously and is informational
+ *  only — the fetch loop stops on the first page that reveals no NEW friend,
+ *  never on this number. */
+function readTotalCount(v: unknown, depth = 0): number | undefined {
+  if (depth > 6 || v == null || typeof v !== "object") return undefined;
+  const o = v as Record<string, unknown>;
+  for (const [k, val] of Object.entries(o)) {
+    if (typeof val === "number" && Number.isFinite(val)) {
+      const key = k.toLowerCase();
+      if (/(total.?count|total.?friends|friend.?count|total.?results|^total$|^count$)/.test(key)) return val;
+    }
   }
-  if (!cookie) return []; // no session configured — game-overlap carries the crawl
-  const clean = username.trim().replace(/^@/, "");
-  if (!clean) return [];
-  const url = `https://www.chess.com/callback/friends/${encodeURIComponent(clean)}/top-friends`;
+  for (const val of Object.values(o)) {
+    if (val && typeof val === "object") {
+      const n = readTotalCount(val, depth + 1);
+      if (n !== undefined) return n;
+    }
+  }
+  return undefined;
+}
+
+type FriendsPage =
+  | { status: "ok"; handles: string[]; total?: number }
+  | { status: "auth" }
+  | { status: "error" };
+
+/** Fetch ONE page of a member's friends from the authenticated callback. The
+ *  endpoint powers the profile top-friends widget but accepts `page`/`per_page`
+ *  and returns the member's friends a page at a time; we request a large page
+ *  and let the caller paginate. */
+async function fetchFriendsPage(clean: string, cookie: string, page: number): Promise<FriendsPage> {
+  const url =
+    `https://www.chess.com/callback/friends/${encodeURIComponent(clean)}/top-friends` +
+    `?page=${page}&per_page=${FRIENDS_PER_PAGE}`;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 12000);
   try {
@@ -679,25 +711,74 @@ export async function fetchChesscomFriends(username: string, log: (m: string) =>
         "User-Agent": UA,
         Accept: "application/json",
         Cookie: cookie,
-        Referer: `https://www.chess.com/member/${clean}`,
+        Referer: `https://www.chess.com/member/${clean}/friends`,
       },
       signal: ctrl.signal,
     });
     clearTimeout(t);
-    if (res.status === 401 || res.status === 403) {
-      log("Chess.com friends: session cookie rejected (expired?) — falling back to game overlap.");
-      return [];
-    }
-    if (!res.ok) return [];
+    if (res.status === 401 || res.status === 403) return { status: "auth" };
+    if (!res.ok) return { status: "error" };
     const data = await res.json();
     const set = new Set<string>();
     collectUsernames(data, set);
     set.delete(clean); // the owner isn't their own friend
-    return [...set];
+    return { status: "ok", handles: [...set], total: readTotalCount(data) };
   } catch {
     clearTimeout(t);
-    return [];
+    return { status: "error" };
   }
+}
+
+let friendsAuthMode: string | undefined; // last-logged cookie presence — announce the mode once, not per mate
+
+/** A member's FULL chess.com friends list (all pages), deduped. Paginates the
+ *  authenticated callback until a page reveals no new friend — so a 28-friend
+ *  member returns all 28, not the top-friends widget's default handful. Returns
+ *  [] when no session cookie is configured or the cookie is rejected. */
+export async function fetchChesscomFriends(username: string, log: (m: string) => void = () => {}): Promise<string[]> {
+  const cookie = readEnv("CHESSCOM_COOKIE") || readEnv("CHESSCOM_SESSION");
+  const mode = cookie ? "cookie" : "none";
+  if (friendsAuthMode !== mode) {
+    friendsAuthMode = mode;
+    log(
+      cookie
+        ? "Chess.com friends: CHESSCOM_COOKIE is configured — paginating the authenticated friends endpoint for the FULL list."
+        : "Chess.com friends: no CHESSCOM_COOKIE in the environment — public game archives and clubs carry the crawl."
+    );
+  }
+  if (!cookie) return []; // no session configured — game-overlap carries the crawl
+  const clean = username.trim().replace(/^@/, "");
+  if (!clean) return [];
+
+  const all = new Set<string>();
+  let reportedTotal: number | undefined;
+  let pagesWithFriends = 0;
+  for (let page = 1; page <= FRIENDS_MAX_PAGES; page++) {
+    const res = await fetchFriendsPage(clean, cookie, page);
+    if (res.status === "auth") {
+      log("Chess.com friends: session cookie rejected (expired?) — falling back to game overlap.");
+      return [...all]; // empty on page 1; whatever we gathered otherwise
+    }
+    if (res.status === "error") break; // transient page error — keep what we have
+    if (res.total !== undefined) reportedTotal = res.total;
+    if (!res.handles.length) break; // past the last page — no more friends to gather
+    const before = all.size;
+    for (const h of res.handles) all.add(h);
+    pagesWithFriends++;
+    // End of the list: a page that reveals no NEW friend. Covers a curated
+    // endpoint that ignores `page` (the second identical page adds nothing) and
+    // an exact-multiple-of-per_page list (the next page comes back empty above).
+    if (all.size === before) break;
+  }
+  const total = all.size;
+  if (total) {
+    log(
+      `Chess.com friends: @${clean} → ${total} friend(s) across ${pagesWithFriends} page(s)` +
+        (reportedTotal !== undefined && reportedTotal !== total ? ` (endpoint reports ${reportedTotal} total)` : "") +
+        "."
+    );
+  }
+  return [...all];
 }
 
 export async function fetchSchoolRoster(

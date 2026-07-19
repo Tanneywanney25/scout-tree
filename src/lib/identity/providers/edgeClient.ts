@@ -382,7 +382,9 @@ export function fetchFriends(platform: OnlinePlatform, username: string, signal?
   if (existing) return existing;
   const promise = (async (): Promise<string[]> => {
     if (signal?.aborted) return [];
-    const data = await invokeEdge({ chesscomFriends: username }, 20_000);
+    // The server now paginates the full friends list (was a single top-friends
+    // page), so allow for a few sequential page fetches instead of one.
+    const data = await invokeEdge({ chesscomFriends: username }, 60_000);
     if (!data || !Array.isArray(data.friends)) return [];
     return data.friends as string[];
   })();
