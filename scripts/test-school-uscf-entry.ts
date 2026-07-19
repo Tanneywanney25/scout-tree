@@ -135,24 +135,34 @@ const ccMonths: Record<string, { games: unknown[] }> = {
   },
 };
 
-// Authenticated top-friends fixtures (only served when the request carries the
+// Authenticated friends fixtures (only served when the request carries the
 // session cookie — mirroring the real endpoint's 401 for anonymous callers).
+// Each list is longer than the fake server's page size below, so the resolver
+// MUST paginate to retrieve them all — the "7 of 28" bug this fixes in miniature.
 const ccFriends: Record<string, string[]> = {
-  tanneywanney25: ["Kai0627", "randomguy"],
-  ninarao15: ["Kai0627"],
+  tanneywanney25: ["Kai0627", "randomguy", "alice_wa", "bob_wa", "carol_wa"],
+  ninarao15: ["Kai0627", "dave_wa"],
 };
+// The fake endpoint serves this many friends per page regardless of per_page —
+// smaller than the lists, so a single un-paginated fetch (the old behaviour)
+// would return only the first FAKE_FRIENDS_PAGE and miss the rest.
+const FAKE_FRIENDS_PAGE = 2;
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   const url = String(typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url);
 
-  // --- chess.com authenticated friends callback -------------------------------
-  const fr = /www\.chess\.com\/callback\/friends\/([^/]+)\/top-friends$/i.exec(url);
+  // --- chess.com authenticated friends callback (paginated) -------------------
+  const fr = /www\.chess\.com\/callback\/friends\/([^/]+)\/top-friends(?:\?(.*))?$/i.exec(url);
   if (fr) {
     const cookie = String((init?.headers as Record<string, string> | undefined)?.["Cookie"] || "");
     if (!cookie) return new Response("Unauthorized", { status: 401 });
     const u = decodeURIComponent(fr[1]).toLowerCase();
-    return J({ friends: (ccFriends[u] || []).map((username) => ({ username })) });
+    const params = new URLSearchParams(fr[2] || "");
+    const page = Math.max(1, parseInt(params.get("page") || "1", 10));
+    const list = ccFriends[u] || [];
+    const slice = list.slice((page - 1) * FAKE_FRIENDS_PAGE, page * FAKE_FRIENDS_PAGE);
+    return J({ friends: slice.map((username) => ({ username })), totalCount: list.length });
   }
 
   // --- MUIR ratings API -----------------------------------------------------
@@ -339,14 +349,17 @@ async function scenarioD() {
   const none = await fetchChesscomFriends("tanneywanney25", log);
   check("D1 no cookie → no friends, mode logged", none.length === 0 && has("no CHESSCOM_COOKIE"));
 
-  // With the cookie, the same call serves the authenticated top-friends list.
+  // With the cookie, the call paginates the authenticated endpoint and returns
+  // the FULL friends list (all 5 here, spread across 3 fake pages) — not just
+  // the first page the old single-fetch top-friends call returned.
   process.env.CHESSCOM_COOKIE = "PHPSESSID=fixture-session";
   const friends = await fetchChesscomFriends("tanneywanney25", log);
   check(
-    "D2 cookie → authenticated friends fetched",
-    friends.map((f) => f.toLowerCase()).sort().join(",") === "kai0627,randomguy" && has("CHESSCOM_COOKIE is configured"),
+    "D2 cookie → FULL friends list paginated (all 5, not just page 1)",
+    friends.map((f) => f.toLowerCase()).sort().join(",") === "alice_wa,bob_wa,carol_wa,kai0627,randomguy" && has("CHESSCOM_COOKIE is configured"),
     `got [${friends.join(", ")}]`
   );
+  check("D2b logged the full count + page span", has("@tanneywanney25 → 5 friend(s) across 3 page(s)"));
 
   // Full run with the friends hook wired to the real server helper: the crawl
   // corroborates @Kai0627 through BOTH archives and two friends lists.
@@ -370,7 +383,8 @@ async function scenarioD() {
     !!top?.evidence.some((e) => e.label.includes("on 2 of their friends lists")),
     top?.evidence.map((e) => e.label).join(" | ")
   );
-  check("D6 crawl logged the friends counts", has("has 2 chess.com friend(s)"));
+  check("D6 crawl logged the full per-mate friend count", has("crawled @tanneywanney25 (Tanush Bhatia) — 5 friend(s)"));
+  check("D7 crawl logged the aggregate friends signal", has("chess.com friends signal — 7 friend link(s) across 2/2 schoolmate(s)"));
   delete process.env.CHESSCOM_COOKIE;
 }
 
