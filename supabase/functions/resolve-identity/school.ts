@@ -25,7 +25,8 @@
 // Node CLI), same as googleSearch.ts / uscf.ts.
 // ============================================================================
 
-import { callAIWithSearch, geminiQuotaCoolingDown, readEnv } from "../_shared/ai.ts";
+import { callAIWithSearch, geminiQuotaCoolingDown } from "../_shared/ai.ts";
+import { readChesscomSessionCookie } from "../_shared/chessCookie.ts";
 import {
   EXTERNAL_ADAPTERS,
   adaptersForState,
@@ -729,24 +730,32 @@ async function fetchFriendsPage(clean: string, cookie: string, page: number): Pr
   }
 }
 
-let friendsAuthMode: string | undefined; // last-logged cookie presence — announce the mode once, not per mate
+let friendsAuthMode: string | undefined; // last-logged cookie source — announce the mode once, not per mate
 
 /** A member's FULL chess.com friends list (all pages), deduped. Paginates the
  *  authenticated callback until a page reveals no new friend — so a 28-friend
  *  member returns all 28, not the top-friends widget's default handful. Returns
- *  [] when no session cookie is configured or the cookie is rejected. */
+ *  [] when no session cookie is available or the cookie is rejected.
+ *
+ *  The cookie comes from the self-healing store: the scheduled refresher
+ *  (api/refresh-chess-cookie) keeps a live session in the `chess_cookies` table,
+ *  which readChesscomSessionCookie() reads, falling back to the CHESSCOM_COOKIE
+ *  env var for local dev / before the first refresh. */
 export async function fetchChesscomFriends(username: string, log: (m: string) => void = () => {}): Promise<string[]> {
-  const cookie = readEnv("CHESSCOM_COOKIE") || readEnv("CHESSCOM_SESSION");
-  const mode = cookie ? "cookie" : "none";
-  if (friendsAuthMode !== mode) {
-    friendsAuthMode = mode;
-    log(
-      cookie
-        ? "Chess.com friends: CHESSCOM_COOKIE is configured — paginating the authenticated friends endpoint for the FULL list."
-        : "Chess.com friends: no CHESSCOM_COOKIE in the environment — public game archives and clubs carry the crawl."
-    );
+  const resolved = await readChesscomSessionCookie();
+  const cookie = resolved.cookie;
+  if (friendsAuthMode !== resolved.source) {
+    friendsAuthMode = resolved.source;
+    if (resolved.source === "cache") {
+      const age = resolved.ageMs !== undefined ? ` (refreshed ${Math.round(resolved.ageMs / 60_000)} min ago)` : "";
+      log(`Chess.com friends: using the refreshed session cookie from the chess_cookies cache${age} — paginating for the FULL list.`);
+    } else if (resolved.source === "env") {
+      log("Chess.com friends: using the CHESSCOM_COOKIE env var (no cached refresh yet) — paginating for the FULL list.");
+    } else {
+      log("Chess.com friends: no session cookie available (cache empty, no CHESSCOM_COOKIE) — public game archives and clubs carry the crawl.");
+    }
   }
-  if (!cookie) return []; // no session configured — game-overlap carries the crawl
+  if (!cookie) return []; // no session available — game-overlap carries the crawl
   const clean = username.trim().replace(/^@/, "");
   if (!clean) return [];
 
