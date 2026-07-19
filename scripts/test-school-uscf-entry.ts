@@ -23,6 +23,7 @@
 
 import { findMemberId } from "../supabase/functions/resolve-identity/uscf";
 import { fetchChesscomFriends } from "../supabase/functions/resolve-identity/school";
+import { resetCookieMemo } from "../supabase/functions/_shared/chessCookie";
 import { runSchoolResolution, type SchoolResolverHooks } from "../src/lib/identity/schoolResolver";
 import type { Schoolmate } from "../src/lib/identity/schoolTypes";
 
@@ -342,6 +343,11 @@ async function scenarioD() {
   };
   const has = (s: string) => logs.some((l) => l.includes(s));
 
+  // No cache configured in the harness, so the resolver's cookie source is the
+  // env var (via readChesscomSessionCookie). Reset the DB-lookup memo so this
+  // scenario starts clean regardless of ambient state.
+  resetCookieMemo();
+
   // Without the cookie, the REAL fetchChesscomFriends must degrade to [] and
   // say so (public archives/clubs carry the crawl).
   delete process.env.CHESSCOM_COOKIE;
@@ -356,7 +362,7 @@ async function scenarioD() {
   const friends = await fetchChesscomFriends("tanneywanney25", log);
   check(
     "D2 cookie → FULL friends list paginated (all 5, not just page 1)",
-    friends.map((f) => f.toLowerCase()).sort().join(",") === "alice_wa,bob_wa,carol_wa,kai0627,randomguy" && has("CHESSCOM_COOKIE is configured"),
+    friends.map((f) => f.toLowerCase()).sort().join(",") === "alice_wa,bob_wa,carol_wa,kai0627,randomguy" && has("using the CHESSCOM_COOKIE env var"),
     `got [${friends.join(", ")}]`
   );
   check("D2b logged the full count + page span", has("@tanneywanney25 → 5 friend(s) across 3 page(s)"));
