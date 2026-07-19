@@ -28,6 +28,7 @@ import {
   expandMemberGraph,
 } from "./edgeClient";
 import { runGraphTraversal } from "./uscfGraph";
+import { getCachedIdentity } from "../cache";
 import type { OnlinePlatform } from "../schoolTypes";
 import {
   runSchoolResolution,
@@ -52,6 +53,11 @@ async function resolveUscfIdentity(
   req: { uscfId: string; name: string; rating?: number; stopWhen?: () => boolean },
   signal?: AbortSignal
 ): Promise<{ platform: OnlinePlatform; username: string; confidence: number } | null> {
+  // Search-wide fast path: a member the engine already resolved (this search,
+  // a sibling schoolmate trace, or an earlier search this session) costs
+  // nothing — runGraphTraversal records every confirmed root handle.
+  const cached = getCachedIdentity(req.uscfId);
+  if (cached) return cached;
   const graph = await expandMemberGraph(req.uscfId, signal);
   if (!graph?.graphTraversalReady || !graph.onlineEvents.length) return null;
   const traversal = await runGraphTraversal(graph, {

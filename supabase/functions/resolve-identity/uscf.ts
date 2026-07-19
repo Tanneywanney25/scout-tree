@@ -522,9 +522,11 @@ export async function buildOnlineGraphForMember(
   const rest = era.filter((e) => !named.has(e) && !pandemicEra.has(e));
   const candidates = [...named, ...pandemicEra, ...rest].slice(0, maxEvents);
 
-  // Phase 1: find which sections are actually online. Modest concurrency plus
-  // early stopping — named events are near-certain hits, and once the unnamed
-  // scan keeps missing there is no point burning MUIR's rate limit further.
+  // Phase 1: find which sections are actually online. Concurrency 4 hides
+  // MUIR's per-request latency without raising the request RATE — every call
+  // still queues behind muirThrottle's global spacing — plus early stopping:
+  // named events are near-certain hits, and once the unnamed scan keeps
+  // missing there is no point burning MUIR's rate limit further.
   interface Found {
     ev: UscfEventRef;
     section: SectionRef;
@@ -550,7 +552,8 @@ export async function buildOnlineGraphForMember(
   });
   const foundSections = perEvent.flat().slice(0, maxSections);
 
-  // Phase 2: pull the crosstable for each online section.
+  // Phase 2: pull the crosstables IN PARALLEL — independent GETs, and the
+  // adaptive muirThrottle keeps the actual request rate under MUIR's limit.
   const online = await mapLimit(foundSections, 5, async ({ ev, section, meta }): Promise<OnlineSection | null> => {
     const players = await fetchSectionPlayers(ev.eventId, section.number, member.id);
     if (!players.some((p) => p.isTarget)) return null; // target not actually here

@@ -378,6 +378,35 @@ function json(payload: unknown): Response {
   });
 }
 
+/** Big payloads (a tournament graph is easily several hundred KB of JSON) are
+ *  gzipped when the caller accepts it — less bandwidth, faster client parse
+ *  start. Small payloads skip the compression overhead. Content-Encoding is
+ *  set explicitly, so fetch() on every client decompresses transparently. */
+const GZIP_MIN_BYTES = 4096;
+
+async function jsonMaybeGzip(payload: unknown, acceptEncoding: string | null): Promise<Response> {
+  const body = JSON.stringify(payload);
+  const gzipOk = /\bgzip\b/i.test(acceptEncoding || "");
+  if (!gzipOk || body.length < GZIP_MIN_BYTES || typeof CompressionStream === "undefined") {
+    return new Response(body, { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  }
+  try {
+    const stream = new Blob([body]).stream().pipeThrough(new CompressionStream("gzip"));
+    const compressed = await new Response(stream).arrayBuffer();
+    return new Response(compressed, {
+      status: 200,
+      headers: {
+        ...corsHeaders,
+        "Content-Type": "application/json",
+        "Content-Encoding": "gzip",
+        Vary: "Accept-Encoding",
+      },
+    });
+  } catch {
+    return new Response(body, { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  }
+}
+
 /** Expand: build just the tournament graph for a specific USCF member ID.
  *  Memoized per member for the life of the (warm) instance: the pivot stage
  *  expands dozens of opponents and several browser clients can ask about the
@@ -387,10 +416,11 @@ function json(payload: unknown): Response {
 const expandMemo = new Map<string, { at: number; payload: { available: boolean; tournamentGraph: unknown; graphTraversalReady: boolean } }>();
 const EXPAND_MEMO_TTL_MS = 15 * 60_000;
 
-async function handleExpand(memberId: string): Promise<Response> {
+async function handleExpand(memberId: string, acceptEncoding: string | null): Promise<Response> {
+  const t0 = Date.now();
   const clean = memberId.replace(/\D/g, "");
   const hit = clean ? expandMemo.get(clean) : undefined;
-  if (hit && Date.now() - hit.at < EXPAND_MEMO_TTL_MS) return json(hit.payload);
+  if (hit && Date.now() - hit.at < EXPAND_MEMO_TTL_MS) return jsonMaybeGzip(hit.payload, acceptEncoding);
   const member = clean ? await fetchUscfMember(clean) : null;
   if (!member) return json({ available: false, tournamentGraph: null, graphTraversalReady: false });
   const sections = await buildOnlineGraphForMember(member);
@@ -402,7 +432,11 @@ async function handleExpand(memberId: string): Promise<Response> {
     const entries = [...expandMemo.entries()].sort((a, b) => a[1].at - b[1].at);
     for (const [k] of entries.slice(0, 100)) expandMemo.delete(k);
   }
-  return json(payload);
+  console.log(
+    "[resolve-identity] expand:",
+    JSON.stringify({ memberId: clean, sections: sections.length, ms: Date.now() - t0 })
+  );
+  return jsonMaybeGzip(payload, acceptEncoding);
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +516,7 @@ serve(async (req) => {
 
     // --- Expand mode (client recursion into an opponent's online history) ----
     if (typeof body?.expandMemberId === "string" && body.expandMemberId.trim()) {
-      return await handleExpand(body.expandMemberId);
+      return await handleExpand(body.expandMemberId, req.headers.get("accept-encoding"));
     }
 
     // --- Discover mode (web/flyer search: which platform hosted this event) --
@@ -549,47 +583,63 @@ serve(async (req) => {
 
     const sources: string[] = [];
     const notes: string[] = [];
+    const timings: Record<string, number> = {};
+    const t0 = Date.now();
 
     // 1. Resolve US Chess member(s) + build the tournament graph for the best
     //    online-capable candidate. Never fatal.
     const { members, debug } = await resolveMembers(query);
+    timings.uscfResolve = Date.now() - t0;
     const uscfCandidates = members.map((m) => memberToCandidate(m, query));
     if (uscfCandidates.length) {
       sources.push("uscf");
       notes.push(`US Chess: ${uscfCandidates.length} member match(es).`);
     }
 
-    let graph: TournamentGraph | null = null;
-    if (wantGraph && members.length) {
+    // 2. The tournament-graph build (dozens of throttled MUIR calls) and the
+    //    AI reasoning pass (5-10s of model latency) are independent — run them
+    //    CONCURRENTLY. Sequential ordering here used to delay the client's
+    //    traversal start by the AI pass's full latency on every search.
+    const tGraph = Date.now();
+    const graphPromise: Promise<TournamentGraph | null> = (async () => {
+      if (!wantGraph || !members.length) return null;
       // Prefer the highest-ranked member that actually has online ratings.
       const target = members.find((m) => m.hasOnline) || members[0];
       try {
         const sections = await buildOnlineGraphForMember(target);
-        graph = sectionsToGraph(target, sections);
+        const g = sectionsToGraph(target, sections);
         debug.onlineSectionCount = sections.length;
-        debug.graphOpponents = graph.onlineEvents.reduce((n, e) => n + e.players.length, 0);
-        if (graph.onlineEvents.length) {
-          const games = graph.onlineEvents.reduce(
+        debug.graphOpponents = g.onlineEvents.reduce((n, e) => n + e.players.length, 0);
+        if (g.onlineEvents.length) {
+          const games = g.onlineEvents.reduce(
             (n, e) => n + (e.players.find((p) => p.isTarget)?.games.length || 0),
             0
           );
           notes.push(
-            `Tournament graph: ${graph.onlineEvents.length} online section(s), ${games} of the player's online games to trace.`
+            `Tournament graph: ${g.onlineEvents.length} online section(s), ${games} of the player's online games to trace.`
           );
         }
+        return g;
       } catch (e) {
         debug.graphError = String(e);
+        return null;
       }
-    }
-    const graphTraversalReady = !!graph?.graphTraversalReady;
+    })();
 
-    // 2. AI reasoning pass — refines USCF hits and proposes usernames (fallback).
-    const ai = await callAI(
+    const tAi = Date.now();
+    const aiPromise = callAI(
       "You are an expert chess identity-resolution analyst. You convert sparse clues about a tournament opponent into structured, well-calibrated candidate identities and the online usernames most worth verifying. You never invent federation IDs you are not confident about. You output only strict JSON.",
       buildAiPrompt(query, uscfCandidates),
       2048
-    );
+    ).then((r) => {
+      timings.ai = Date.now() - tAi;
+      return r;
+    });
+    const graph = await graphPromise;
+    timings.graphBuild = Date.now() - tGraph;
+    const graphTraversalReady = !!graph?.graphTraversalReady;
 
+    const ai = await aiPromise;
     let aiCandidates: EdgeIdentityCandidate[] = [];
     if (ai.ok) {
       aiCandidates = extractJsonArray(ai.text);
@@ -621,6 +671,8 @@ serve(async (req) => {
     }
 
     const available = candidates.length > 0;
+    timings.total = Date.now() - t0;
+    console.log("[resolve-identity] timings:", JSON.stringify({ name: query.name, ...timings }));
     const payload: Record<string, unknown> = {
       available,
       sources,
@@ -628,9 +680,10 @@ serve(async (req) => {
       notes,
       tournamentGraph: graph,
       graphTraversalReady,
+      timings,
     };
     if (debugMode) payload.debug = debug;
-    return json(payload);
+    return jsonMaybeGzip(payload, req.headers.get("accept-encoding"));
   } catch (error) {
     console.error("[resolve-identity] Error:", error);
     return json({ available: false, candidates: [], sources: [], notes: ["Server error."], graphTraversalReady: false });
