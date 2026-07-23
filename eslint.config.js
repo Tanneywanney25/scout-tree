@@ -5,7 +5,10 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist"] },
+  // `archive/` holds the intentionally-inactive redesign architecture
+  // (see archive/identity-redesign/MANIFEST.md). It is preserved for reference
+  // only — never linted, compiled, or bundled.
+  { ignores: ["dist", "archive"] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ["**/*.{ts,tsx}"],

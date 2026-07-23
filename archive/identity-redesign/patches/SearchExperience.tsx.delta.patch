@@ -1,0 +1,22 @@
+diff --git a/src/components/findplayer/SearchExperience.tsx b/src/components/findplayer/SearchExperience.tsx
+index e9cbf36..23175d9 100644
+--- a/src/components/findplayer/SearchExperience.tsx
++++ b/src/components/findplayer/SearchExperience.tsx
+@@ -1,6 +1,7 @@
+ import { useEffect, useMemo, useRef, useState } from "react";
+ import { Crown, Check, Loader2, ScrollText, Search } from "lucide-react";
+ import { cn } from "@/lib/utils";
++import SearchPhaseStrip from "./SearchPhaseStrip";
+ import type { PlayerQuery, SearchEvent } from "@/lib/identity";
+ 
+ interface SearchExperienceProps {
+@@ -202,6 +203,9 @@ export function SearchExperience({ query, events, providerStatus: providerStatus
+           />
+         </div>
+ 
++        {/* --- Phase map: where we are in the ladder, what's left --- */}
++        {providerStatusProp && <SearchPhaseStrip providerStatus={providerStatusProp} />}
++
+         {/* --- Live reasoning feed --- */}
+         <div
+           ref={feedRef}

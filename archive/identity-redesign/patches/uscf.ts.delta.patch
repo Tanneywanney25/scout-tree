@@ -1,0 +1,128 @@
+diff --git a/supabase/functions/resolve-identity/uscf.ts b/supabase/functions/resolve-identity/uscf.ts
+index 1308d6f..e7c9784 100644
+--- a/supabase/functions/resolve-identity/uscf.ts
++++ b/supabase/functions/resolve-identity/uscf.ts
+@@ -244,7 +244,7 @@ function memberFrom(raw: any): UscfMember | null {
+   };
+ }
+ 
+-function bestRating(r: UscfRatings): number | undefined {
++export function bestRating(r: UscfRatings): number | undefined {
+   return r.regular ?? r.onlineRegular ?? r.quick ?? r.blitz ?? r.onlineBlitz;
+ }
+ 
+@@ -350,6 +350,114 @@ export async function findMemberId(
+   return { uscfId: best.id, rating: best.rating };
+ }
+ 
++// ---------------------------------------------------------------------------
++// Directory search — Phase A of the discovery UX. These let the USER pick the
++// person (or the tournament they met them at) before the expensive engine
++// runs, instead of the server heuristically guessing among homonyms. All ride
++// the same throttled, retrying fetchJson as the rest of this module.
++// ---------------------------------------------------------------------------
++
++export interface DirectorySearchOptions {
++  /** Full or partial name — MUIR's Fuzzy matches "Bhati" → "Bhatia". */
++  name?: string;
++  /** 2-letter state; with no name this becomes a state browse (rating-sorted). */
++  state?: string;
++  size?: number;
++}
++
++/** Search or browse the member directory. Requires a name and/or a state. */
++export async function directoryMemberSearch(opts: DirectorySearchOptions): Promise<UscfSearchRow[]> {
++  const size = Math.min(Math.max(opts.size ?? 25, 1), 50);
++  const params = new URLSearchParams({ Size: String(size) });
++  const name = (opts.name || "").replace(/\s+/g, " ").trim();
++  if (name) params.set("Fuzzy", name);
++  if (opts.state && /^[A-Za-z]{2}$/.test(opts.state.trim())) {
++    params.set("StateRep", opts.state.trim().toUpperCase());
++  }
++  if (!params.has("Fuzzy") && !params.has("StateRep")) return [];
++  const data = await fetchJson(`/members?${params.toString()}`);
++  const items: any[] = Array.isArray(data?.items) ? data.items : [];
++  const rows: UscfSearchRow[] = [];
++  for (const it of items) {
++    const m = memberFrom(it);
++    if (m) rows.push({ ...m, rating: bestRating(m.ratings) });
++  }
++  return rows;
++}
++
++export interface DirectoryEvent {
++  eventId: string;
++  name: string;
++  startDate?: string;
++  endDate?: string;
++  sectionCount?: number;
++  playerCount?: number;
++  state?: string;
++  city?: string;
++}
++
++/** Search rated events by name and/or state (newest first from MUIR). */
++export async function searchRatedEvents(opts: { name?: string; state?: string; size?: number }): Promise<DirectoryEvent[]> {
++  const size = Math.min(Math.max(opts.size ?? 20, 1), 50);
++  const params = new URLSearchParams({ Size: String(size) });
++  const name = (opts.name || "").replace(/\s+/g, " ").trim();
++  if (name) params.set("Name", name);
++  if (opts.state && /^[A-Za-z]{2}$/.test(opts.state.trim())) {
++    params.set("StateCode", opts.state.trim().toUpperCase());
++  }
++  if (!params.has("Name") && !params.has("StateCode")) return [];
++  const data = await fetchJson(`/rated-events?${params.toString()}`);
++  const items: any[] = Array.isArray(data?.items) ? data.items : [];
++  return items
++    .filter((e) => e && e.id)
++    .map((e) => ({
++      eventId: String(e.id),
++      name: e.name || "",
++      startDate: e.startDate,
++      endDate: e.endDate,
++      sectionCount: e.sectionCount,
++      playerCount: e.playerCount,
++      state: e.stateCode,
++      city: typeof e.city === "string" && e.city.trim() ? titleCase(e.city) : undefined,
++    }));
++}
++
++export interface EventRosterSection {
++  number: number;
++  name?: string;
++  players: { uscfId: string; name: string; rating?: number; state?: string }[];
++}
++
++export interface EventRoster {
++  eventId: string;
++  name?: string;
++  startDate?: string;
++  endDate?: string;
++  sections: EventRosterSection[];
++}
++
++/**
++ * The pick-your-opponent view of an event: every section with its standings
++ * roster (names, pre-event ratings, states — no games; the picker doesn't
++ * need them and the payload stays small).
++ */
++export async function fetchEventRoster(eventId: string, maxSections = 12): Promise<EventRoster | null> {
++  const clean = String(eventId).trim();
++  if (!clean) return null;
++  const { sections, startDate, endDate, name } = await fetchEventSections(clean);
++  if (!sections.length) return null;
++  const capped = sections.slice(0, maxSections);
++  const filled = await mapLimit(capped, 3, async (sec): Promise<EventRosterSection> => {
++    const players = await fetchSectionPlayers(clean, sec.number, "");
++    return {
++      number: sec.number,
++      name: sec.name,
++      players: players.map((p) => ({ uscfId: p.uscfId, name: p.name, rating: p.rating, state: p.state })),
++    };
++  });
++  return { eventId: clean, name, startDate, endDate, sections: filled };
++}
++
+ function eventRefFrom(e: any): UscfEventRef {
+   return {
+     eventId: String(e.id),

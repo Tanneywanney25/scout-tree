@@ -54,7 +54,8 @@ import {
   normalizeName,
 } from "./confidence";
 import { verifyAccount } from "./verify";
-import { pool as runPool } from "./net";
+import { pool as runPool, chesscomGate, setNetObserver } from "./net";
+import { createConductor, type Conductor } from "./conductor";
 
 export interface ResolveOptions {
   signal?: AbortSignal;
@@ -168,6 +169,34 @@ export async function resolveIdentity(
   query: PlayerQuery,
   options: ResolveOptions = {}
 ): Promise<ResolutionResult> {
+  // The CONDUCTOR (conductor.ts) is the search's proactive-intelligence layer:
+  // it watches the live signals the engines already emit (429s and gate
+  // occupancy from net.ts, fleet queue depths, per-trace activity, mid-phase
+  // candidates) and autonomously adjusts strategy — throttling concurrency
+  // under rate pressure, spawning more agents when the gates are underused,
+  // standing down stalled traces, and early-exiting the school phase on a
+  // decisive candidate. It narrates every decision into the detective UI.
+  // Scoped strictly to this search: the finally below detaches the net
+  // observer and restores the Chess.com gate even on abort or error.
+  const conductor = createConductor({
+    log: (message) =>
+      options.onEvent?.({ id: ++eventCounter, message, status: "info", provider: "conductor", timestamp: Date.now() }),
+    gate: chesscomGate,
+  });
+  setNetObserver((platform, kind) => conductor.netEvent(platform, kind));
+  try {
+    return await resolveIdentityCore(query, options, conductor);
+  } finally {
+    setNetObserver(null);
+    conductor.dispose();
+  }
+}
+
+async function resolveIdentityCore(
+  query: PlayerQuery,
+  options: ResolveOptions,
+  conductor: Conductor
+): Promise<ResolutionResult> {
   const { signal, onEvent } = options;
   const start = performance.now();
 
@@ -224,6 +253,23 @@ export async function resolveIdentity(
     return batch;
   };
 
+  // A user-supplied username hint needs NOTHING from the anchor phase to be
+  // FETCHED — only to be SCORED (against the anchor-derived FIDE id / rating).
+  // So start its profile lookups now, concurrently with the (server-bound)
+  // anchor + graph edge call, instead of paying their latency serially after it.
+  // The edge function and Chess.com/Lichess are disjoint resources, so this is
+  // free overlap; the scoring in the hint probe below is byte-for-byte identical
+  // (same evidence, same thresholds) — only WHEN the fetch happens changes.
+  const hintHandles = extractHintHandles(query.usernameHint);
+  const hintCombos = hintHandles.flatMap((h) =>
+    (["chesscom", "lichess"] as Platform[]).map((platform) => ({ h, platform }))
+  );
+  const hintProfilePrefetch = new Map<string, ReturnType<typeof verifyAccount>>();
+  for (const { h, platform } of hintCombos) {
+    if (signal?.aborted) break;
+    hintProfilePrefetch.set(`${platform}:${h.toLowerCase()}`, verifyAccount(platform, h, signal).catch(() => null));
+  }
+
   // --- 1. ANCHOR PHASE: who is this person? ----------------------------------
   await timePhase("Anchor phase (USCF/FIDE/AI profile fetch)", () => runProviders(PROVIDERS));
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
@@ -248,9 +294,11 @@ export async function resolveIdentity(
   const verifyCandidate = async (
     platform: Platform,
     username: string,
-    opts: { attachName?: string; hinted?: boolean }
+    opts: { attachName?: string; hinted?: boolean; prefetch?: ReturnType<typeof verifyAccount> }
   ): Promise<DiscoveredAccount | null> => {
-    const profile = await verifyAccount(platform, username, signal);
+    // Reuse an already-in-flight profile fetch when the caller pre-warmed one
+    // (the hint probe overlaps these with the anchor phase); otherwise fetch now.
+    const profile = await (opts.prefetch ?? verifyAccount(platform, username, signal));
     if (!profile) return null;
     const evidence: Evidence[] = [];
     // Name evidence comes from the profile's REAL name only. A username that
@@ -342,14 +390,17 @@ export async function resolveIdentity(
   };
 
   // --- 1b. Hint probe: handles the USER explicitly gave us --------------------
-  const hintHandles = extractHintHandles(query.usernameHint);
   let hintStrong = false;
-  if (hintHandles.length && !signal?.aborted) {
+  if (hintCombos.length && !signal?.aborted) {
     emit(`Checking the username hint (${hintHandles.map((h) => `"${h}"`).join(", ")})…`, "running");
-    // Every handle × platform combination verified concurrently.
-    const combos = hintHandles.flatMap((h) => (["chesscom", "lichess"] as Platform[]).map((platform) => ({ h, platform })));
+    // The profiles were fetched concurrently with the anchor phase above — await
+    // those in-flight results and score them (identical evidence + thresholds).
     const verified = await Promise.all(
-      combos.map(({ h, platform }) => (signal?.aborted ? null : verifyCandidate(platform, h, { hinted: true })))
+      hintCombos.map(({ h, platform }) =>
+        signal?.aborted
+          ? null
+          : verifyCandidate(platform, h, { hinted: true, prefetch: hintProfilePrefetch.get(`${platform}:${h.toLowerCase()}`) })
+      )
     );
     for (const acc of verified) {
       if (!acc) continue;
@@ -417,6 +468,7 @@ export async function resolveIdentity(
             signal,
             budgetMs: TRAVERSAL_BUDGET_MS,
             stopWhen: stalledOrAbandoned,
+            conductor,
             log: (m) => {
               lastLogAt = Date.now();
               emit(m, "running", "uscf-graph");
@@ -575,7 +627,8 @@ export async function resolveIdentity(
           // for a zero-history player, and fixed budgets kept cutting mate
           // traces off seconds from an answer. The engine stops on its own
           // once enough anchors resolve; the abort signal is the user's stop.
-          { signal, log: (m) => emit(m, "running", "school-graph") }
+          // The conductor supplies the proactive early-exit / stall policies.
+          { signal, conductor, log: (m) => emit(m, "running", "school-graph") }
         ));
         for (const acc of school.accounts) {
           addToPool(acc, query.name);

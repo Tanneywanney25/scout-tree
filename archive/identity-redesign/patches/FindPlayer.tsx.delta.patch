@@ -1,0 +1,243 @@
+diff --git a/src/pages/FindPlayer.tsx b/src/pages/FindPlayer.tsx
+index 7f835ab..ac1aaeb 100644
+--- a/src/pages/FindPlayer.tsx
++++ b/src/pages/FindPlayer.tsx
+@@ -4,11 +4,14 @@ import Header from "@/components/Header";
+ import { Card, CardContent } from "@/components/ui/card";
+ import { Button } from "@/components/ui/button";
+ import { toast } from "sonner";
+-import { ScrollText, Search, Sparkles, Telescope } from "lucide-react";
++import { ArrowLeft, Compass, ScrollText, ShieldCheck, Telescope } from "lucide-react";
+ import PlayerSearchForm from "@/components/findplayer/PlayerSearchForm";
+ import SearchExperience from "@/components/findplayer/SearchExperience";
+ import IdentityResults from "@/components/findplayer/IdentityResults";
+ import SearchLogDialog from "@/components/findplayer/SearchLogDialog";
++import DiscoveryTabs, { type DiscoveryPick, type DiscoveryTab } from "@/components/findplayer/DiscoveryTabs";
++import ConfirmPanel from "@/components/findplayer/ConfirmPanel";
++import NoMatchDiagnosis from "@/components/findplayer/NoMatchDiagnosis";
+ import {
+   resolveIdentity,
+   buildHandoff,
+@@ -20,7 +23,13 @@ import {
+   type SearchEvent,
+ } from "@/lib/identity";
+ 
+-type Phase = "input" | "searching" | "results";
++// The page's stages:
++//   discover  — Phase A: search/browse the directory, pick the person
++//   confirm   — the picked candidate + expectations + optional clues
++//   deep      — the classic free-form detective form (fallback / FIDE-only)
++//   searching — Phase B: the engine runs on a (usually) confirmed anchor
++//   results   — identities, or the diagnosis of why none were found
++type Phase = "discover" | "confirm" | "deep" | "searching" | "results";
+ 
+ // The live feed only ever renders the newest handful of lines, but a long
+ // traversal emits THOUSANDS of events — keeping them all in state makes every
+@@ -32,12 +41,16 @@ const EVENT_TAIL_TRIM_AT = 260;
+ 
+ const FindPlayer = () => {
+   const navigate = useNavigate();
+-  const [phase, setPhase] = useState<Phase>("input");
++  const [phase, setPhase] = useState<Phase>("discover");
+   const [events, setEvents] = useState<SearchEvent[]>([]);
+   const [providerStatus, setProviderStatus] = useState<Record<string, "running" | "done">>({});
+   const [matched, setMatched] = useState(false);
+   const [activeQuery, setActiveQuery] = useState<PlayerQuery | null>(null);
+   const [result, setResult] = useState<ResolutionResult | null>(null);
++  const [pick, setPick] = useState<DiscoveryPick | null>(null);
++  const [discoverTab, setDiscoverTab] = useState<DiscoveryTab>("name");
++  const [discoverName, setDiscoverName] = useState("");
++  const [deepPrefill, setDeepPrefill] = useState("");
+   const abortRef = useRef<AbortController | null>(null);
+ 
+   // The FULL, unabridged log — every event ever emitted, unlike the bounded
+@@ -93,7 +106,7 @@ const FindPlayer = () => {
+       if ((err as Error)?.name === "AbortError") return;
+       console.error("[find-player] resolution failed:", err);
+       toast.error(err instanceof Error ? err.message : "Search failed. Please try again.");
+-      setPhase("input");
++      setPhase("discover");
+     }
+   };
+ 
+@@ -108,15 +121,24 @@ const FindPlayer = () => {
+     navigate("/scout");
+   };
+ 
+-  const handleReset = () => {
++  const backToDiscovery = (tab: DiscoveryTab = "name", name = "") => {
+     abortRef.current?.abort();
+-    setPhase("input");
++    setDiscoverTab(tab);
++    setDiscoverName(name);
++    setPick(null);
++    setPhase("discover");
+     setEvents([]);
+     setProviderStatus({});
+     setMatched(false);
+     setResult(null);
+   };
+ 
++  const openDeep = (prefill?: string) => {
++    abortRef.current?.abort();
++    setDeepPrefill(prefill || "");
++    setPhase("deep");
++  };
++
+   return (
+     <div className="min-h-screen flex flex-col bg-background">
+       <Header />
+@@ -135,60 +157,120 @@ const FindPlayer = () => {
+ 
+       <main className="flex-1 py-10 sm:py-14">
+         <div className="container mx-auto px-4 max-w-3xl">
+-          {phase !== "results" && (
++          {(phase === "discover" || phase === "deep") && (
+             <div className="text-center mb-8">
+               <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 mb-4">
+                 <Telescope className="w-4 h-4 text-primary" />
+-                <span className="text-sm font-medium text-foreground">AI Opponent Discovery</span>
++                <span className="text-sm font-medium text-foreground">Player Discovery</span>
+               </div>
+               <h1 className="text-3xl md:text-5xl font-bold tracking-tight text-foreground">
+                 Find anyone.
+                 <span className="block text-primary mt-2">Scout everyone.</span>
+               </h1>
+               <p className="mt-4 text-lg text-muted-foreground max-w-xl mx-auto">
+-                You don't need a username. Tell ScoutTree whatever you know and our AI detective discovers their real
+-                identity and online accounts across US Chess, FIDE, Lichess and Chess.com.
++                Start from whatever you know — a name, part of one, the tournament you met them at, or just their state.
++                Pick the right person, and ScoutTree traces their real accounts across US Chess, FIDE, Lichess and
++                Chess.com.
+               </p>
+             </div>
+           )}
+ 
+-          {phase === "input" && (
++          {phase === "discover" && (
++            <>
++              <Card className="border-border/70 shadow-xl">
++                <CardContent className="p-5 sm:p-8">
++                  <DiscoveryTabs
++                    key={`${discoverTab}:${discoverName}`}
++                    initialTab={discoverTab}
++                    initialName={discoverName}
++                    onPick={(p) => {
++                      setPick(p);
++                      setPhase("confirm");
++                    }}
++                    onDeepSearch={openDeep}
++                  />
++                </CardContent>
++              </Card>
++
++              <div className="mt-8 grid sm:grid-cols-3 gap-4">
++                <Highlight
++                  icon={<Compass className="w-5 h-5 text-primary" />}
++                  title="Start anywhere"
++                  body="A partial name, a tournament, a state or an ID — every door leads to the same confirmed match."
++                />
++                <Highlight
++                  icon={<ShieldCheck className="w-5 h-5 text-primary" />}
++                  title="You confirm, we trace"
++                  body="Pick the person from the real US Chess directory, then the engine anchors on them — no guessing between namesakes."
++                />
++                <Highlight
++                  icon={<ScrollText className="w-5 h-5 text-primary" />}
++                  title="Evidence, not guesses"
++                  body="Ratings, IDs, states and tournament games all vote on a transparent confidence score."
++                />
++              </div>
++            </>
++          )}
++
++          {phase === "confirm" && pick && (
++            <ConfirmPanel
++              member={pick.member}
++              context={pick.context}
++              needsEnrich={pick.needsEnrich}
++              onBack={() => backToDiscovery(pick.context ? "tournament" : "name", pick.context ? "" : discoverName)}
++              onConfirm={handleSearch}
++            />
++          )}
++
++          {phase === "deep" && (
+             <Card className="border-border/70 shadow-xl">
+               <CardContent className="p-5 sm:p-8">
+-                <PlayerSearchForm onSearch={handleSearch} disabled={false} />
++                <div className="mb-5 flex items-center justify-between gap-3">
++                  <div>
++                    <h2 className="text-lg font-bold text-foreground">Deep discovery</h2>
++                    <p className="text-sm text-muted-foreground">
++                      The full detective: give it whatever you know and it works every source. Slower, but it never
++                      needs a directory entry.
++                    </p>
++                  </div>
++                  <Button variant="ghost" size="sm" onClick={() => backToDiscovery("name", deepPrefill)}>
++                    <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
++                    Back
++                  </Button>
++                </div>
++                <PlayerSearchForm onSearch={handleSearch} disabled={false} initialName={deepPrefill} />
+               </CardContent>
+             </Card>
+           )}
+ 
+-          {phase === "input" && (
+-            <div className="mt-8 grid sm:grid-cols-3 gap-4">
+-              <Highlight
+-                icon={<Search className="w-5 h-5 text-primary" />}
+-                title="The less you know"
+-                body="A name is all it takes. Every extra clue sharpens the match."
+-              />
+-              <Highlight
+-                icon={<Sparkles className="w-5 h-5 text-primary" />}
+-                title="Evidence, not guesses"
+-                body="Ratings, IDs, states and tournaments all vote on a confidence score."
+-              />
+-              <Highlight
+-                icon={<Telescope className="w-5 h-5 text-primary" />}
+-                title="One click to scout"
+-                body="Confirm the identity and jump straight into a full scout report."
+-              />
+-            </div>
+-          )}
+-
+           {phase === "results" && result && (
+             <>
+-              <div className="mb-4 flex justify-end">
+-                <Button variant="outline" size="sm" onClick={() => setLogOpen(true)}>
+-                  <ScrollText className="mr-2 h-3.5 w-3.5" />
+-                  View search log
+-                </Button>
+-              </div>
+-              <IdentityResults result={result} onGenerate={handleGenerate} onReset={handleReset} />
++              {result.identities.length > 0 ? (
++                <>
++                  <div className="mb-4 flex justify-end">
++                    <Button variant="outline" size="sm" onClick={() => setLogOpen(true)}>
++                      <ScrollText className="mr-2 h-3.5 w-3.5" />
++                      View search log
++                    </Button>
++                  </div>
++                  <IdentityResults result={result} onGenerate={handleGenerate} onReset={() => backToDiscovery()} />
++                </>
++              ) : (
++                <>
++                  <div className="mb-4 flex justify-end">
++                    <Button variant="outline" size="sm" onClick={() => setLogOpen(true)}>
++                      <ScrollText className="mr-2 h-3.5 w-3.5" />
++                      View search log
++                    </Button>
++                  </div>
++                  <NoMatchDiagnosis
++                    result={result}
++                    onRefine={() => backToDiscovery("name", result.query.name)}
++                    onTournament={() => backToDiscovery("tournament")}
++                    onDeep={() => openDeep(result.query.name)}
++                  />
++                </>
++              )}
+             </>
+           )}
+         </div>

@@ -83,6 +83,7 @@ import type {
 } from "./graphTypes";
 import { verifyChesscom, verifyLichess, lichessExistingSubset, type VerifiedProfile } from "./verify";
 import { pool, politeFetch, lichessSlot } from "./net";
+import type { Conductor } from "./conductor";
 import {
   nameSimilarity,
   nameMatchWeight,
@@ -1076,6 +1077,13 @@ export interface TraversalOptions {
   /** Internal: lets a parent traversal stand a sub-traversal down the moment
    *  the parent's own target is found. */
   stopWhen?: () => boolean;
+  /** Optional proactive-intelligence layer (conductor.ts): when attached, the
+   *  agent-fleet sizes become LIVE tunables (its booster/governor policies
+   *  raise them while the platform gates are underused and shrink them under
+   *  rate pressure) and the engine reports its queue depth so those policies
+   *  have something to reason over. Absent → the static constants above rule,
+   *  byte-for-byte the old behaviour. */
+  conductor?: Conductor;
   /** TEST/DEBUG affordance (not used in production): pre-seed known member→handle
    *  mappings so the pairing/target-reveal logic can be validated end-to-end
    *  without depending on live Google seed discovery. Each is verified and
@@ -3297,8 +3305,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       };
 
       while (!stopEv()) {
+        // Live fleet sizes: the conductor may raise them (free gate slots +
+        // queued work) or shrink them (rate pressure) between wakes; this loop
+        // re-reads them on every scheduling round, so adjustments take effect
+        // the moment any agent finishes a step.
+        const traceLimit = opts.conductor?.tuning.traceAgents() ?? TRACE_AGENTS;
+        const seedLimit = opts.conductor?.tuning.seedAgents() ?? SEED_AGENTS;
         // Tracer agents: pull mapped sources off the frontier.
-        while (tracing < TRACE_AGENTS && state.frontier.length && !stopEv()) {
+        while (tracing < traceLimit && state.frontier.length && !stopEv()) {
           const src = state.frontier.shift()!;
           const vkey = `${src.memberId}:${src.platform}`;
           if (state.visited.has(vkey)) continue;
@@ -3316,7 +3330,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         // names first). When a finite deadline is set, keep a reserve for
         // TRACING the seeds we already have.
         if (seedScouts && !(isFinite(localDeadline) && localDeadline - Date.now() < 20_000)) {
-          while (seeding < SEED_AGENTS && !stopEv()) {
+          while (seeding < seedLimit && !stopEv()) {
             const memberId = nextSeedId();
             if (!memberId) break;
             seeding++;
@@ -3340,6 +3354,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             });
           }
         }
+        // Queue-depth signal for the conductor's booster: pending trace
+        // sources + a cheap upper bound on unattempted seeds (O(1) — the
+        // consuming cursor over seedOrder), and how many agents are live.
+        opts.conductor?.reportQueue(
+          "graph",
+          state.frontier.length + (seedScouts ? Math.max(0, ws.seedOrder.length - ws.seedIdx) : 0),
+          tracing + seeding
+        );
         if (!running.size) {
           // Nothing in flight and nothing startable. If the event truly has
           // nothing left (vs. merely hitting the deadline reserve), mark it.
@@ -3424,7 +3446,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   log(
     `Tournament-first search for ${targetName}: ${events.length} online event${events.length === 1 ? "" : "s"}, ${totalOpp} direct opponent${
       totalOpp === 1 ? "" : "s"
-    } to work with — ${Math.min(EVENT_AGENTS, Math.max(1, events.length))} event agent(s), each running seed scouts and pairing tracers in parallel. Names resolve through the Google index and get date-verified; platform name search stays OFF unless the index has nothing.`
+    } to work with — ${Math.min(opts.conductor?.tuning.eventAgents() ?? EVENT_AGENTS, Math.max(1, events.length))} event agent(s), each running seed scouts and pairing tracers in parallel${opts.conductor ? " (the conductor adjusts the fleet live)" : ""}. Names resolve through the Google index and get date-verified; platform name search stays OFF unless the index has nothing.`
   );
 
   // TEST/DEBUG: pre-seed injected member→handle mappings (no-op in production).
@@ -3462,21 +3484,42 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         `${pending.length} event(s) still have open leads — going back in${secsLeft < 3600 ? ` (${secsLeft}s left on the clock)` : ""}.`
       );
     }
-    prefetchDiscover(pending, 0, EVENT_AGENTS + DISCOVER_LOOKAHEAD);
+    const eventAgentsNow = () => opts.conductor?.tuning.eventAgents() ?? EVENT_AGENTS;
+    prefetchDiscover(pending, 0, eventAgentsNow() + DISCOVER_LOOKAHEAD);
     let nextIdx = 0;
     const eventAgent = async () => {
       while (!found && !outOfTime(mainDeadline)) {
         const i = nextIdx++;
         if (i >= pending.length) return;
-        prefetchDiscover(pending, i + EVENT_AGENTS, DISCOVER_LOOKAHEAD);
+        prefetchDiscover(pending, i + eventAgentsNow(), DISCOVER_LOOKAHEAD);
         const remaining = mainDeadline - Date.now();
-        const batchesLeft = Math.max(1, Math.ceil((pending.length - i) / EVENT_AGENTS));
+        const batchesLeft = Math.max(1, Math.ceil((pending.length - i) / eventAgentsNow()));
         const slice = Math.max(EVENT_MIN_MS, Math.floor(remaining / batchesLeft));
         if (await workEvent(pending[i], Math.min(mainDeadline, Date.now() + slice))) found = true;
         else if (!found && !outOfTime(mainDeadline) && pass === 0) log(`"${pending[i].name}" didn't give up the username yet — moving on for now.`);
       }
     };
-    await Promise.all(Array.from({ length: Math.min(EVENT_AGENTS, pending.length) }, eventAgent));
+    // ELASTIC event-agent pool: workers are launched up to the LIVE limit, and
+    // a conductor raise mid-pass ("spawn more event agents") starts the extra
+    // workers immediately via the change subscription — pending events left in
+    // the queue get picked up without waiting for a sibling to finish. A lower
+    // limit simply stops adding workers (running ones drain naturally).
+    const eventWorkers = new Set<Promise<void>>();
+    let eventWorkersLaunched = 0;
+    const launchEventAgents = () => {
+      const want = Math.min(eventAgentsNow(), pending.length);
+      while (eventWorkersLaunched < want && !found && !outOfTime(mainDeadline)) {
+        eventWorkersLaunched++;
+        const p = eventAgent()
+          .catch(() => {})
+          .finally(() => void eventWorkers.delete(p));
+        eventWorkers.add(p);
+      }
+    };
+    launchEventAgents();
+    const unsubscribe = opts.conductor?.onChange(launchEventAgents);
+    while (eventWorkers.size) await Promise.all(Array.from(eventWorkers));
+    unsubscribe?.();
     // Futility check: a full pass that produced no new mapping and exhausted
     // no event proves the remaining leads are all stuck on the same holes —
     // stop passing (the pivot stage below is the productive next move).
@@ -3532,6 +3575,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         hooks: { discoverPlatform: hooks.discoverPlatform, findUsernames: hooks.findUsernames },
         depth: 1,
         shared,
+        conductor: opts.conductor,
         // The moment ANY pivot dive finds the real target, siblings stand down.
         stopWhen: () => found,
       });

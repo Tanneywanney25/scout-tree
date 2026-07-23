@@ -56,6 +56,7 @@ import type {
 } from "./schoolTypes";
 import type { UsernameSearchRequest, UsernameCandidate } from "./graphTypes";
 import { politeFetch, pool } from "./net";
+import type { Conductor } from "./conductor";
 import { verifyChesscom, verifyLichess, type VerifiedProfile } from "./verify";
 import { sharedChesscomMonthGames } from "./uscfGraphEngine";
 import { getSharedTraversalCaches, getCachedIdentity, cacheIdentity } from "./cache";
@@ -168,6 +169,10 @@ export interface SchoolResolverHooks {
      *  without this, the anchor phase blocked on stragglers for minutes after
      *  the answer was already in hand. */
     stopWhen?: () => boolean;
+    /** Sign-of-life channel: the wrapped traversal pings this on every log
+     *  line (incl. its 25s heartbeat), so the conductor's stall detector can
+     *  tell a healthy grinding trace from a wedged one. */
+    onActivity?: () => void;
   }) => Promise<{ platform: OnlinePlatform; username: string; confidence: number } | null>;
   /** A player's chess.com friends (member-public; needs an authenticated
    *  session, so it is fetched server-side). Returns friend usernames, or []
@@ -197,6 +202,12 @@ export interface SchoolResolverOptions {
   log: (message: string) => void;
   hooks?: SchoolResolverHooks;
   budgetMs?: number;
+  /** Optional proactive-intelligence layer (conductor.ts). When attached the
+   *  anchor phase gains three autonomous behaviours — stalled mate traces are
+   *  stood down and skipped, the social graph is probed mid-phase once enough
+   *  anchors land, and a federation-ID-anchored ≥90% candidate ends the whole
+   *  phase early. Absent → the phase runs exactly as before. */
+  conductor?: Conductor;
 }
 
 export interface SchoolResolverResult {
@@ -663,6 +674,239 @@ function scoreCandidate(
 }
 
 // ---------------------------------------------------------------------------
+// Cohort crawl + candidate scoring — one reusable pass.
+//
+// Extracted from the tail of runSchoolResolution so the conductor can PROBE
+// mid-phase: once enough anchors have resolved, the same crawl+score runs over
+// the anchors in hand — concurrently with the still-running mate traces — and
+// a federation-ID-anchored ≥90% hit ends the phase right there. Every fetch is
+// memoized in the per-run CrawlMemo, so a probe's work is never wasted: the
+// final pass (or the next probe) reuses the same promises instead of
+// re-hitting the network.
+// ---------------------------------------------------------------------------
+
+interface CrawlMemo {
+  opp: Map<string, Promise<Map<string, number>>>;
+  clubs: Map<string, Promise<Map<string, number>>>;
+  members: Map<string, Promise<string[]>>;
+  friends: Map<string, Promise<string[] | null>>;
+  profile: Map<string, Promise<VerifiedProfile | null>>;
+}
+
+export function makeCrawlMemo(): CrawlMemo {
+  return { opp: new Map(), clubs: new Map(), members: new Map(), friends: new Map(), profile: new Map() };
+}
+
+const memoized = <T>(store: Map<string, Promise<T>>, key: string, fn: () => Promise<T>): Promise<T> => {
+  const hit = store.get(key);
+  if (hit) return hit;
+  const p = fn();
+  store.set(key, p);
+  return p;
+};
+
+async function crawlCohort(
+  mates: ResolvedMate[],
+  input: SchoolResolverInput,
+  school: string,
+  hooks: SchoolResolverHooks,
+  memo: CrawlMemo,
+  halted: () => boolean,
+  log: (message: string) => void,
+  quiet: boolean,
+  signal?: AbortSignal
+): Promise<ScoredAccount[]> {
+  const say = quiet ? (_: string) => {} : log;
+  const exclude = new Set((input.excludeHandles || []).map(lc));
+  for (const r of mates) exclude.add(lc(r.username));
+
+  const mOpp = (mate: ResolvedMate) =>
+    memoized(memo.opp, `${mate.platform}:${lc(mate.username)}`, () =>
+      mate.platform === "lichess" ? lichessOpponents(mate.username, signal) : chesscomOpponents(mate.username, signal)
+    );
+  const mFriends = (mate: ResolvedMate): Promise<string[] | null> =>
+    hooks.fetchFriends
+      ? memoized(memo.friends, `${mate.platform}:${lc(mate.username)}`, () =>
+          hooks.fetchFriends!(mate.platform, mate.username).catch(() => null)
+        )
+      : Promise.resolve(null);
+  const mClubs = (mate: ResolvedMate): Promise<Map<string, number>> =>
+    mate.platform === "chesscom"
+      ? memoized(memo.clubs, `chesscom:${lc(mate.username)}`, () => fetchClubs("chesscom", mate.username, signal))
+      : Promise.resolve(new Map<string, number>());
+  const mMembers = (clubId: string) => memoized(memo.members, clubId, () => chesscomClubMembers(clubId, signal));
+  const mVerify = (platform: OnlinePlatform, handle: string) =>
+    memoized(memo.profile, `${platform}:${lc(handle)}`, () => verify(platform, handle, signal));
+
+  // --- Social-graph crawl ------------------------------------------------------
+  // For each resolved schoolmate: friends (if a session hook exists) + frequent
+  // game opponents + clubs. Aggregate into per-candidate connection counts.
+  say(
+    `School resolver: crawling ${mates.length} schoolmate graph(s) — signals: ` +
+      `authenticated chess.com friends ${hooks.fetchFriends ? "hook wired (used when the server has CHESSCOM_COOKIE)" : "unavailable"}, ` +
+      `public game archives (last ${CC_ARCHIVE_MONTHS} months), shared clubs.`
+  );
+  const conns = new Map<string, Conn>(); // candidate handle → connection record
+  const get = (h: string): Conn => {
+    let c = conns.get(h);
+    if (!c) conns.set(h, (c = { weight: new Map(), friends: new Set(), sharedClubs: new Set(), clubs: new Map() }));
+    return c;
+  };
+  let totalFriends = 0; // friends fetched across the whole cohort (dedup counts per mate)
+  let matesWithFriends = 0; // schoolmates the friends hook returned a non-empty list for
+
+  await pool(
+    mates,
+    CRAWL_POOL,
+    async (mate) => {
+      if (signal?.aborted) return;
+      // The three signals (archive opponents, friends list, clubs) hit
+      // independent endpoints — fetch them together instead of back-to-back
+      // (the serial order tripled each mate's crawl latency for no ordering
+      // benefit; results are folded into `conns` identically either way).
+      const [opp, friends, clubs] = await Promise.all([mOpp(mate), mFriends(mate), mClubs(mate)]);
+      const oppTied = [...opp.values()].filter((n) => n >= MIN_OPP_GAMES).length;
+      for (const [h, n] of opp) {
+        if (n < MIN_OPP_GAMES) continue;
+        const c = get(h);
+        c.weight.set(mate.username, (c.weight.get(mate.username) || 0) + n);
+      }
+      // Authoritative friends (member-public, server-fetched) — strongest tie.
+      for (const f of friends || []) {
+        const h = lc(f);
+        if (!h) continue;
+        const c = get(h);
+        c.friends.add(mate.username);
+        if (!c.weight.has(mate.username)) c.weight.set(mate.username, MIN_OPP_GAMES); // register the tie
+      }
+      const clubCount = [...clubs].filter(([, members]) => !(members && members > BIG_CLUB_MEMBERS)).length;
+      // A mate's small clubs are noted; their members are folded in below.
+      for (const [id, members] of clubs) {
+        if (members && members > BIG_CLUB_MEMBERS) continue;
+        get(`club:chesscom:${id}`).clubs.set(mate.username, members);
+      }
+      if (friends?.length) {
+        totalFriends += friends.length;
+        matesWithFriends++;
+      }
+      // Per-mate signal summary — makes it clear, for each anchor, how much of
+      // each signal fed the graph (and whether the friends list came back full).
+      say(
+        `School resolver: crawled @${mate.username} (${mate.name}) — ` +
+          `${friends ? `${friends.length} friend(s)` : "friends n/a"}, ` +
+          `${oppTied} frequent opponent(s) (≥${MIN_OPP_GAMES} games), ${clubCount} small club(s).`
+      );
+    },
+    halted
+  );
+  if (hooks.fetchFriends) {
+    say(
+      `School resolver: chess.com friends signal — ${totalFriends} friend link(s) across ` +
+        `${matesWithFriends}/${mates.length} schoolmate(s) (full lists, not just top-friends).`
+    );
+  }
+
+  // Fold small-club co-membership into candidate connections: every member of a
+  // schoolmate's small chess.com club becomes a candidate with a (weak) tie to
+  // each schoolmate in that club — so someone in the school's own small club
+  // with 2+ schoolmates clears the bar even if they never showed up as a game
+  // opponent. Capped to genuinely small clubs so a big regional club (which
+  // links nobody) can't flood the candidate pool.
+  {
+    const clubEntries = [...conns].filter(([key]) => key.startsWith("club:"));
+    for (const [key] of clubEntries) conns.delete(key);
+    // Member lists are independent fetches — pull several at once (was one
+    // club at a time; the chess.com gate is the real flood control).
+    await pool(
+      clubEntries,
+      4,
+      async ([key, rec]) => {
+        if (halted()) return;
+        const [, platform, clubId] = key.split(":");
+        if (platform !== "chesscom") return;
+        const members = await mMembers(clubId);
+        if (!members.length || members.length > SMALL_CLUB_FOR_MEMBERS) return;
+        const clubSchoolmates = [...rec.clubs.keys()]; // schoolmates in this small club
+        for (const m of members) {
+          const h = lc(m);
+          if (exclude.has(h)) continue;
+          const c = get(h);
+          for (const mate of clubSchoolmates) {
+            if (!c.weight.has(mate)) c.weight.set(mate, MIN_OPP_GAMES); // register the (weak) club tie
+            c.sharedClubs.add(clubId);
+          }
+        }
+      },
+      halted
+    );
+  }
+
+  say(`School resolver: cohort graph crawl done — ranking the socially-tied candidates.`);
+
+  // --- Candidates → verify → score ---------------------------------------------
+  const candidates: Candidate[] = [];
+  for (const [handle, rec] of conns) {
+    if (handle.startsWith("club:")) continue;
+    if (exclude.has(handle)) continue; // schoolmates / known target accounts
+    const mateSet = new Set(rec.weight.keys());
+    const gamesWithCohort = [...rec.weight.values()].reduce((a, b) => a + b, 0);
+    const sharedClubs = rec.sharedClubs;
+    // The bar to even verify: connected to ≥2 schoolmates, OR heavily to one,
+    // OR a friend + a shared club. Keeps verification focused and false leads out.
+    const qualifies = mateSet.size >= 2 || gamesWithCohort >= HEAVY_OPP_GAMES || (rec.friends.size >= 1 && sharedClubs.size >= 1);
+    if (!qualifies) continue;
+    candidates.push({ handle, mates: mateSet, gamesWithCohort, friendOf: rec.friends.size, sharedClubs });
+  }
+  // Rank by social strength before the (bounded) verification pass.
+  candidates.sort((a, b) => b.mates.size - a.mates.size || b.friendOf - a.friendOf || b.gamesWithCohort - a.gamesWithCohort);
+  const shortlist = candidates.slice(0, MAX_CANDIDATES);
+  say(`School resolver: ${candidates.length} candidate account(s) socially tied to the cohort; verifying the top ${shortlist.length}…`);
+
+  const scored: ScoredAccount[] = [];
+  await pool(
+    shortlist,
+    CANDIDATE_VERIFY_POOL,
+    async (cand) => {
+      if (signal?.aborted) return;
+      const via = [
+        cand.friendOf ? `${cand.friendOf} friends list(s)` : "",
+        cand.gamesWithCohort ? `${cand.gamesWithCohort} archive game(s)` : "",
+        cand.sharedClubs.size ? `${cand.sharedClubs.size} shared club(s)` : "",
+      ]
+        .filter(Boolean)
+        .join(", ");
+      // Verify on both platforms: whichever the target is on, plus the
+      // cross-platform consistency check. Prefer the platform the connections
+      // came from, but a handle live on both is a stronger identity. The two
+      // lookups are independent — fetch them together.
+      const [cc, li] = await Promise.all([mVerify("chesscom", cand.handle), mVerify("lichess", cand.handle)]);
+      if (!cc && !li) {
+        say(`School resolver: candidate @${cand.handle} — connected to ${[...cand.mates].join(", ")} via ${via} — no live account, dropped.`);
+        return;
+      }
+      // Lichess is where a USCF/FIDE id can actually live (bio/links), so if the
+      // account exists there, score that one (it carries the anchor); keep the
+      // chess.com account too when present.
+      const scores: ScoredAccount[] = [];
+      if (li) scores.push(scoreCandidate(cand, li, "lichess", input, school, cc));
+      if (cc) scores.push(scoreCandidate(cand, cc, "chesscom", input, school, li));
+      scored.push(...scores);
+      const best = scores.sort((a, b) => b.account.confidence - a.account.confidence)[0];
+      say(
+        `School resolver: candidate @${cand.handle} — connected to ${[...cand.mates].join(", ")} via ${via} — ` +
+          `${Math.round(best.account.confidence * 100)}%${best.anchored ? " (federation-ID anchored)" : ""}.`
+      );
+    },
+    halted
+  );
+
+  // Keep the strongest account per handle+platform; then per identity dedupe is
+  // the resolver's job. Sort by confidence, anchored first.
+  scored.sort((a, b) => Number(b.anchored) - Number(a.anchored) || b.account.confidence - a.account.confidence);
+  return scored;
+}
+
+// ---------------------------------------------------------------------------
 // The engine
 // ---------------------------------------------------------------------------
 
@@ -672,7 +916,6 @@ export async function runSchoolResolution(
 ): Promise<SchoolResolverResult> {
   const { signal, log, hooks = {} } = options;
   const notes: string[] = [];
-  const exclude = new Set((input.excludeHandles || []).map(lc));
   const t0 = Date.now();
   const since = () => `${Math.round((Date.now() - t0) / 1000)}s`;
   // NO time budget by default: the school route is the LAST deterministic chance
@@ -739,6 +982,51 @@ export async function runSchoolResolution(
     if (profile) resolved.push({ name: s.name || s.username, platform: s.platform, username: profile.username, profile });
   }
 
+  // --- Conductor scaffolding (proactive intelligence) ------------------------
+  // The anchor phase is where the school route spends its minutes, so it is
+  // where the conductor earns its keep: every mate trace registers for stall
+  // detection, every resolved anchor counts toward the probe threshold, and a
+  // mid-phase probe that lands a federation-ID-anchored ≥90% candidate wins
+  // the phase on the spot — the remaining traces stand down and the answer
+  // ships without waiting for the rest of the roster. The probe runs
+  // CONCURRENTLY with the mate pool (never blocking it), and its fetches land
+  // in the shared memo, so probe work is reused by the final pass rather than
+  // repeated.
+  const conductor = options.conductor;
+  const SCHOOL_SCOPE = "school-anchor";
+  const memo = makeCrawlMemo();
+  const won = () => !!conductor?.phaseWon(SCHOOL_SCOPE);
+  let probeInFlight: Promise<void> | null = null;
+  let earlyScored: ScoredAccount[] | null = null;
+  const maybeProbe = () => {
+    if (!conductor || probeInFlight || won() || halted()) return;
+    if (!conductor.wantsProbe(SCHOOL_SCOPE)) return;
+    conductor.probeStarted(SCHOOL_SCOPE);
+    const snapshot = [...resolved];
+    log(`School resolver: conductor probe — crawling the ${snapshot.length} anchor(s) in hand while the roster continues…`);
+    probeInFlight = (async () => {
+      try {
+        const scored = await crawlCohort(snapshot, input, school, hooks, memo, halted, log, true, signal);
+        const best = scored.find((s) => s.anchored); // sorted anchored-first, strongest first
+        if (best) {
+          conductor.reportCandidate(SCHOOL_SCOPE, {
+            confidence: best.account.confidence,
+            anchored: true,
+            label: `@${best.account.username} on ${best.account.platform}`,
+          });
+          if (conductor.phaseWon(SCHOOL_SCOPE)) earlyScored = scored;
+        } else {
+          log("School resolver: the probe found no federation-ID-anchored candidate yet — continuing to resolve the roster.");
+        }
+      } catch {
+        /* the probe is best-effort — the final pass still runs */
+      } finally {
+        conductor.probeEnded(SCHOOL_SCOPE);
+        probeInFlight = null;
+      }
+    })();
+  };
+
   // 2a. USCF-ANCHORED RESOLUTION (primary): roster name + state → USCF member
   //     ID (the public ratings search) → the identity engine's tournament-graph
   //     traversal — the SAME route (and the same full engine) the main search
@@ -777,7 +1065,7 @@ export async function runSchoolResolution(
           return;
         }
         log(`School resolver: found USCF ID ${found.uscfId} for ${mate.name}${found.rating ? ` (~${found.rating} USCF)` : ""}.`);
-        if (halted()) return;
+        if (halted() || won()) return;
 
         // SHORTCUT (engine-confirmed only): the search-wide resolved-identity
         // store holds handles a COMPLETED traversal produced (this search, a
@@ -802,23 +1090,44 @@ export async function runSchoolResolution(
               `School resolver: resolved ${mate.name} to @${profile.username} from the engine-confirmed identity cache ` +
                 `(${Math.round(known.confidence * 100)}%, trace already run earlier).`
             );
+            conductor?.anchorResolved(SCHOOL_SCOPE);
+            maybeProbe();
             return;
           }
           // Cached handle didn't verify live — fall through to a fresh trace.
         }
 
-        if (halted()) return;
+        if (halted() || won()) return;
         log(
           `School resolver: resolveUscfIdentity(uscfId=${found.uscfId}, name="${mate.name}", ` +
             `rating=${found.rating ?? mate.rating ?? "?"}) — full engine, no time budget, tracing until the graph is exhausted…`
         );
         const traceStart = Date.now();
+        // Register with the conductor's stall detector: activity pings come
+        // from the traversal's own log lines (incl. its 25s heartbeat), so
+        // only a genuinely wedged trace can be stood down. The composed
+        // stopWhen also winds this trace down the moment a probe wins the
+        // phase — a stood-down trace still keeps anything it already found.
+        const traceId = conductor?.traceStarted(SCHOOL_SCOPE, mate.name);
         const hit = await hooks
-          .resolveUscfIdentity!({ uscfId: found.uscfId, name: mate.name, rating: found.rating ?? mate.rating, stopWhen: halted })
+          .resolveUscfIdentity!({
+            uscfId: found.uscfId,
+            name: mate.name,
+            rating: found.rating ?? mate.rating,
+            stopWhen: () => halted() || won() || (traceId !== undefined && conductor!.shouldStandDown(traceId)),
+            onActivity: traceId !== undefined ? () => conductor!.traceActivity(traceId) : undefined,
+          })
           .catch(() => null);
         const secs = Math.round((Date.now() - traceStart) / 1000);
+        if (traceId !== undefined) {
+          conductor!.traceEnded(traceId, hit ? "resolved" : conductor!.wasStoodDown(traceId) ? "stood-down" : "empty");
+        }
         if (!hit) {
-          log(`School resolver: couldn't trace USCF #${found.uscfId} (${mate.name}) to an online handle after ${secs}s — continuing.`);
+          if (traceId !== undefined && conductor!.wasStoodDown(traceId)) {
+            log(`School resolver: cancelled ${mate.name}'s trace (stalled, ${secs}s with no result) — moving on with the rest of the roster.`);
+          } else {
+            log(`School resolver: couldn't trace USCF #${found.uscfId} (${mate.name}) to an online handle after ${secs}s — continuing.`);
+          }
           return;
         }
         log(
@@ -849,9 +1158,15 @@ export async function runSchoolResolution(
         });
         cacheIdentity(found.uscfId, { platform: hit.platform, username: profile.username, confidence: hit.confidence });
         log(`School resolver: resolved ${mate.name} to @${profile.username} at ${Math.round(hit.confidence * 100)}% (USCF #${found.uscfId}).`);
+        conductor?.anchorResolved(SCHOOL_SCOPE);
+        maybeProbe();
       },
-      halted
+      () => halted() || won()
     );
+    // A probe may still be crawling when the pool drains (or it just won the
+    // phase) — settle it before deciding between the early exit and the full
+    // pass, so its memoized fetches and verdict are in hand either way.
+    if (probeInFlight) await probeInFlight;
     log(
       `School resolver: USCF-anchored phase — attempted ${attempted}, no USCF record ${noUscf}, ` +
         `${fromCache} from cache, ${traced} freshly traced.`
@@ -860,6 +1175,25 @@ export async function runSchoolResolution(
       `School resolver: USCF-anchored phase finished in ${Math.round((Date.now() - phaseStart) / 1000)}s — ` +
         `${resolved.length} schoolmate(s) resolved.`
     );
+  }
+
+  // --- Conductor early exit ---------------------------------------------------
+  // A mid-phase probe produced a federation-ID-anchored ≥90% candidate: that
+  // evidence class is terminal (a unique federation ID cannot be out-scored by
+  // resolving more schoolmates), so ship the probe's own scored results now.
+  if (earlyScored) {
+    const accounts = (earlyScored as ScoredAccount[]).map((s) => s.account).filter((a) => a.confidence >= 0.5);
+    if (accounts.length) {
+      const top = accounts[0];
+      log(
+        `School resolver: early exit — @${top.username} confirmed at ${Math.round(top.confidence * 100)}% with only ` +
+          `${resolved.length}/${pickedMates.length} schoolmates resolved; the remaining traces were stood down.`
+      );
+      notes.push(
+        `Identified via ${school}'s social graph (early exit: federation-ID-anchored match after ${resolved.length} of ${pickedMates.length} schoolmates).`
+      );
+      return { accounts: accounts.slice(0, 6), notes, found: true, school, schoolmatesResolved: resolved.length };
+    }
   }
 
   // 2b. FALLBACK: Google-index / platform name search, only when the anchored
@@ -885,180 +1219,12 @@ export async function runSchoolResolution(
     return { accounts: [], notes: [`Found school (${school}) but resolved no schoolmate handles.`], found: false, school, schoolmatesResolved: 0 };
   }
   log(`School resolver: resolved ${resolved.length} schoolmate account(s): ${resolved.map((r) => `@${r.username}`).slice(0, 8).join(", ")}${resolved.length > 8 ? "…" : ""}.`);
-  for (const r of resolved) exclude.add(lc(r.username));
 
-  // --- 3. Social-graph crawl -------------------------------------------------
-  // For each resolved schoolmate: friends (if a session hook exists) + frequent
-  // game opponents + clubs. Aggregate into per-candidate connection counts.
-  log(
-    `School resolver: crawling ${resolved.length} schoolmate graph(s) — signals: ` +
-      `authenticated chess.com friends ${hooks.fetchFriends ? "hook wired (used when the server has CHESSCOM_COOKIE)" : "unavailable"}, ` +
-      `public game archives (last ${CC_ARCHIVE_MONTHS} months), shared clubs.`
-  );
-  const conns = new Map<string, Conn>(); // candidate handle → connection record
-  const get = (h: string): Conn => {
-    let c = conns.get(h);
-    if (!c) conns.set(h, (c = { weight: new Map(), friends: new Set(), sharedClubs: new Set(), clubs: new Map() }));
-    return c;
-  };
-  let totalFriends = 0; // friends fetched across the whole cohort (dedup counts per mate)
-  let matesWithFriends = 0; // schoolmates the friends hook returned a non-empty list for
-
-  await pool(
-    resolved,
-    CRAWL_POOL,
-    async (mate) => {
-      if (signal?.aborted) return;
-      // The three signals (archive opponents, friends list, clubs) hit
-      // independent endpoints — fetch them together instead of back-to-back
-      // (the serial order tripled each mate's crawl latency for no ordering
-      // benefit; results are folded into `conns` identically either way).
-      const [opp, friends, clubs] = await Promise.all([
-        mate.platform === "lichess" ? lichessOpponents(mate.username, signal) : chesscomOpponents(mate.username, signal),
-        hooks.fetchFriends ? hooks.fetchFriends(mate.platform, mate.username).catch(() => null) : Promise.resolve(null),
-        // Shared clubs — chess.com only, since that is the one platform whose
-        // club member lists are public (lichess team rosters aren't walked
-        // here, so fetching them would be wasted work).
-        mate.platform === "chesscom" ? fetchClubs("chesscom", mate.username, signal) : Promise.resolve(new Map<string, number | undefined>()),
-      ]);
-      const oppTied = [...opp.values()].filter((n) => n >= MIN_OPP_GAMES).length;
-      for (const [h, n] of opp) {
-        if (n < MIN_OPP_GAMES) continue;
-        const c = get(h);
-        c.weight.set(mate.username, (c.weight.get(mate.username) || 0) + n);
-      }
-      // Authoritative friends (member-public, server-fetched) — strongest tie.
-      for (const f of friends || []) {
-        const h = lc(f);
-        if (!h) continue;
-        const c = get(h);
-        c.friends.add(mate.username);
-        if (!c.weight.has(mate.username)) c.weight.set(mate.username, MIN_OPP_GAMES); // register the tie
-      }
-      const clubCount = [...clubs].filter(([, members]) => !(members && members > BIG_CLUB_MEMBERS)).length;
-      // A mate's small clubs are noted; their members are folded in below.
-      for (const [id, members] of clubs) {
-        if (members && members > BIG_CLUB_MEMBERS) continue;
-        get(`club:chesscom:${id}`).clubs.set(mate.username, members);
-      }
-      if (friends?.length) {
-        totalFriends += friends.length;
-        matesWithFriends++;
-      }
-      // Per-mate signal summary — makes it clear, for each anchor, how much of
-      // each signal fed the graph (and whether the friends list came back full).
-      log(
-        `School resolver: crawled @${mate.username} (${mate.name}) — ` +
-          `${friends ? `${friends.length} friend(s)` : "friends n/a"}, ` +
-          `${oppTied} frequent opponent(s) (≥${MIN_OPP_GAMES} games), ${clubCount} small club(s).`
-      );
-    },
-    halted
-  );
-  if (hooks.fetchFriends) {
-    log(
-      `School resolver: chess.com friends signal — ${totalFriends} friend link(s) across ` +
-        `${matesWithFriends}/${resolved.length} schoolmate(s) (full lists, not just top-friends).`
-    );
-  }
-
-  // Fold small-club co-membership into candidate connections: every member of a
-  // schoolmate's small chess.com club becomes a candidate with a (weak) tie to
-  // each schoolmate in that club — so someone in the school's own small club
-  // with 2+ schoolmates clears the bar even if they never showed up as a game
-  // opponent. Capped to genuinely small clubs so a big regional club (which
-  // links nobody) can't flood the candidate pool.
-  {
-    const clubEntries = [...conns].filter(([key]) => key.startsWith("club:"));
-    for (const [key] of clubEntries) conns.delete(key);
-    // Member lists are independent fetches — pull several at once (was one
-    // club at a time; the chess.com gate is the real flood control).
-    await pool(
-      clubEntries,
-      4,
-      async ([key, rec]) => {
-        if (halted()) return;
-        const [, platform, clubId] = key.split(":");
-        if (platform !== "chesscom") return;
-        const members = await chesscomClubMembers(clubId, signal);
-        if (!members.length || members.length > SMALL_CLUB_FOR_MEMBERS) return;
-        const clubSchoolmates = [...rec.clubs.keys()]; // schoolmates in this small club
-        for (const m of members) {
-          const h = lc(m);
-          if (exclude.has(h)) continue;
-          const c = get(h);
-          for (const mate of clubSchoolmates) {
-            if (!c.weight.has(mate)) c.weight.set(mate, MIN_OPP_GAMES); // register the (weak) club tie
-            c.sharedClubs.add(clubId);
-          }
-        }
-      },
-      halted
-    );
-  }
-
-  log(`School resolver: cohort graph crawl done ${since()} into the school phase.`);
-
-  // --- 4. Candidates → verify → score ---------------------------------------
-  const candidates: Candidate[] = [];
-  for (const [handle, rec] of conns) {
-    if (handle.startsWith("club:")) continue;
-    if (exclude.has(handle)) continue; // schoolmates / known target accounts
-    const mateSet = new Set(rec.weight.keys());
-    const gamesWithCohort = [...rec.weight.values()].reduce((a, b) => a + b, 0);
-    const sharedClubs = rec.sharedClubs;
-    // The bar to even verify: connected to ≥2 schoolmates, OR heavily to one,
-    // OR a friend + a shared club. Keeps verification focused and false leads out.
-    const qualifies = mateSet.size >= 2 || gamesWithCohort >= HEAVY_OPP_GAMES || (rec.friends.size >= 1 && sharedClubs.size >= 1);
-    if (!qualifies) continue;
-    candidates.push({ handle, mates: mateSet, gamesWithCohort, friendOf: rec.friends.size, sharedClubs });
-  }
-  // Rank by social strength before the (bounded) verification pass.
-  candidates.sort((a, b) => b.mates.size - a.mates.size || b.friendOf - a.friendOf || b.gamesWithCohort - a.gamesWithCohort);
-  const shortlist = candidates.slice(0, MAX_CANDIDATES);
-  log(`School resolver: ${candidates.length} candidate account(s) socially tied to the cohort; verifying the top ${shortlist.length}…`);
-
-  const scored: ScoredAccount[] = [];
-  await pool(
-    shortlist,
-    CANDIDATE_VERIFY_POOL,
-    async (cand) => {
-      if (signal?.aborted) return;
-      const via = [
-        cand.friendOf ? `${cand.friendOf} friends list(s)` : "",
-        cand.gamesWithCohort ? `${cand.gamesWithCohort} archive game(s)` : "",
-        cand.sharedClubs.size ? `${cand.sharedClubs.size} shared club(s)` : "",
-      ]
-        .filter(Boolean)
-        .join(", ");
-      // Verify on both platforms: whichever the target is on, plus the
-      // cross-platform consistency check. Prefer the platform the connections
-      // came from, but a handle live on both is a stronger identity. The two
-      // lookups are independent — fetch them together.
-      const [cc, li] = await Promise.all([verify("chesscom", cand.handle, signal), verify("lichess", cand.handle, signal)]);
-      if (!cc && !li) {
-        log(`School resolver: candidate @${cand.handle} — connected to ${[...cand.mates].join(", ")} via ${via} — no live account, dropped.`);
-        return;
-      }
-      // Lichess is where a USCF/FIDE id can actually live (bio/links), so if the
-      // account exists there, score that one (it carries the anchor); keep the
-      // chess.com account too when present.
-      const scores: ScoredAccount[] = [];
-      if (li) scores.push(scoreCandidate(cand, li, "lichess", input, school, cc));
-      if (cc) scores.push(scoreCandidate(cand, cc, "chesscom", input, school, li));
-      scored.push(...scores);
-      const best = scores.sort((a, b) => b.account.confidence - a.account.confidence)[0];
-      log(
-        `School resolver: candidate @${cand.handle} — connected to ${[...cand.mates].join(", ")} via ${via} — ` +
-          `${Math.round(best.account.confidence * 100)}%${best.anchored ? " (federation-ID anchored)" : ""}.`
-      );
-    },
-    halted
-  );
-
-  // Keep the strongest account per handle+platform; then per identity dedupe is
-  // the resolver's job. Sort by confidence, anchored first.
-  scored.sort((a, b) => Number(b.anchored) - Number(a.anchored) || b.account.confidence - a.account.confidence);
+  // --- 3+4. Social-graph crawl → candidates → verify → score -----------------
+  // One reusable pass (crawlCohort) — the same code path the conductor's
+  // mid-phase probe runs; thanks to the shared memo, anything a probe already
+  // fetched costs nothing again here.
+  const scored = await crawlCohort(resolved, input, school, hooks, memo, halted, log, false, signal);
   const accounts = scored.map((s) => s.account).filter((a) => a.confidence >= 0.5);
 
   const found = accounts.length > 0;

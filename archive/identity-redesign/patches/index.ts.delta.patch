@@ -1,0 +1,121 @@
+diff --git a/supabase/functions/resolve-identity/index.ts b/supabase/functions/resolve-identity/index.ts
+index 59009e5..0ba93eb 100644
+--- a/supabase/functions/resolve-identity/index.ts
++++ b/supabase/functions/resolve-identity/index.ts
+@@ -11,6 +11,10 @@ import {
+   fetchUscfMember,
+   findMemberId,
+   buildOnlineGraphForMember,
++  bestRating,
++  directoryMemberSearch,
++  searchRatedEvents,
++  fetchEventRoster,
+   type UscfMember,
+   type UscfSearchRow,
+   type OnlineSection,
+@@ -506,6 +510,87 @@ async function handleFindUsername(body: Record<string, unknown>): Promise<Respon
+   });
+ }
+ 
++// ---------------------------------------------------------------------------
++// Directory modes — Phase A of the discovery UX. Instant, cheap lookups that
++// let the USER search/browse members and events and pick the person BEFORE the
++// expensive resolution engine runs. Thin wrappers over uscf.ts; the browser
++// can't call MUIR directly (no CORS headers), hence the round-trip.
++// ---------------------------------------------------------------------------
++
++/** Wire shape for a directory member row (what the candidate cards render). */
++function memberToDirectoryRow(m: UscfMember, rating?: number) {
++  return {
++    id: m.id,
++    name: m.name,
++    state: m.state,
++    fideId: m.fideId,
++    title: m.title,
++    status: m.status,
++    expiration: m.expiration,
++    hasOnline: m.hasOnline,
++    rating: rating ?? bestRating(m.ratings),
++    ratings: m.ratings,
++  };
++}
++
++async function handleSearchMembers(body: Record<string, unknown>): Promise<Response> {
++  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
++  const num = (v: unknown) => (typeof v === "number" && isFinite(v) ? v : undefined);
++
++  // Exact-ID lookup: used by the "I have an ID" door to show a confirm card.
++  const uscfId = str(body.uscfId);
++  if (uscfId && /\d{6,}/.test(uscfId)) {
++    const member = await fetchUscfMember(uscfId.replace(/\D/g, ""));
++    return json({ available: true, members: member ? [memberToDirectoryRow(member)] : [] });
++  }
++
++  const name = str(body.name);
++  const state = str(body.state);
++  if (!name && !state) return json({ available: false, members: [], notes: ["Provide a name and/or a state."] });
++
++  let rows = await directoryMemberSearch({ name, state, size: num(body.size) ?? 25 });
++  // Rating band, applied server-side so every client gets identical semantics.
++  const minRating = num(body.minRating);
++  const maxRating = num(body.maxRating);
++  if (minRating !== undefined || maxRating !== undefined) {
++    rows = rows.filter((r) => {
++      if (typeof r.rating !== "number") return false;
++      if (minRating !== undefined && r.rating < minRating) return false;
++      if (maxRating !== undefined && r.rating > maxRating) return false;
++      return true;
++    });
++  }
++  console.log(
++    "[resolve-identity] searchMembers:",
++    JSON.stringify({ name, state, minRating, maxRating, found: rows.length })
++  );
++  return json({ available: true, members: rows.map((r) => memberToDirectoryRow(r, r.rating)) });
++}
++
++async function handleSearchEvents(body: Record<string, unknown>): Promise<Response> {
++  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
++  const name = str(body.name);
++  const state = str(body.state);
++  if (!name && !state) return json({ available: false, events: [], notes: ["Provide an event name and/or a state."] });
++  const events = await searchRatedEvents({
++    name,
++    state,
++    size: typeof body.size === "number" && isFinite(body.size) ? body.size : 20,
++  });
++  console.log("[resolve-identity] searchEvents:", JSON.stringify({ name, state, found: events.length }));
++  return json({ available: true, events });
++}
++
++async function handleEventRoster(eventId: string, acceptEncoding: string | null): Promise<Response> {
++  const roster = await fetchEventRoster(eventId);
++  if (!roster) return json({ available: false, roster: null });
++  console.log(
++    "[resolve-identity] eventRoster:",
++    JSON.stringify({ eventId, sections: roster.sections.length, players: roster.sections.reduce((n, s) => n + s.players.length, 0) })
++  );
++  return jsonMaybeGzip({ available: true, roster }, acceptEncoding);
++}
++
+ serve(async (req) => {
+   if (req.method === "OPTIONS") {
+     return new Response(null, { headers: corsHeaders });
+@@ -514,6 +599,17 @@ serve(async (req) => {
+   try {
+     const body = await req.json().catch(() => ({}));
+ 
++    // --- Directory modes (Phase A: user-driven search/browse/pick) -----------
++    if (body?.searchMembers && typeof body.searchMembers === "object") {
++      return await handleSearchMembers(body.searchMembers as Record<string, unknown>);
++    }
++    if (body?.searchEvents && typeof body.searchEvents === "object") {
++      return await handleSearchEvents(body.searchEvents as Record<string, unknown>);
++    }
++    if (typeof body?.eventRoster === "string" && body.eventRoster.trim()) {
++      return await handleEventRoster(body.eventRoster.trim(), req.headers.get("accept-encoding"));
++    }
++
+     // --- Expand mode (client recursion into an opponent's online history) ----
+     if (typeof body?.expandMemberId === "string" && body.expandMemberId.trim()) {
+       return await handleExpand(body.expandMemberId, req.headers.get("accept-encoding"));

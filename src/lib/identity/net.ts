@@ -41,30 +41,40 @@ export async function pool<T>(
   );
 }
 
-/** Counting semaphore — bounds how many callers run `fn` at once. */
+/** Counting semaphore — bounds how many callers run `fn` at once. The limit is
+ *  LIVE: the conductor may lower it under rate pressure (in-flight calls finish
+ *  normally; new admissions wait) or raise it back (waiters admitted at once). */
 export interface Gate {
   run<T>(fn: () => Promise<T>): Promise<T>;
+  /** Adjust the concurrency limit at runtime (floored at 1). */
+  setLimit(n: number): void;
+  /** Live occupancy — the conductor's utilization signal. */
+  stats(): { active: number; waiting: number; limit: number };
 }
 
 export function semaphore(limit: number): Gate {
   let active = 0;
   const waiters: (() => void)[] = [];
+  // Admit waiters while slots are free — the ONLY place a waiter is released,
+  // so a lowered limit simply stops admissions until enough calls drain.
+  const admit = () => {
+    while (active < limit && waiters.length) {
+      active++;
+      waiters.shift()!();
+    }
+  };
   const acquire = (): Promise<void> =>
     new Promise((resolve) => {
       if (active < limit) {
         active++;
         resolve();
       } else {
-        waiters.push(() => {
-          active++;
-          resolve();
-        });
+        waiters.push(resolve);
       }
     });
   const release = () => {
     active--;
-    const next = waiters.shift();
-    if (next) next();
+    admit();
   };
   return {
     async run<T>(fn: () => Promise<T>): Promise<T> {
@@ -75,6 +85,11 @@ export function semaphore(limit: number): Gate {
         release();
       }
     },
+    setLimit(n: number) {
+      limit = Math.max(1, Math.floor(n));
+      admit();
+    },
+    stats: () => ({ active, waiting: waiters.length, limit }),
   };
 }
 
@@ -94,6 +109,31 @@ export async function lichessSlot(gapMs = 250): Promise<void> {
 }
 
 export type NetPlatform = "chesscom" | "lichess";
+
+// ---------------------------------------------------------------------------
+// Net observer — the conductor's ear on the wire. politeFetch reports every
+// outcome (429 / any-other-response / transport failure) through this slot so
+// the rate governor can react to real 429 pressure instead of guessing.
+// One slot, not a list: exactly one search conducts at a time in this app, and
+// the resolver attaches/detaches it around each search.
+// ---------------------------------------------------------------------------
+
+export type NetEventKind = "429" | "ok" | "fail";
+
+let netObserver: ((platform: NetPlatform, kind: NetEventKind) => void) | null = null;
+
+/** Attach (or with `null` detach) the process-wide net observer. */
+export function setNetObserver(fn: ((platform: NetPlatform, kind: NetEventKind) => void) | null): void {
+  netObserver = fn;
+}
+
+const notifyNet = (platform: NetPlatform, kind: NetEventKind) => {
+  try {
+    netObserver?.(platform, kind);
+  } catch {
+    /* an observer bug must never break a fetch */
+  }
+};
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -217,12 +257,15 @@ export async function politeFetch(
         res = await chesscomGate.run(attemptOnce);
       }
       breakerSuccess(platform); // any HTTP response = the platform is talking
+      notifyNet(platform, res.status === 429 ? "429" : "ok");
     } catch (e) {
       // Transport failure (timeout / network error), not an HTTP status. An
       // outer abort is the CALLER stopping — it says nothing about the
       // platform, so it must not trip the breaker.
-      if (!outer?.aborted) breakerFailure(platform);
-      else if (isProbe) breakers[platform].probing = false; // free the probe slot
+      if (!outer?.aborted) {
+        breakerFailure(platform);
+        notifyNet(platform, "fail");
+      } else if (isProbe) breakers[platform].probing = false; // free the probe slot
       // Timeouts / transient network errors: retry a couple of times before
       // giving up — but an outer abort propagates immediately.
       if (outer?.aborted || attempt >= 2) throw e;

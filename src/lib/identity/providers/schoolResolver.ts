@@ -50,8 +50,9 @@ export type { SchoolResolverInput, SchoolResolverResult } from "../schoolResolve
  *  answer); the abort signal is the only external stop. Traversal chatter
  *  stays out of the detective UI. */
 async function resolveUscfIdentity(
-  req: { uscfId: string; name: string; rating?: number; stopWhen?: () => boolean },
-  signal?: AbortSignal
+  req: { uscfId: string; name: string; rating?: number; stopWhen?: () => boolean; onActivity?: () => void },
+  signal?: AbortSignal,
+  conductor?: SchoolResolverOptions["conductor"]
 ): Promise<{ platform: OnlinePlatform; username: string; confidence: number } | null> {
   // Search-wide fast path: a member the engine already resolved (this search,
   // a sibling schoolmate trace, or an earlier search this session) costs
@@ -67,7 +68,11 @@ async function resolveUscfIdentity(
     // Cooperative stand-down: once the school phase has enough anchors, an
     // in-flight mate trace winds down instead of grinding to exhaustion.
     stopWhen: req.stopWhen,
-    log: () => {},
+    // Traversal chatter stays out of the detective UI, but every line pings
+    // the conductor's stall detector as a sign of life — that's how it tells
+    // a healthy grinding trace from a wedged one.
+    log: () => req.onActivity?.(),
+    conductor,
   });
   const best = [...traversal.accounts]
     .filter((a) => a.platform === "chesscom" || a.platform === "lichess")
@@ -92,7 +97,7 @@ export function runSchoolResolver(
       findUsernames: (req) => findUsernameCandidates(req, opts.signal),
       fetchFriends: (platform, username) => fetchFriends(platform, username, opts.signal),
       findUscfId: (req) => findUscfMemberId(req, opts.signal),
-      resolveUscfIdentity: (req) => resolveUscfIdentity(req, opts.signal),
+      resolveUscfIdentity: (req) => resolveUscfIdentity(req, opts.signal, opts.conductor),
     },
   });
 }
