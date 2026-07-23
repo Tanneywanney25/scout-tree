@@ -33,3 +33,6 @@ vite.config.ts.timestamp-*.mjs
 node_modules/
 .scouttree-trace.mjs
 .trace-graph-*.json
+
+# Local Claude Code tooling (dev-server launch config, local settings)
+.claude/
