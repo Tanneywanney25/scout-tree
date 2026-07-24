@@ -272,29 +272,48 @@ async function refreshChesscomCookie(log = () => {
 // api/refresh-chess-cookie.ts
 var config = { maxDuration: 60 };
 async function handler(req, res) {
-  const secret = process.env.CRON_SECRET;
-  if (secret) {
-    const auth = req.headers["authorization"];
-    const provided = Array.isArray(auth) ? auth[0] : auth;
-    if (provided !== `Bearer ${secret}`) {
-      res.status(401).json({ ok: false, error: "unauthorized" });
+  try {
+    // Check secret from query OR header
+    const secret = process.env.CRON_SECRET;
+    if (secret) {
+      const authHeader = req.headers["authorization"];
+      const authProvided = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+      const querySecret = req.query?.secret;
+      const provided = authProvided ? authProvided.replace(/^Bearer\s+/, '') : querySecret;
+      
+      if (provided !== secret) {
+        res.status(401).json({ ok: false, error: "unauthorized" });
+        return;
+      }
+    }
+
+    // Check required env vars
+    const required = ['CHESS_COM_USERNAME', 'CHESS_COM_PASSWORD', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
+    const missing = required.filter(name => !process.env[name]);
+    if (missing.length > 0) {
+      res.status(500).json({ ok: false, error: 'Missing environment variables', missing });
       return;
     }
-  }
-  const logs = [];
-  const log = (m) => {
-    logs.push(m);
-    console.log("[refresh-chess-cookie]", m);
-  };
-  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
-  try {
+
+    const logs = [];
+    const log = (m) => {
+      logs.push(m);
+      console.log("[refresh-chess-cookie]", m);
+    };
+    
+    const startedAt = new Date().toISOString();
     const result = await refreshChesscomCookie(log);
+    
     res.setHeader("Cache-Control", "no-store");
     res.status(result.ok ? 200 : 502).json({ startedAt, ...result, logs });
-  } catch (e) {
-    const error = e instanceof Error ? e.message : "unknown error";
-    log(`FATAL: ${error}`);
-    res.status(500).json({ ok: false, source: "none", error, logs });
+    
+  } catch (error) {
+    console.error('refresh-chess-cookie fatal:', error);
+    res.status(500).json({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined
+    });
   }
 }
 // Annotate the CommonJS export names for ESM import in node:
