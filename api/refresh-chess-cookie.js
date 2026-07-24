@@ -1,3 +1,5 @@
+import { getCachedChesscomCookie } from "../supabase/functions/_shared/chessCookie.js";
+
 export default async function handler(req, res) {
   try {
     // Check secret
@@ -11,22 +13,29 @@ export default async function handler(req, res) {
       return res.status(401).json({ ok: false, error: "unauthorized" });
     }
 
-    // Simple response
+    // Test Supabase connection
+    let cached = null;
+    try {
+      cached = await getCachedChesscomCookie();
+    } catch (dbError) {
+      return res.status(500).json({
+        ok: false,
+        error: "Supabase connection failed",
+        details: dbError.message || String(dbError)
+      });
+    }
+
     return res.status(200).json({
       ok: true,
-      message: "API is working",
-      env: {
-        hasUsername: !!process.env.CHESS_COM_USERNAME,
-        hasPassword: !!process.env.CHESS_COM_PASSWORD,
-        hasSupabaseUrl: !!process.env.SUPABASE_URL,
-        hasServiceKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
-        hasCookie: !!process.env.CHESSCOM_COOKIE
-      }
+      message: "Supabase connection works",
+      hasCachedCookie: !!cached?.cookie,
+      cachedSource: cached?.source || null
     });
   } catch (error) {
     return res.status(500).json({
       ok: false,
-      error: error.message || String(error)
+      error: error.message || String(error),
+      stack: error.stack
     });
   }
 }
