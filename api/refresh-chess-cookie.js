@@ -1,4 +1,4 @@
-import { getCachedChesscomCookie } from "../supabase/functions/_shared/chessCookie.js";
+import { refreshChesscomCookie } from "../supabase/functions/_shared/chessCookie.js";
 
 export default async function handler(req, res) {
   try {
@@ -13,25 +13,32 @@ export default async function handler(req, res) {
       return res.status(401).json({ ok: false, error: "unauthorized" });
     }
 
-    // Test Supabase connection
-    let cached = null;
-    try {
-      cached = await getCachedChesscomCookie();
-    } catch (dbError) {
-      return res.status(500).json({
-        ok: false,
-        error: "Supabase connection failed",
-        details: dbError.message || String(dbError)
-      });
+    // Check env vars
+    const required = ['CHESS_COM_USERNAME', 'CHESS_COM_PASSWORD', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'CHESSCOM_COOKIE'];
+    const missing = required.filter(name => !process.env[name]);
+    if (missing.length > 0) {
+      return res.status(500).json({ ok: false, error: 'Missing env vars', missing });
     }
 
-    return res.status(200).json({
-      ok: true,
-      message: "Supabase connection works",
-      hasCachedCookie: !!cached?.cookie,
-      cachedSource: cached?.source || null
+    // Run the refresh
+    const logs = [];
+    const log = (m) => {
+      logs.push(m);
+      console.log("[refresh]", m);
+    };
+
+    const result = await refreshChesscomCookie(log);
+
+    return res.status(result.ok ? 200 : 502).json({
+      ok: result.ok,
+      source: result.source,
+      cookieSummary: result.cookieSummary || null,
+      stored: result.stored || false,
+      logs
     });
+
   } catch (error) {
+    console.error("Fatal error:", error);
     return res.status(500).json({
       ok: false,
       error: error.message || String(error),
