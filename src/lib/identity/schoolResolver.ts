@@ -54,7 +54,7 @@ import type {
   Schoolmate,
   SchoolLookupRequest,
 } from "./schoolTypes";
-import type { UsernameSearchRequest, UsernameCandidate } from "./graphTypes";
+import type { UsernameSearchRequest, UsernameCandidate, GraphEvent } from "./graphTypes";
 import { politeFetch, pool } from "./net";
 import type { Conductor } from "./conductor";
 import { verifyChesscom, verifyLichess, type VerifiedProfile } from "./verify";
@@ -120,6 +120,24 @@ const SMALL_CLUB_FOR_MEMBERS = 200; // only surface members from a club this sma
  *  is a strong lead, but "the account your schoolmates all play" is not the same
  *  certainty as a matched USCF/FIDE id. The anchor lifts it past this. */
 const SCHOOL_SOCIAL_MAX_CONFIDENCE = 0.9;
+
+// Platforms the tournament-graph engine cannot trace: ICC and ChessKid publish
+// no public game/tournament API, so a section played on one is a dead end for
+// username discovery (uscfGraphEngine skips such events outright). Chess.com,
+// Lichess, and events whose platform the name doesn't reveal (the engine probes
+// those as chess.com + lichess) are all traceable.
+const NO_PUBLIC_API_PLATFORMS = new Set(["icc", "chesskid"]);
+
+/** True when a member's online graph holds at least one section the engine can
+ *  actually trace. A schoolmate whose ENTIRE online footprint is on no-public-API
+ *  platforms (ICC / ChessKid) gives the engine nothing but the expensive
+ *  opponent-pivot to fall back on, which isn't worth the minutes for a single
+ *  social-graph anchor — the school phase skips them immediately. A mate with ANY
+ *  traceable section still earns a full trace, so real online history is never
+ *  dropped. */
+export function hasTraceableOnlineHistory(events: GraphEvent[]): boolean {
+  return events.some((e) => !NO_PUBLIC_API_PLATFORMS.has((e.platformGuess || "").toLowerCase()));
+}
 
 // ---------------------------------------------------------------------------
 // Hooks + options

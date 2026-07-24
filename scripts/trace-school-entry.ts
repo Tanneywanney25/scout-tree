@@ -38,7 +38,7 @@ import {
 } from "../supabase/functions/resolve-identity/school";
 import { findUsernamesOnWeb, discoverEventOnWeb } from "../supabase/functions/resolve-identity/googleSearch";
 import { readEnv } from "../supabase/functions/_shared/ai";
-import { runSchoolResolution, type SchoolResolverHooks } from "../src/lib/identity/schoolResolver";
+import { runSchoolResolution, hasTraceableOnlineHistory, type SchoolResolverHooks } from "../src/lib/identity/schoolResolver";
 import { runGraphTraversal, type TraversalHooks } from "../src/lib/identity/uscfGraphEngine";
 import type { TournamentGraph } from "../src/lib/identity/graphTypes";
 import type { OnlinePlatform } from "../src/lib/identity/schoolTypes";
@@ -117,10 +117,25 @@ async function main() {
   // events) and expansions like the main CLI's expand hook (6 / 24). The old
   // skimpier limits made schoolmates untraceable that the main search resolved
   // fine. Expansions are memoized across mates (MUIR rate-limits refetches).
-  const mateGraphFor = async (memberId: string, maxSections: number, maxEvents: number): Promise<TournamentGraph | null> => {
+  const mateGraphFor = async (
+    memberId: string,
+    maxSections: number,
+    maxEvents: number,
+    retryOnEmpty = false
+  ): Promise<TournamentGraph | null> => {
     const m = await fetchUscfMember(memberId);
     if (!m) return null;
-    const secs = await buildOnlineGraphForMember(m, { maxSections, maxEvents });
+    let secs = await buildOnlineGraphForMember(m, { maxSections, maxEvents });
+    // A member USCF lists as having online ratings but whose online graph builds
+    // EMPTY was starved by a MUIR rate-limit blip mid-build (its section fetches
+    // 429'd out to null under a sibling trace's load), not a player with nothing
+    // to trace — rebuild once so a transient hiccup doesn't drop a schoolmate who
+    // genuinely has online history (the accuracy the whole phase depends on, and
+    // a single missed mate can cost the target a mutual). The throttle has backed
+    // off by now, so the retry is naturally more patient. Only the primary mate
+    // build asks for this; pivot sub-graph builds don't, to avoid piling extra
+    // MUIR calls onto an already-heavy opponent-pivot.
+    if (retryOnEmpty && m.hasOnline && !secs.length) secs = await buildOnlineGraphForMember(m, { maxSections, maxEvents });
     return { rootUscfId: m.id, rootName: m.name, rootState: m.state, onlineEvents: secs, graphTraversalReady: secs.length > 0 };
   };
   const expandCache = new Map<string, Promise<TournamentGraph | null>>();
@@ -164,8 +179,17 @@ async function main() {
     fetchFriends: (_platform, username) => fetchChesscomFriends(username, (m) => console.log(`  ${m}`)),
     findUscfId: ({ firstName, lastName, state: st, rating }) => findMemberId(firstName, lastName, st, rating),
     resolveUscfIdentity: async ({ uscfId: mateId, name: mateName, rating, stopWhen }) => {
-      const graph = await mateGraphFor(mateId, 16, 100);
+      const graph = await mateGraphFor(mateId, 16, 100, /* retryOnEmpty */ true);
       if (!graph?.graphTraversalReady || !graph.onlineEvents.length) return null;
+      // A mate whose entire online footprint is on platforms with no public API
+      // (ICC / ChessKid) has nothing the engine can trace — every direct event
+      // dead-ends and only the expensive opponent-pivot is left, not worth the
+      // minutes for one anchor. Skip immediately; a mate with ANY traceable event
+      // still gets the full trace below.
+      if (!hasTraceableOnlineHistory(graph.onlineEvents)) {
+        console.log(`    [mate #${mateId}] ${mateName}'s online events are all on platforms with no public API (ICC/ChessKid) — nothing to trace, skipping.`);
+        return null;
+      }
       // No time budget — the trace runs until the mate's graph is exhausted,
       // exactly like the main search (the engine's default is unbounded). The
       // phase's stopWhen stands a straggler down once enough anchors resolved.

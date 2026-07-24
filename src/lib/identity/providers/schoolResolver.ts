@@ -32,6 +32,7 @@ import { getCachedIdentity } from "../cache";
 import type { OnlinePlatform } from "../schoolTypes";
 import {
   runSchoolResolution,
+  hasTraceableOnlineHistory,
   type SchoolResolverInput,
   type SchoolResolverOptions,
   type SchoolResolverResult,
@@ -61,6 +62,12 @@ async function resolveUscfIdentity(
   if (cached) return cached;
   const graph = await expandMemberGraph(req.uscfId, signal);
   if (!graph?.graphTraversalReady || !graph.onlineEvents.length) return null;
+  // A mate whose entire online footprint is on platforms with no public API
+  // (ICC / ChessKid) has nothing the engine can trace — every direct event
+  // dead-ends and only the expensive opponent-pivot is left, not worth the
+  // minutes for one anchor. Skip immediately; a mate with ANY traceable event
+  // still gets the full trace below.
+  if (!hasTraceableOnlineHistory(graph.onlineEvents)) return null;
   const traversal = await runGraphTraversal(graph, {
     targetName: graph.rootName || req.name,
     targetRating: req.rating,
