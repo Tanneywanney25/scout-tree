@@ -311,11 +311,30 @@ export async function verifyChesscom(
 /** Dispatch verification by platform. Unknown platforms return null; an
  *  undefined result means the fetch failed (hole), not that the account is
  *  missing. */
+// ---------------------------------------------------------------------------
+// Verify observer — the WorkCounters' ear. Every candidate-handle verification
+// pings this slot so the UI can report honest completed work ("Checked 41
+// candidate handles") without touching any engine logic. One slot, attached /
+// detached by the resolver around each search, same pattern as net.ts.
+// ---------------------------------------------------------------------------
+
+let verifyObserver: ((platform: Platform, username: string) => void) | null = null;
+
+/** Attach (or with `null` detach) the process-wide verification observer. */
+export function setVerifyObserver(fn: ((platform: Platform, username: string) => void) | null): void {
+  verifyObserver = fn;
+}
+
 export async function verifyAccount(
   platform: Platform,
   username: string,
   signal?: AbortSignal
 ): Promise<VerifiedProfile | null | undefined> {
+  try {
+    verifyObserver?.(platform, username);
+  } catch {
+    /* an observer bug must never break a verification */
+  }
   if (platform === "lichess") return verifyLichess(username, signal);
   if (platform === "chesscom") return verifyChesscom(username, signal);
   return null;

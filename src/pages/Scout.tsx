@@ -228,6 +228,14 @@ const Scout = () => {
   useEffect(() => {
     const handoff = readHandoff();
     if (!handoff) return;
+    if (handoff.identity?.anchorOnly) {
+      // Anchor-only: the PERSON is confirmed but no account was discovered.
+      // Render the identity header once the user supplies the username —
+      // no prefill, no auto-run.
+      identityRef.current = handoff.identity;
+      clearHandoff();
+      return;
+    }
     setPlatform(handoff.platform);
     setUsername(handoff.username);
     if (handoff.secondUsername) {
@@ -716,10 +724,15 @@ const Scout = () => {
     
     // Carry the resolved identity into the report only when it matches the
     // opponent actually being reported on (guards against a stale handoff).
-    const identity =
-      identityRef.current && identityRef.current.username.toLowerCase() === username.toLowerCase()
-        ? identityRef.current
-        : undefined;
+    // An anchor-only identity has no discovered username — the user typed it —
+    // so it adopts whatever handle is being scouted.
+    const identity = identityRef.current
+      ? identityRef.current.anchorOnly
+        ? { ...identityRef.current, username }
+        : identityRef.current.username.toLowerCase() === username.toLowerCase()
+          ? identityRef.current
+          : undefined
+      : undefined;
 
     const serializedAnalysis = {
       playerColor: currentAnalysis.playerColor,

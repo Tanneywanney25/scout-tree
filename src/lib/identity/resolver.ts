@@ -39,11 +39,17 @@ import type {
   Evidence,
   Platform,
   SearchEvent,
+  ProgressSnapshot,
   ProviderResult,
   Provider,
 } from "./types";
 import { PROVIDERS, NAME_FALLBACK_PROVIDERS } from "./providers";
-import { getTournamentGraph, findUsernameCandidates } from "./providers/edgeClient";
+import {
+  getTournamentGraph,
+  findUsernameCandidates,
+  searchUscfMembers,
+  type MemberSearchHit,
+} from "./providers/edgeClient";
 import { runGraphTraversal, type TraversalResult } from "./providers/uscfGraph";
 import { runSchoolResolver } from "./providers/schoolResolver";
 import {
@@ -53,7 +59,7 @@ import {
   ratingMatchWeight,
   normalizeName,
 } from "./confidence";
-import { verifyAccount } from "./verify";
+import { verifyAccount, setVerifyObserver } from "./verify";
 import { pool as runPool, chesscomGate, setNetObserver } from "./net";
 import { createConductor, type Conductor } from "./conductor";
 
@@ -61,6 +67,22 @@ export interface ResolveOptions {
   signal?: AbortSignal;
   /** Live narration callback for the full-screen detective UI. */
   onEvent?: (event: SearchEvent) => void;
+  /** Streams every discovered account THE MOMENT it lands in the pool, so the
+   *  hunt UI renders results progressively instead of at the end. The account
+   *  carries its evidence and confidence exactly as scored at discovery time
+   *  (final ranking/dedupe still happens in the returned result). */
+  onAccount?: (account: DiscoveredAccount) => void;
+  /** Honest completed-work counters (monotonic) for the hunt UI. */
+  onProgress?: (progress: ProgressSnapshot) => void;
+  /** SOFT stop — "stop and keep what you found". When it returns true the
+   *  pipeline stops starting new phases, stands the traversal down gracefully
+   *  and proceeds straight to clustering with everything already pooled.
+   *  (The AbortSignal remains the HARD stop that throws and discards.) */
+  shouldStop?: () => boolean;
+  /** Minor-safety gate. `false` skips the school social-graph fallback
+   *  entirely (roster crawl, friends lists, mutual-connection inference) —
+   *  the defensible tournament-record paths still run. Default: allowed. */
+  allowSocial?: boolean;
 }
 
 // Real-world sources that can "anchor" an identity (a person, not just a handle).
@@ -178,29 +200,180 @@ export async function resolveIdentity(
   // decisive candidate. It narrates every decision into the detective UI.
   // Scoped strictly to this search: the finally below detaches the net
   // observer and restores the Chess.com gate even on abort or error.
+  // Honest completed-work counters for the hunt UI. Fed by (a) the verify
+  // observer — every candidate-handle check pings it — and (b) a light regex
+  // pass over EVERY narrated line (engine chatter and conductor heartbeats
+  // alike). Presentation-only: nothing in the pipeline reads these back.
+  const tracker = createProgressTracker(options.onProgress);
   const conductor = createConductor({
-    log: (message) =>
-      options.onEvent?.({ id: ++eventCounter, message, status: "info", provider: "conductor", timestamp: Date.now() }),
+    log: (message) => {
+      tracker.observe(message);
+      options.onEvent?.({ id: ++eventCounter, message, status: "info", provider: "conductor", timestamp: Date.now() });
+    },
     gate: chesscomGate,
   });
   setNetObserver((platform, kind) => conductor.netEvent(platform, kind));
+  setVerifyObserver(() => {
+    tracker.progress.handlesChecked++;
+    tracker.push();
+  });
   try {
-    return await resolveIdentityCore(query, options, conductor);
+    return await resolveIdentityCore(query, options, conductor, tracker);
   } finally {
+    setVerifyObserver(null);
     setNetObserver(null);
     conductor.dispose();
+    tracker.push(true);
   }
+}
+
+// ============================================================================
+// The anchor → discovery split (UX redesign Tier 1).
+//
+// resolveAnchor      — WHO is this person? Seconds, cheap, free: one cached
+//                      MUIR search through the edge's memberSearch mode. No
+//                      graph build, no AI, no traversal.
+// discoverAccounts   — WHAT do they play as online? Minutes, expensive,
+//                      metered: the FULL existing pipeline (anchor providers,
+//                      unbounded tournament traversal, Google index, school
+//                      graph, name-search last resort) run over a query pinned
+//                      to the confirmed member's USCF ID, so a homonym can
+//                      never hijack the run. Byte-for-byte the same engine,
+//                      caps and evidence weights as resolveIdentity — the
+//                      picker ADDS human verification, it never weakens guards.
+// resolveIdentity    — the combined path, kept as-is for the legacy flow
+//                      (no-USCF branch, school-first searches, harnesses).
+// ============================================================================
+
+/** The person the user confirmed in the picker — discovery's input. */
+export interface ConfirmedAnchor {
+  uscfId: string;
+  name: string;
+  state?: string;
+  fideId?: string;
+  /** Best rating estimate shown on the card (corroborates candidate accounts). */
+  approxRating?: number;
+  hasOnline?: boolean;
+}
+
+export interface AnchorResult {
+  available: boolean;
+  rateLimited?: boolean;
+  members: MemberSearchHit[];
+}
+
+/** Live member search for the picker (the cheap, free anchor phase). */
+export async function resolveAnchor(
+  query: { name: string; state?: string; limit?: number },
+  options: { signal?: AbortSignal } = {}
+): Promise<AnchorResult> {
+  const res = await searchUscfMembers(query, options.signal);
+  return { available: res.available, rateLimited: res.rateLimited, members: res.hits };
+}
+
+export interface DiscoverOptions extends ResolveOptions {
+  /** Optional user-supplied refinements (club, school, grade, username hint,
+   *  free text…) merged into the discovery query. The anchor's own identity
+   *  fields always win — the person is already pinned. */
+  clues?: Partial<Omit<PlayerQuery, "name" | "uscfId">>;
+}
+
+/** The expensive half: run the full discovery pipeline over a CONFIRMED person. */
+export async function discoverAccounts(
+  anchor: ConfirmedAnchor,
+  options: DiscoverOptions = {}
+): Promise<ResolutionResult> {
+  const { clues, ...resolveOpts } = options;
+  const query: PlayerQuery = {
+    ...clues,
+    name: anchor.name,
+    uscfId: anchor.uscfId,
+    federation: "USCF",
+    state: clues?.state ?? anchor.state,
+    fideId: clues?.fideId ?? anchor.fideId,
+    approxRating: clues?.approxRating ?? anchor.approxRating,
+  };
+  return resolveIdentity(query, resolveOpts);
+}
+
+/** Mutable progress state shared between the wrapper and the core. */
+interface ProgressTracker {
+  progress: ProgressSnapshot;
+  /** Parse one narrated line for countable completed work. */
+  observe: (message: string) => void;
+  /** Deliver a (throttled) snapshot to the UI. */
+  push: (force?: boolean) => void;
+}
+
+function createProgressTracker(onProgress?: (p: ProgressSnapshot) => void): ProgressTracker {
+  const progress: ProgressSnapshot = {
+    eventsTraced: 0,
+    playersMapped: 0,
+    handlesChecked: 0,
+    matesResolved: 0,
+    matesTotal: 0,
+  };
+  let lastPush = 0;
+  const push = (force = false) => {
+    if (!onProgress) return;
+    const t = Date.now();
+    if (!force && t - lastPush < 400) return; // don't render-storm the UI
+    lastPush = t;
+    try {
+      onProgress({ ...progress });
+    } catch {
+      /* a UI bug must never take the search down */
+    }
+  };
+  // Counting from the narration means ZERO engine changes (accuracy untouched);
+  // a few regexes per line are nanoseconds against network-bound phases.
+  const tracedEventNames = new Set<string>();
+  const observe = (message: string) => {
+    let m = message.match(/games from the "(.+?)" date window/);
+    if (!m) m = message.match(/"(.+?)" (?:was hosted on|ran on)/);
+    if (m) {
+      tracedEventNames.add(m[1]);
+      if (tracedEventNames.size !== progress.eventsTraced) {
+        progress.eventsTraced = tracedEventNames.size;
+        push();
+      }
+      return;
+    }
+    if (/^Found .+ @.+ for section player /.test(message) || /^Injected seed:/.test(message) || /^✔ Match!/.test(message)) {
+      progress.playersMapped++;
+      push();
+      return;
+    }
+    m = message.match(/(\d+)\s+of\s+(\d+)\s+schoolmates/i);
+    if (m) {
+      progress.matesResolved = Math.max(progress.matesResolved, Number(m[1]));
+      progress.matesTotal = Math.max(progress.matesTotal, Number(m[2]));
+      push();
+    }
+  };
+  return { progress, observe, push };
 }
 
 async function resolveIdentityCore(
   query: PlayerQuery,
   options: ResolveOptions,
-  conductor: Conductor
+  conductor: Conductor,
+  tracker: ProgressTracker
 ): Promise<ResolutionResult> {
   const { signal, onEvent } = options;
   const start = performance.now();
 
+  /** "Stop and keep what you found" — checked at every phase boundary. */
+  const softStop = () => !!options.shouldStop?.();
+  let softStopAnnounced = false;
+  const announceSoftStop = () => {
+    if (softStopAnnounced) return;
+    softStopAnnounced = true;
+    emit("Stopping at your request — keeping everything found so far.", "info");
+  };
+
   const emit = (message: string, status: SearchEvent["status"] = "info", provider?: string) => {
+    tracker.observe(message);
     onEvent?.({ id: ++eventCounter, message, status, provider, timestamp: Date.now() });
   };
 
@@ -286,6 +459,13 @@ async function resolveIdentityCore(
     if (inPool.has(key)) return;
     inPool.add(key);
     pool.push({ account, attachName });
+    // Stream the find to the hunt UI immediately — progressive rendering is
+    // presentation-only (final dedupe/ranking still happens at the end).
+    try {
+      options.onAccount?.(account);
+    } catch {
+      /* a UI bug must never take the search down */
+    }
   };
 
   for (const r of results) for (const acc of r.accounts) addToPool(acc);
@@ -449,6 +629,12 @@ async function resolveIdentityCore(
       let stallAnnounced = false;
       const stalledOrAbandoned = () => {
         if (abandoned) return true;
+        // The user's soft stop stands the traversal down gracefully — the
+        // engine returns whatever it already traced instead of aborting.
+        if (softStop()) {
+          announceSoftStop();
+          return true;
+        }
         if (Date.now() - lastLogAt <= TRAVERSAL_STALL_MS) return false;
         if (!stallAnnounced) {
           stallAnnounced = true;
@@ -527,7 +713,7 @@ async function resolveIdentityCore(
     }
   }
 
-  if (!traversalFound && !hintStrong && !signal?.aborted) {
+  if (!traversalFound && !hintStrong && !signal?.aborted && !softStop()) {
     // --- 3a. GOOGLE INDEX (primary fallback) ---------------------------------
     // site:-restricted searches tying the real name to indexed profile pages.
     // Platform name search only runs if this yields nothing verifiable.
@@ -563,7 +749,7 @@ async function resolveIdentityCore(
           async (lead, i) => {
             verified[i] = await verifyCandidate(lead.platform, lead.username, { attachName: query.name });
           },
-          () => !!signal?.aborted
+          () => !!signal?.aborted || softStop()
         );
         leads.forEach((lead, i) => {
           const acc = verified[i];
@@ -608,7 +794,21 @@ async function resolveIdentityCore(
     // location and a federation-ID cross-check. Runs before name search because
     // a social-graph identification is far stronger than a same-name guess.
     let schoolVerified = 0;
-    if (googleVerified === 0 && !signal?.aborted) {
+    const socialAllowed = options.allowSocial !== false;
+    if (googleVerified === 0 && !signal?.aborted && !socialAllowed) {
+      // Minor-safety gate: for scholastic players the school roster crawl,
+      // friends lists and mutual-connection inference stay OFF unless the user
+      // explicitly enabled them. The tournament-record paths above are the
+      // defensible ones — public competitive results identifying a competitor.
+      providerStatus.push({
+        name: "school-graph",
+        label: "School social graph",
+        available: true,
+        notes: ["Skipped — minor-safety gate: school/social tracing is off for scholastic players unless explicitly enabled."],
+      });
+      emit("Minor-safety gate: skipping the school and social-graph trace for this player.", "info", "school-graph");
+    }
+    if (googleVerified === 0 && !signal?.aborted && socialAllowed && !softStop()) {
       const targetUscfId = idDigits(fragments.find((f) => f.source === "uscf")?.uscfId) || idDigits(query.uscfId) || undefined;
       const schoolState = query.state || fragments.find((f) => f.source === "uscf")?.state;
       emit("Nothing indexed either — tracing the player through their school's social graph…", "info", "school-graph");
@@ -643,7 +843,7 @@ async function resolveIdentityCore(
     }
 
     // --- 3b. ABSOLUTE LAST RESORT: platform name search ----------------------
-    if (googleVerified === 0 && schoolVerified === 0 && !signal?.aborted) {
+    if (googleVerified === 0 && schoolVerified === 0 && !signal?.aborted && !softStop()) {
       emit("The Google index gave nothing verifiable — falling back to platform name search (results may be a namesake).", "info");
       const nameSearchT0 = performance.now();
 
@@ -689,7 +889,7 @@ async function resolveIdentityCore(
           async (s, i) => {
             verified[i] = await verifyCandidate(s.platform, s.username, { attachName: s.attachName });
           },
-          () => !!signal?.aborted
+          () => !!signal?.aborted || softStop()
         );
         suggestions.forEach((s, i) => {
           const acc = verified[i];
@@ -724,7 +924,9 @@ async function resolveIdentityCore(
         notes: [
           traversalFound
             ? "Skipped — username already verified through the player's own tournament games."
-            : "Skipped — the user-supplied handle already identifies the account.",
+            : hintStrong
+              ? "Skipped — the user-supplied handle already identifies the account."
+              : "Skipped — the search was stopped before this phase.",
         ],
       });
     }

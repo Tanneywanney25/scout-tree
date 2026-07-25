@@ -229,6 +229,28 @@ export interface ResolutionResult {
   partialOpponents?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Progress snapshot — honest COMPLETED-work counters for the hunt UI.
+//
+// Deliberately no denominators on the slow phases: "Traced 3 events · Checked
+// 41 handles" recruits the labor illusion; "3 of 47" tells the user this will
+// take forever (the discouraging-news trap). Counters only ever go up.
+// ---------------------------------------------------------------------------
+
+export interface ProgressSnapshot {
+  /** Distinct online events whose games have been pulled/aligned so far. */
+  eventsTraced: number;
+  /** Crosstable players mapped to a live online account. */
+  playersMapped: number;
+  /** Candidate handles checked against the live platforms. */
+  handlesChecked: number;
+  /** Schoolmates resolved (school fallback only). */
+  matesResolved: number;
+  /** Roster size of the school fallback, when known (the one denominator the
+   *  UI shows, because the school readout already exists and reads as motion). */
+  matesTotal: number;
+}
+
 /** A single narrated step in the full-screen "AI detective" experience. */
 export interface SearchEvent {
   id: number;

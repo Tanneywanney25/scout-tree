@@ -6,7 +6,15 @@
 // ============================================================================
 
 export * from "./types";
-export { resolveIdentity, type ResolveOptions } from "./resolver";
+export {
+  resolveIdentity,
+  resolveAnchor,
+  discoverAccounts,
+  type ResolveOptions,
+  type DiscoverOptions,
+  type ConfirmedAnchor,
+  type AnchorResult,
+} from "./resolver";
 export {
   confidenceLevel,
   confidencePercent,
@@ -15,10 +23,27 @@ export {
 export { PROVIDERS } from "./providers";
 export {
   buildHandoff,
+  buildAnchorHandoff,
   writeHandoff,
   readHandoff,
   clearHandoff,
   FIND_PLAYER_HANDOFF_KEY,
   type ScoutIdentity,
   type ScoutHandoff,
+  type AnchorHandoffInput,
 } from "./handoff";
+// Anchor-phase client surface (the fast, free half of the split): live member
+// search, the AnchorCard preview, FIDE lookup, and the resolved-handles moat.
+export {
+  searchUscfMembers,
+  fetchMemberPreview,
+  searchFidePlayers,
+  fetchResolvedHandles,
+  storeResolvedHandle,
+  requestOptOut,
+  type MemberSearchHit,
+  type MemberSearchResult,
+  type MemberPreview,
+  type FidePlayerHit,
+  type CachedResolvedHandle,
+} from "./providers/edgeClient";

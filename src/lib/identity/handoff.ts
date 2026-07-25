@@ -18,8 +18,12 @@ const FETCHABLE: Platform[] = ["lichess", "chesscom"];
 
 /** Serialisable summary of a resolved identity, embedded in the scout report. */
 export interface ScoutIdentity {
-  /** Primary account username — this becomes the report's :id. */
+  /** Primary account username — this becomes the report's :id.
+   *  Empty for an anchor-only handoff (the user types it on /scout). */
   username: string;
+  /** True when the user confirmed the PERSON but no account was discovered —
+   *  the identity header still renders; the username comes from the user. */
+  anchorOnly?: boolean;
   name: string;
   federation?: string;
   country?: string;
@@ -110,6 +114,53 @@ export function buildHandoff(
   };
 }
 
+/** What buildAnchorHandoff needs to know about the confirmed person. */
+export interface AnchorHandoffInput {
+  name: string;
+  uscfId: string;
+  state?: string;
+  fideId?: string;
+  estimatedRating?: number;
+  ratings?: Record<string, number>;
+  title?: string;
+}
+
+/**
+ * Build an ANCHOR-ONLY handoff: the user confirmed the person (name, IDs,
+ * ratings) but no online account was discovered or chosen. /scout renders the
+ * identity header and the user supplies the username — every "failed" search
+ * still ends in a usable outcome instead of a dead end.
+ */
+export function buildAnchorHandoff(anchor: AnchorHandoffInput, color: "white" | "black" = "white"): ScoutHandoff {
+  const summary: ScoutIdentity = {
+    username: "",
+    anchorOnly: true,
+    name: anchor.name,
+    federation: "USCF",
+    country: "US",
+    state: anchor.state,
+    uscfId: anchor.uscfId,
+    fideId: anchor.fideId,
+    estimatedRating: anchor.estimatedRating,
+    estimatedRatingSource: anchor.estimatedRating ? "USCF" : undefined,
+    title: anchor.title,
+    // The human picked this member from the official database — the PERSON is
+    // as confirmed as it gets. (Says nothing about any account.)
+    confidence: 0.95,
+    reasoning: `Identity confirmed from the US Chess member database (member #${anchor.uscfId}).`,
+    sources: ["uscf"],
+    evidence: [{ label: "Confirmed by you from the US Chess member database", weight: 4.0 }],
+    accounts: [],
+  };
+  return {
+    platform: "chesscom",
+    username: "",
+    color,
+    identity: summary,
+    timestamp: Date.now(),
+  };
+}
+
 export function writeHandoff(handoff: ScoutHandoff): void {
   try {
     sessionStorage.setItem(FIND_PLAYER_HANDOFF_KEY, JSON.stringify(handoff));
@@ -123,7 +174,9 @@ export function readHandoff(maxAgeMs = 600_000): ScoutHandoff | null {
     const raw = sessionStorage.getItem(FIND_PLAYER_HANDOFF_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as ScoutHandoff;
-    if (!parsed?.username || !parsed?.platform) return null;
+    if (!parsed?.platform) return null;
+    // Anchor-only handoffs legitimately carry no username (the user types it).
+    if (!parsed.username && !parsed.identity?.anchorOnly) return null;
     if (Date.now() - (parsed.timestamp || 0) > maxAgeMs) {
       clearHandoff();
       return null;

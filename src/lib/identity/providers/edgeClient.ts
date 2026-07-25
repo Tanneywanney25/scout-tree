@@ -392,6 +392,151 @@ export function fetchFriends(platform: OnlinePlatform, username: string, signal?
   return promise;
 }
 
+// ---------------------------------------------------------------------------
+// Anchor-phase modes (the FAST half of the anchor → discovery split). These
+// power the member picker and the AnchorCard — no graph build, no AI, so they
+// answer in well under a second and never spend discovery-grade money.
+// ---------------------------------------------------------------------------
+
+/** One live picker row from MUIR (the edge's memberSearch mode). */
+export interface MemberSearchHit {
+  uscfId: string;
+  name: string;
+  state?: string;
+  rating?: number;
+  ratings: Partial<Record<"regular" | "quick" | "blitz" | "onlineRegular" | "onlineQuick" | "onlineBlitz", number>>;
+  hasOnline: boolean;
+  fideId?: string;
+  title?: string;
+  expiration?: string;
+}
+
+export interface MemberSearchResult {
+  hits: MemberSearchHit[];
+  /** True when the server refused this call (per-client rate limit). */
+  rateLimited?: boolean;
+  /** False when the edge function itself was unreachable. */
+  available: boolean;
+}
+
+/** Live member search for the picker. Debouncing is the CALLER's job. */
+export async function searchUscfMembers(
+  req: { name: string; state?: string; limit?: number },
+  signal?: AbortSignal
+): Promise<MemberSearchResult> {
+  if (signal?.aborted || !req.name || req.name.trim().length < 2) return { hits: [], available: true };
+  const data = await invokeEdge({ memberSearch: { name: req.name.trim(), state: req.state, limit: req.limit } }, 12_000);
+  if (!data) return { hits: [], available: false };
+  return {
+    hits: Array.isArray(data.hits) ? (data.hits as MemberSearchHit[]) : [],
+    rateLimited: data.rateLimited === true,
+    available: data.available !== false || data.rateLimited === true,
+  };
+}
+
+/** A handle already confirmed for this member in the resolved_handles moat. */
+export interface CachedResolvedHandle {
+  uscfId?: string;
+  platform: Platform;
+  username: string;
+  confidence: number;
+  source: string;
+  verifiedAt?: string;
+  evidence?: { kind: string; weight: number; label: string; source: string }[];
+}
+
+/** The AnchorCard payload (the edge's memberPreview mode). */
+export interface MemberPreview {
+  available: boolean;
+  member?: MemberSearchHit & { status?: string };
+  onlineEventsNamed?: number;
+  pandemicEraEvents?: number;
+  eventsSince2020?: number;
+  latestEventDate?: string;
+  optedOut?: boolean;
+  resolvedHandles?: CachedResolvedHandle[];
+}
+
+const previewCache = new Map<string, Promise<MemberPreview>>();
+
+export function fetchMemberPreview(uscfId: string, signal?: AbortSignal): Promise<MemberPreview> {
+  const id = uscfId.replace(/\D/g, "");
+  if (!id) return Promise.resolve({ available: false });
+  const existing = previewCache.get(id);
+  if (existing) return existing;
+  const promise = (async (): Promise<MemberPreview> => {
+    if (signal?.aborted) return { available: false };
+    const data = await invokeEdge({ memberPreview: { uscfId: id } }, 25_000);
+    if (!data || data.available === false) return { available: false };
+    return data as unknown as MemberPreview;
+  })();
+  previewCache.set(id, promise);
+  // Never remember a failure; keep real previews for a few minutes.
+  promise.then(
+    (p) => {
+      if (!p.available) previewCache.delete(id);
+      else setTimeout(() => previewCache.delete(id), 5 * 60_000);
+    },
+    () => previewCache.delete(id)
+  );
+  return promise;
+}
+
+/** One FIDE registry row (the edge's fideSearch mode, served via Lichess). */
+export interface FidePlayerHit {
+  fideId: string;
+  name: string;
+  federation?: string;
+  title?: string;
+  year?: number;
+  standard?: number;
+  rapid?: number;
+  blitz?: number;
+}
+
+export async function searchFidePlayers(name: string, signal?: AbortSignal): Promise<FidePlayerHit[]> {
+  if (signal?.aborted || !name || name.trim().length < 3) return [];
+  const data = await invokeEdge({ fideSearch: { name: name.trim() } }, 15_000);
+  if (!data || data.available === false || !Array.isArray(data.hits)) return [];
+  return data.hits as FidePlayerHit[];
+}
+
+/** Cache-first read over the moat: instantly answers a repeat lookup. */
+export async function fetchResolvedHandles(uscfIds: string[], signal?: AbortSignal): Promise<CachedResolvedHandle[]> {
+  const clean = uscfIds.map((s) => s.replace(/\D/g, "")).filter(Boolean);
+  if (signal?.aborted || !clean.length) return [];
+  const data = await invokeEdge({ resolvedHandles: { uscfIds: clean } }, 12_000);
+  if (!data || !Array.isArray(data.handles)) return [];
+  return (data.handles as CachedResolvedHandle[]).filter(
+    (h) => h && typeof h.username === "string" && typeof h.platform === "string"
+  );
+}
+
+/** Write a confirmed resolution (or a user correction) into the moat.
+ *  Fire-and-forget: the hunt result never depends on the write landing. */
+export async function storeResolvedHandle(row: {
+  uscfId: string;
+  platform: Platform;
+  username: string;
+  confidence: number;
+  evidence?: { kind: string; weight: number; label: string; source: string }[];
+  source: "engine" | "user-correction" | "claim";
+}): Promise<boolean> {
+  const data = await invokeEdge({ claimHandle: row }, 12_000);
+  return data?.stored === true;
+}
+
+/** Record a do-not-resolve request (the privacy opt-out). */
+export async function requestOptOut(row: {
+  uscfId?: string;
+  platform?: string;
+  username?: string;
+  note?: string;
+}): Promise<boolean> {
+  const data = await invokeEdge({ optOut: row }, 12_000);
+  return data?.stored === true;
+}
+
 /** Convert a server candidate into a scored PartialIdentity for the resolver. */
 export function edgeCandidateToPartial(cand: EdgeIdentityCandidate, query: PlayerQuery): PartialIdentity {
   const evidence: Evidence[] = [];
