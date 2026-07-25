@@ -20,6 +20,15 @@ import {
   fetchSchoolRoster,
   fetchChesscomFriends,
 } from "./school.ts";
+import {
+  handleMemberSearch,
+  handleMemberPreview,
+  handleFideSearch,
+  handleResolvedHandles,
+  handleClaimHandle,
+  handleOptOut,
+  memberSearchRateLimited,
+} from "./anchor.ts";
 import type { SchoolLookupRequest } from "../../../src/lib/identity/schoolTypes.ts";
 
 // ============================================================================
@@ -513,6 +522,35 @@ serve(async (req) => {
 
   try {
     const body = await req.json().catch(() => ({}));
+
+    // --- Anchor-phase modes (the FAST half of the anchor → discovery split) --
+    // memberSearch powers the live picker: no graph build, no AI, one cached
+    // MUIR search. Rate-limited per client because it fires while typing.
+    if (body?.memberSearch && typeof body.memberSearch === "object") {
+      const clientKey =
+        req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+        req.headers.get("cf-connecting-ip") ||
+        "anon";
+      if (memberSearchRateLimited(clientKey)) {
+        return json({ available: false, hits: [], rateLimited: true });
+      }
+      return json(await handleMemberSearch(body.memberSearch as Record<string, unknown>));
+    }
+    if (body?.memberPreview && typeof body.memberPreview === "object") {
+      return json(await handleMemberPreview(body.memberPreview as Record<string, unknown>));
+    }
+    if (body?.fideSearch && typeof body.fideSearch === "object") {
+      return json(await handleFideSearch(body.fideSearch as Record<string, unknown>));
+    }
+    if (body?.resolvedHandles && typeof body.resolvedHandles === "object") {
+      return json(await handleResolvedHandles(body.resolvedHandles as Record<string, unknown>));
+    }
+    if (body?.claimHandle && typeof body.claimHandle === "object") {
+      return json(await handleClaimHandle(body.claimHandle as Record<string, unknown>));
+    }
+    if (body?.optOut && typeof body.optOut === "object") {
+      return json(await handleOptOut(body.optOut as Record<string, unknown>));
+    }
 
     // --- Expand mode (client recursion into an opponent's online history) ----
     if (typeof body?.expandMemberId === "string" && body.expandMemberId.trim()) {

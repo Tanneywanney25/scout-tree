@@ -257,7 +257,7 @@ const ONLINE_NAME_RE =
  *  them, dropping whole online events from the graph (observed: every
  *  post-2022 PNWCC G60 online event a player had). Normalise before testing. */
 const nameForMatch = (s: string) => s.replace(/_/g, " ");
-const looksOnline = (name: string) => ONLINE_NAME_RE.test(nameForMatch(name));
+export const looksOnline = (name: string) => ONLINE_NAME_RE.test(nameForMatch(name));
 
 function platformGuess(text: string): string | undefined {
   if (/lichess/i.test(text)) return "lichess";
