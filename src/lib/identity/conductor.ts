@@ -104,6 +104,10 @@ export interface Conductor {
   traceEnded(id: string, outcome: TraceOutcome): void;
   /** Latest queue depth for a scope (pending work items, running agents). */
   reportQueue(scope: string, pending: number, running: number): void;
+  /** Register (or update) a user-facing phase the heartbeat narrates: a label
+   *  and the total unit count (e.g. the roster size). Idempotent; the first
+   *  call starts the phase's elapsed clock. */
+  reportPhase(scope: string, info: { label: string; total: number }): void;
   /** One more anchor (e.g. resolved schoolmate) landed in `scope`. */
   anchorResolved(scope: string): void;
   /** A scored candidate surfaced mid-phase; an anchored ≥90% one wins the
@@ -186,6 +190,12 @@ const EARLY_EXIT_CONFIDENCE = 0.9;
 const PROBE_MIN_ANCHORS = 4;
 const PROBE_STRIDE = 4;
 
+// Progress heartbeat: while a registered phase still has agents working, narrate
+// a status line at least this often so a quiet stretch (the booster has nothing
+// to spawn, every agent is mid-request) never reads as a hang. Purely
+// observational — it only reads existing state and logs.
+const HEARTBEAT_MS = 12_000;
+
 interface TraceRec {
   scope: string;
   label: string;
@@ -202,6 +212,8 @@ interface ScopeRec {
   lastProbeAnchors: number;
   probing: boolean;
   won: boolean;
+  /** Set by reportPhase — drives the progress heartbeat's narration. */
+  phase?: { label: string; total: number; startedAt: number };
 }
 
 interface QueueRec {
@@ -212,7 +224,12 @@ interface QueueRec {
 
 export function createConductor(options: ConductorOptions = {}): Conductor {
   const now = options.now ?? Date.now;
+  // Every conductor line (a decision OR a heartbeat) refreshes this. The
+  // heartbeat only speaks after HEARTBEAT_MS of silence, so it fills the gaps
+  // between decisions instead of talking over them.
+  let lastLogAt = now();
   const log = (m: string) => {
+    lastLogAt = now();
     try {
       options.log?.(m);
     } catch {
@@ -382,6 +399,31 @@ export function createConductor(options: ConductorOptions = {}): Conductor {
     }
   };
 
+  // Progress heartbeat: when a registered phase still has agents working but no
+  // decision has been logged for HEARTBEAT_MS, narrate live progress so the
+  // search never looks paused. Reads state only — changes nothing.
+  const heartbeat = () => {
+    const t = now();
+    if (t - lastLogAt < HEARTBEAT_MS) return; // a decision (or an earlier beat) spoke recently
+    for (const [name, s] of scopes) {
+      if (!s.phase || s.won) continue;
+      let running = 0;
+      for (const tr of traces.values()) if (tr.scope === name && tr.running && !tr.stoodDown) running++;
+      if (running <= 0 && !s.probing) continue; // phase idle or finished — nothing to narrate
+      let agents = 0;
+      for (const q of queues.values()) {
+        if (t - q.at > QUEUE_FRESH_MS) continue;
+        agents += q.running;
+      }
+      const work = agents > 0 ? `${agents} agent(s) active` : `${running} trace(s) active`;
+      const elapsed = Math.round((t - s.phase.startedAt) / 1000);
+      log(
+        `Conductor: still working — ${work}, ${s.anchors} of ${s.phase.total} ${s.phase.label} resolved, ${elapsed}s elapsed.`
+      );
+      return; // one heartbeat per silent window
+    }
+  };
+
   // --- the public object -----------------------------------------------------
 
   const conductor: Conductor = {
@@ -428,6 +470,17 @@ export function createConductor(options: ConductorOptions = {}): Conductor {
     reportQueue(scope, pending, running) {
       if (disposed) return;
       queues.set(scope, { pending: Math.max(0, pending), running: Math.max(0, running), at: now() });
+    },
+
+    reportPhase(scope, info) {
+      if (disposed) return;
+      const s = scopeOf(scope);
+      const total = Math.max(0, Math.round(info.total));
+      if (!s.phase) s.phase = { label: info.label, total, startedAt: now() };
+      else {
+        s.phase.label = info.label;
+        s.phase.total = total;
+      }
     },
 
     anchorResolved(scope) {
@@ -489,6 +542,7 @@ export function createConductor(options: ConductorOptions = {}): Conductor {
         governor();
         booster();
         stallScan();
+        heartbeat();
       } catch {
         /* a policy bug must never take the search down */
       }

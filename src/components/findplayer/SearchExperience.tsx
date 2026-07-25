@@ -93,20 +93,34 @@ export function SearchExperience({ query, events, providerStatus: providerStatus
   // so drive progress primarily off elapsed time — an eased curve that fills
   // slowly and never jumps to 100% — with a small floor from completed sources.
   const graphActive = providerStatus.has("uscf-graph") || events.some((e) => e.provider === "uscf-graph");
+  const schoolActive = providerStatus.has("school-graph") || events.some((e) => e.provider === "school-graph");
   const matched = matchedProp ?? events.some((e) => /✔ Match/.test(e.message));
   const elapsed = now - startRef.current;
   const timeFill = 96 * (1 - Math.exp(-elapsed / 55_000));
   const milestoneFloor = Math.min(32, (doneCount / SOURCE_NODES.length) * 32);
   const progress = matched ? 99 : Math.min(97, Math.max(milestoneFloor, timeFill));
 
+  // The school phase runs long and quiet; the conductor's heartbeat (and the
+  // resolver's own lines) carry "N of M schoolmates" — surface the latest as an
+  // explicit readout so the user always sees forward motion, not a frozen line.
+  const schoolProgress = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const m = events[i].message.match(/(\d+)\s+of\s+(\d+)\s+schoolmates/i);
+      if (m) return { resolved: Number(m[1]), total: Number(m[2]) };
+    }
+    return null;
+  }, [events]);
+
   const latestRunning = [...events].reverse().find((e) => e.status === "running");
   const headline = latestRunning?.message || AMBIENT_LINES[ambientIdx];
   const recent = events.slice(-8);
   const phaseLabel = matched
     ? "Match found — assembling the profile"
-    : graphActive
-      ? "Tracing tournament opponents"
-      : "Investigating";
+    : schoolActive
+      ? "Tracing schoolmates"
+      : graphActive
+        ? "Tracing tournament opponents"
+        : "Investigating";
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col items-center justify-center overflow-hidden bg-background/95 backdrop-blur-xl">
@@ -193,6 +207,16 @@ export function SearchExperience({ query, events, providerStatus: providerStatus
         <p className="text-muted-foreground mt-2">
           Resolving the identity of <span className="font-medium text-foreground">{query.name}</span>
         </p>
+
+        {/* --- School-phase progress readout (the long, quiet phase) --- */}
+        {schoolActive && !matched && (
+          <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-sm font-medium text-primary">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {schoolProgress
+              ? `Resolving schoolmates… ${schoolProgress.resolved} of ${schoolProgress.total} resolved`
+              : "Resolving schoolmates…"}
+          </div>
+        )}
 
         {/* --- Progress --- */}
         <div className="mt-6 h-2 w-full overflow-hidden rounded-full bg-muted">

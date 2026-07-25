@@ -286,6 +286,56 @@ function scenarioEarlyExit() {
 }
 
 // ---------------------------------------------------------------------------
+// 5b. Progress heartbeat
+// ---------------------------------------------------------------------------
+function scenarioHeartbeat() {
+  console.log("Scenario 5b: heartbeat — a registered phase narrates progress during quiet stretches");
+  let t = 8_500_000;
+  const logs: string[] = [];
+  const beats = () => logs.filter((l) => l.includes("still working")).length;
+  // A saturated gate (waiters queued) keeps the booster quiet so this scenario
+  // isolates the heartbeat; the heartbeat's agent count comes from reportQueue.
+  const gate = fakeGate(12, 12, 5);
+  const c = createConductor({ log: (m) => logs.push(m), gate, tickMs: 0, now: () => t });
+
+  // No registered phase yet: ticking is silent even with a running trace.
+  const idle = c.traceStarted("school-anchor", "Nobody");
+  t += 60_000;
+  c.tick();
+  assert(beats() === 0, "no heartbeat before a phase is registered");
+  c.traceEnded(idle, "resolved");
+
+  // Register the phase, start two mate traces, land two anchors, report the fleet.
+  c.reportPhase("school-anchor", { label: "schoolmates", total: 23 });
+  c.traceStarted("school-anchor", "Austin Liu");
+  c.traceStarted("school-anchor", "Tanush Bhatia");
+  c.anchorResolved("school-anchor");
+  c.anchorResolved("school-anchor");
+
+  // Past the quiet window, with a FRESH fleet-queue report → the heartbeat fires
+  // with agents, resolved-of-total and elapsed.
+  t += 13_000;
+  c.reportQueue("graph", 7, 12);
+  c.tick();
+  assert(beats() === 1, `one heartbeat fires after the quiet window (got ${beats()})`);
+  const beat = logs[logs.length - 1];
+  assert(/2 of 23 schoolmates resolved/.test(beat), `heartbeat reports resolved-of-total (got: ${beat})`);
+  assert(/12 agent\(s\) active/.test(beat), `heartbeat reports the active agent count (got: ${beat})`);
+  assert(/\d+s elapsed/.test(beat), "the heartbeat reports elapsed time");
+
+  // Another tick inside the 12s window: no second beat.
+  t += 3_000;
+  c.tick();
+  assert(beats() === 1, "no second heartbeat inside the 12s window");
+
+  // 12s later work is still in flight → another beat.
+  t += 13_000;
+  c.tick();
+  assert(beats() === 2, "the heartbeat keeps narrating while traces are still in flight");
+  c.dispose();
+}
+
+// ---------------------------------------------------------------------------
 // 6. Dispose
 // ---------------------------------------------------------------------------
 function scenarioDispose() {
@@ -528,6 +578,7 @@ async function main() {
   scenarioBooster();
   scenarioStall();
   scenarioEarlyExit();
+  scenarioHeartbeat();
   scenarioDispose();
   await scenarioSchoolEarlyExit();
   await scenarioSchoolStall();

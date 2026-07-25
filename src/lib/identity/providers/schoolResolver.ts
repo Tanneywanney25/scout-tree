@@ -53,7 +53,8 @@ export type { SchoolResolverInput, SchoolResolverResult } from "../schoolResolve
 async function resolveUscfIdentity(
   req: { uscfId: string; name: string; rating?: number; stopWhen?: () => boolean; onActivity?: () => void },
   signal?: AbortSignal,
-  conductor?: SchoolResolverOptions["conductor"]
+  conductor?: SchoolResolverOptions["conductor"],
+  uiLog?: (message: string) => void
 ): Promise<{ platform: OnlinePlatform; username: string; confidence: number } | null> {
   // Search-wide fast path: a member the engine already resolved (this search,
   // a sibling schoolmate trace, or an earlier search this session) costs
@@ -77,8 +78,13 @@ async function resolveUscfIdentity(
     stopWhen: req.stopWhen,
     // Traversal chatter stays out of the detective UI, but every line pings
     // the conductor's stall detector as a sign of life — that's how it tells
-    // a healthy grinding trace from a wedged one.
-    log: () => req.onActivity?.(),
+    // a healthy grinding trace from a wedged one. The periodic "Still working…"
+    // heartbeat IS surfaced (prefixed with the mate) so a long trace shows the
+    // user what the agent is doing; the verbose pairing-chain lines stay hidden.
+    log: (m: string) => {
+      req.onActivity?.();
+      if (uiLog && /^Still working \(/.test(m)) uiLog(`Tracing ${req.name}: ${m}`);
+    },
     conductor,
   });
   const best = [...traversal.accounts]
@@ -104,7 +110,7 @@ export function runSchoolResolver(
       findUsernames: (req) => findUsernameCandidates(req, opts.signal),
       fetchFriends: (platform, username) => fetchFriends(platform, username, opts.signal),
       findUscfId: (req) => findUscfMemberId(req, opts.signal),
-      resolveUscfIdentity: (req) => resolveUscfIdentity(req, opts.signal, opts.conductor),
+      resolveUscfIdentity: (req) => resolveUscfIdentity(req, opts.signal, opts.conductor, opts.log),
     },
   });
 }

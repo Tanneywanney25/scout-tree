@@ -1058,6 +1058,9 @@ export async function runSchoolResolution(
     let noUscf = 0;
     let traced = 0;
     let fromCache = 0;
+    // Tell the conductor the roster size so its heartbeat can narrate
+    // "N of M schoolmates resolved" while these long traces run.
+    conductor?.reportPhase(SCHOOL_SCOPE, { label: "schoolmates", total: pickedMates.length });
     log(
       `School resolver: USCF-anchored resolution — the FULL identity engine on every mate ` +
         `(${USCF_MATE_POOL} unbounded trace(s) in flight; same engine + discovery as the main search), ` +
