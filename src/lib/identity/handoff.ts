@@ -60,6 +60,50 @@ export interface ScoutHandoff {
 }
 
 /**
+ * A moat hit: an earlier hunt already confirmed this member's handle, so the
+ * user jumps straight to /scout with both the handle AND the identity header —
+ * the pre-warmed pairing-sheet flow answering in under a second.
+ */
+export function buildCachedHandleHandoff(
+  anchor: AnchorHandoffInput,
+  handle: { platform: Platform; username: string; confidence: number },
+  color: "white" | "black" = "white"
+): ScoutHandoff | null {
+  if (!FETCHABLE.includes(handle.platform)) return null;
+  const summary: ScoutIdentity = {
+    username: handle.username,
+    name: anchor.name,
+    federation: "USCF",
+    country: "US",
+    state: anchor.state,
+    uscfId: anchor.uscfId,
+    fideId: anchor.fideId,
+    estimatedRating: anchor.estimatedRating,
+    estimatedRatingSource: anchor.estimatedRating ? "USCF" : undefined,
+    title: anchor.title,
+    confidence: handle.confidence,
+    reasoning: "Confirmed by a previous ScoutTree search and served from the resolved-handles cache.",
+    sources: ["uscf", handle.platform],
+    evidence: [
+      { label: "Confirmed by you from the US Chess member database", weight: 4.0 },
+      { label: "Account previously confirmed by a full ScoutTree hunt", weight: 2.0 },
+    ],
+    accounts: [
+      {
+        platform: handle.platform,
+        username: handle.username,
+        profileUrl:
+          handle.platform === "lichess"
+            ? `https://lichess.org/@/${handle.username}`
+            : `https://www.chess.com/member/${handle.username}`,
+        confidence: handle.confidence,
+      },
+    ],
+  };
+  return { platform: handle.platform, username: handle.username, color, identity: summary, timestamp: Date.now() };
+}
+
+/**
  * Door 3: the user already knows the handle. Straight to /scout with the form
  * prefilled — no identity claim attached (nothing has been verified).
  */

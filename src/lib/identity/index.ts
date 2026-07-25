@@ -25,6 +25,7 @@ export {
   buildHandoff,
   buildAnchorHandoff,
   buildDirectHandleHandoff,
+  buildCachedHandleHandoff,
   writeHandoff,
   readHandoff,
   clearHandoff,

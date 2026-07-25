@@ -16,6 +16,7 @@ import Onboarding from "./pages/Onboarding";
 import Settings from "./pages/Settings";
 import MyScouts from "./pages/MyScouts";
 import NotFound from "./pages/NotFound";
+import HuntBanner from "./components/findplayer/HuntBanner";
 
 const queryClient = new QueryClient();
 
@@ -26,6 +27,8 @@ const App = () => (
       <Sonner />
       <BrowserRouter>
         <AuthProvider>
+          {/* Backgrounded Find Player hunts follow the user around the app. */}
+          <HuntBanner />
           <Routes>
             <Route path="/" element={<Landing />} />
             <Route path="/find-player" element={<FindPlayer />} />
