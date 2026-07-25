@@ -243,7 +243,7 @@ const Scout = () => {
       setSecondUsername(handoff.secondUsername);
     }
     setColor(handoff.color);
-    identityRef.current = handoff.identity;
+    identityRef.current = handoff.identity ?? null;
     handoffUsernameRef.current = handoff.username;
     clearHandoff();
     setAutoSubmitArmed(true);

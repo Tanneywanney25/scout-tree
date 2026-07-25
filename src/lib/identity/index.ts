@@ -24,6 +24,7 @@ export { PROVIDERS } from "./providers";
 export {
   buildHandoff,
   buildAnchorHandoff,
+  buildDirectHandleHandoff,
   writeHandoff,
   readHandoff,
   clearHandoff,

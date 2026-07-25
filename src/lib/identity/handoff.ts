@@ -54,8 +54,21 @@ export interface ScoutHandoff {
   secondUsername?: string;
   /** Color the user will play (opponent plays the opposite). Defaults to white. */
   color: "white" | "black";
-  identity: ScoutIdentity;
+  /** Absent for a bare Door-3 handoff (user typed a handle, no identity claim). */
+  identity?: ScoutIdentity;
   timestamp: number;
+}
+
+/**
+ * Door 3: the user already knows the handle. Straight to /scout with the form
+ * prefilled — no identity claim attached (nothing has been verified).
+ */
+export function buildDirectHandleHandoff(
+  platform: Platform,
+  username: string,
+  color: "white" | "black" = "white"
+): ScoutHandoff {
+  return { platform, username: username.trim().replace(/^@/, ""), color, timestamp: Date.now() };
 }
 
 export const FIND_PLAYER_HANDOFF_KEY = "findPlayerHandoff";
