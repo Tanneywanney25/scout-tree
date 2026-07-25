@@ -11,14 +11,14 @@ import {
   MapPin,
   Gauge,
   Sparkles,
-  Plus,
-  Minus,
   RotateCcw,
   ShieldCheck,
   Users,
   AlertTriangle,
 } from "lucide-react";
 import { ConfidenceBadge } from "./ConfidenceBadge";
+import { ConfidenceStatement } from "./ConfidenceStatement";
+import { EvidenceLedger } from "./EvidenceLedger";
 import type { DiscoveredAccount, Platform, ResolutionResult, ResolvedIdentity } from "@/lib/identity";
 
 interface IdentityResultsProps {
@@ -68,11 +68,8 @@ export function IdentityResults({ result, onGenerate, onReset }: IdentityResults
         <div className="flex items-start gap-2.5 rounded-xl border border-confidence-low/40 bg-confidence-low/5 p-3.5 text-sm">
           <AlertTriangle className="w-4 h-4 text-confidence-low mt-0.5 shrink-0" />
           <p className="text-muted-foreground">
-            We traced <span className="font-semibold text-foreground">{result.partialOpponents}</span> of{" "}
-            {result.query.name}'s tournament opponents to online accounts, but none of their games named{" "}
-            {result.query.name}'s own handle — their account may be on an untraceable platform (e.g. ChessKid) or a second
-            account. Any account below is a <span className="font-semibold text-foreground">same-name guess</span>, not a
-            tournament-confirmed match — verify it before generating a report.
+            We confirmed <span className="font-semibold text-foreground">{result.partialOpponents}</span> of their
+            opponents' accounts but never found a game that pins down theirs — anything below matched on name only.
           </p>
         </div>
       ) : null}
@@ -203,28 +200,14 @@ function IdentityCard({
               </div>
             )}
 
-            {/* Evidence */}
+            {/* Evidence — weighted bars, so a 4.0 ID match visibly dominates a
+                1.0 state match instead of rendering as two identical chips. */}
             {identity.evidence.length > 0 && (
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
                   Why we believe this
                 </p>
-                <div className="flex flex-wrap gap-2">
-                  {identity.evidence.map((e, i) => (
-                    <span
-                      key={i}
-                      className={cn(
-                        "inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs",
-                        e.weight >= 0
-                          ? "border-confidence-high/30 bg-confidence-high/10 text-foreground"
-                          : "border-confidence-low/30 bg-confidence-low/10 text-foreground"
-                      )}
-                    >
-                      {e.weight >= 0 ? <Plus className="w-3 h-3 text-confidence-high" /> : <Minus className="w-3 h-3 text-confidence-low" />}
-                      {e.label}
-                    </span>
-                  ))}
-                </div>
+                <EvidenceLedger evidence={identity.evidence} />
               </div>
             )}
 
@@ -288,6 +271,7 @@ function AccountCard({
   checked: boolean;
   onToggle: () => void;
 }) {
+  const [whyOpen, setWhyOpen] = useState(false);
   const lastActive = account.lastActive ? new Date(account.lastActive) : null;
   // The green shield means "this account is confirmed to be THIS player", not
   // merely "this account exists". Every live account has verified === true (the
@@ -324,11 +308,30 @@ function AccountCard({
         <ConfidenceBadge value={account.confidence} size="sm" />
       </div>
 
+      {/* Plain English above the number — what 87% actually MEANS here. */}
+      <ConfidenceStatement account={account} className="mt-2.5" />
+
       <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
         <Stat label="Rating" value={account.rating ? `${account.rating}` : "—"} />
         <Stat label="Games" value={account.gamesFound != null ? format(account.gamesFound) : "—"} />
         <Stat label="Last seen" value={lastActive ? relative(lastActive) : "—"} />
       </div>
+
+      {account.evidence.length > 0 && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setWhyOpen((v) => !v);
+            }}
+            className="text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+          >
+            {whyOpen ? "Hide the evidence" : "Why we think so"}
+          </button>
+          {whyOpen && <EvidenceLedger evidence={account.evidence} className="mt-2" />}
+        </div>
+      )}
 
       <a
         href={account.profileUrl}
