@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { callAI } from "../_shared/ai.ts";
+import { callAI, readEnv } from "../_shared/ai.ts";
 import {
   discoverEventOnWeb,
   findUsernamesOnWeb,
@@ -60,6 +60,20 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
+
+// ---------------------------------------------------------------------------
+// Wall-clock budgets. THE fix for the "boots, logs the query, then shutdown
+// with no response" failure: a graph build for a very active player (hundreds
+// of online events → hundreds of throttled MUIR calls) used to run until it
+// overran the Supabase edge function's own wall-clock limit, at which point the
+// isolate was KILLED mid-build — so the function returned nothing and the client
+// hung. Now the build is handed an internal deadline comfortably under that
+// platform limit; when it's hit we return the anchor identities plus whatever
+// partial graph was gathered, flagged `partial:true`, so the client always gets
+// a response and degrades gracefully instead of hanging. Override via env for a
+// project on a plan with a different wall-clock ceiling.
+const RESOLVE_BUDGET_MS = Math.max(10_000, Number(readEnv("RESOLVE_BUDGET_MS")) || 55_000);
+const EXPAND_BUDGET_MS = Math.max(10_000, Number(readEnv("EXPAND_BUDGET_MS")) || 45_000);
 
 type Platform = "lichess" | "chesscom" | "chesskid" | "icc" | "other";
 
@@ -422,7 +436,7 @@ async function jsonMaybeGzip(payload: unknown, acceptEncoding: string | null): P
  *  same member — each rebuild costs a full MUIR walk (events + sections +
  *  standings). Crosstables of 2020-era events never change; a short TTL only
  *  bounds memory. Failures are not memoized. */
-const expandMemo = new Map<string, { at: number; payload: { available: boolean; tournamentGraph: unknown; graphTraversalReady: boolean } }>();
+const expandMemo = new Map<string, { at: number; payload: { available: boolean; tournamentGraph: unknown; graphTraversalReady: boolean; partial?: boolean } }>();
 const EXPAND_MEMO_TTL_MS = 15 * 60_000;
 
 async function handleExpand(memberId: string, acceptEncoding: string | null): Promise<Response> {
@@ -432,18 +446,28 @@ async function handleExpand(memberId: string, acceptEncoding: string | null): Pr
   if (hit && Date.now() - hit.at < EXPAND_MEMO_TTL_MS) return jsonMaybeGzip(hit.payload, acceptEncoding);
   const member = clean ? await fetchUscfMember(clean) : null;
   if (!member) return json({ available: false, tournamentGraph: null, graphTraversalReady: false });
-  const sections = await buildOnlineGraphForMember(member);
+  let truncated = false;
+  const sections = await buildOnlineGraphForMember(member, {
+    deadlineMs: t0 + EXPAND_BUDGET_MS,
+    onTruncated: () => {
+      truncated = true;
+    },
+  });
   const graph = sectionsToGraph(member, sections);
-  const payload = { available: true, tournamentGraph: graph, graphTraversalReady: graph.graphTraversalReady };
-  expandMemo.set(clean, { at: Date.now(), payload });
-  if (expandMemo.size > 200) {
-    // Bound memory on a long-lived instance: drop the stalest half.
-    const entries = [...expandMemo.entries()].sort((a, b) => a[1].at - b[1].at);
-    for (const [k] of entries.slice(0, 100)) expandMemo.delete(k);
+  const payload = { available: true, tournamentGraph: graph, graphTraversalReady: graph.graphTraversalReady, partial: truncated };
+  // Only memoize a COMPLETE build — a partial (budget-truncated) graph must be
+  // retryable, and by then the warm MUIR cache makes the rebuild cheap.
+  if (!truncated) {
+    expandMemo.set(clean, { at: Date.now(), payload });
+    if (expandMemo.size > 200) {
+      // Bound memory on a long-lived instance: drop the stalest half.
+      const entries = [...expandMemo.entries()].sort((a, b) => a[1].at - b[1].at);
+      for (const [k] of entries.slice(0, 100)) expandMemo.delete(k);
+    }
   }
   console.log(
     "[resolve-identity] expand:",
-    JSON.stringify({ memberId: clean, sections: sections.length, ms: Date.now() - t0 })
+    JSON.stringify({ memberId: clean, sections: sections.length, ms: Date.now() - t0, partial: truncated })
   );
   return jsonMaybeGzip(payload, acceptEncoding);
 }
@@ -522,6 +546,30 @@ serve(async (req) => {
 
   try {
     const body = await req.json().catch(() => ({}));
+
+    // --- Health check (monitoring): a cheap liveness/config probe that does NO
+    //     MUIR or AI work, so an uptime monitor can tell the function is booting
+    //     and serving without spending discovery-grade time/quota. -------------
+    if (body?.health === true || body?.ping === true) {
+      const aiConfigured =
+        !!((readEnv("AI_PROXY_BASE_URL") && readEnv("AI_PROXY_API_KEY")) ||
+          readEnv("GEMINI_API_KEY") ||
+          readEnv("GOOGLE_API_KEY") ||
+          readEnv("ANTHROPIC_API_KEY"));
+      const storeConfigured = !!(
+        (readEnv("SUPABASE_URL") || readEnv("VITE_SUPABASE_URL")) &&
+        (readEnv("SUPABASE_SERVICE_ROLE_KEY") || readEnv("SUPABASE_SERVICE_KEY") || readEnv("SUPABASE_SECRET_KEY"))
+      );
+      return json({
+        ok: true,
+        service: "resolve-identity",
+        time: new Date().toISOString(),
+        resolveBudgetMs: RESOLVE_BUDGET_MS,
+        expandBudgetMs: EXPAND_BUDGET_MS,
+        aiConfigured,
+        muirCacheConfigured: storeConfigured,
+      });
+    }
 
     // --- Anchor-phase modes (the FAST half of the anchor → discovery split) --
     // memberSearch powers the live picker: no graph build, no AI, one cached
@@ -639,12 +687,18 @@ serve(async (req) => {
     //    CONCURRENTLY. Sequential ordering here used to delay the client's
     //    traversal start by the AI pass's full latency on every search.
     const tGraph = Date.now();
+    let graphTruncated = false;
     const graphPromise: Promise<TournamentGraph | null> = (async () => {
       if (!wantGraph || !members.length) return null;
       // Prefer the highest-ranked member that actually has online ratings.
       const target = members.find((m) => m.hasOnline) || members[0];
       try {
-        const sections = await buildOnlineGraphForMember(target);
+        const sections = await buildOnlineGraphForMember(target, {
+          deadlineMs: t0 + RESOLVE_BUDGET_MS,
+          onTruncated: () => {
+            graphTruncated = true;
+          },
+        });
         const g = sectionsToGraph(target, sections);
         debug.onlineSectionCount = sections.length;
         debug.graphOpponents = g.onlineEvents.reduce((n, e) => n + e.players.length, 0);
@@ -676,6 +730,11 @@ serve(async (req) => {
     const graph = await graphPromise;
     timings.graphBuild = Date.now() - tGraph;
     const graphTraversalReady = !!graph?.graphTraversalReady;
+    if (graphTruncated) {
+      notes.push(
+        "Tournament graph hit the time budget and is PARTIAL — the anchor identity is solid; re-run to continue building the graph (cached sections make the retry fast)."
+      );
+    }
 
     const ai = await aiPromise;
     let aiCandidates: EdgeIdentityCandidate[] = [];
@@ -710,7 +769,16 @@ serve(async (req) => {
 
     const available = candidates.length > 0;
     timings.total = Date.now() - t0;
-    console.log("[resolve-identity] timings:", JSON.stringify({ name: query.name, ...timings }));
+    console.log(
+      "[resolve-identity] timings:",
+      JSON.stringify({
+        name: query.name,
+        ...timings,
+        sections: graph?.onlineEvents.length ?? 0,
+        candidates: candidates.length,
+        partial: graphTruncated,
+      })
+    );
     const payload: Record<string, unknown> = {
       available,
       sources,
@@ -718,6 +786,9 @@ serve(async (req) => {
       notes,
       tournamentGraph: graph,
       graphTraversalReady,
+      // True when the graph build was cut short by the wall-clock budget: the
+      // graph is usable but INCOMPLETE, and a retry (warm cache) can finish it.
+      partial: graphTruncated,
       timings,
     };
     if (debugMode) payload.debug = debug;

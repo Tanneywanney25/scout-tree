@@ -92,6 +92,9 @@ export interface EdgeResponse {
   tournamentGraph?: TournamentGraph | null;
   /** True when the graph has at least one online section worth traversing. */
   graphTraversalReady?: boolean;
+  /** True when the server cut the graph build short at its wall-clock budget:
+   *  the graph is usable but incomplete, and a retry (warm cache) can finish it. */
+  partial?: boolean;
 }
 
 const EMPTY: EdgeResponse = {
@@ -116,13 +119,15 @@ export function fetchEdgeIdentity(query: PlayerQuery, signal?: AbortSignal): Pro
   if (existing) return existing;
 
   const promise = (async (): Promise<EdgeResponse> => {
-    // The graph build behind this call can legitimately run for minutes on an
-    // active player (it walks the member's whole online-era event history).
-    // The old 150s client timeout was the single biggest trace-killer in the
-    // browser: it silently discarded a nearly-finished build AND the anchor
-    // identities with it. One in-flight retry covers a flaky first attempt.
-    let data = await invokeEdge({ query }, 480_000);
-    if (!data && !signal?.aborted) data = await invokeEdge({ query }, 480_000);
+    // The edge function now enforces its OWN wall-clock budget and always
+    // returns within it — a partial graph flagged `partial:true` rather than
+    // running until the platform kills the isolate (which returned nothing and
+    // hung the browser here for the full timeout). So this timeout only needs to
+    // cover that server budget plus the response tail; the old 480s value just
+    // meant a silently-dead call froze the traversal for eight minutes. One
+    // in-flight retry still covers a genuinely flaky first attempt.
+    let data = await invokeEdge({ query }, 90_000);
+    if (!data && !signal?.aborted) data = await invokeEdge({ query }, 90_000);
     if (!data) {
       // Most common cause: the edge function isn't deployed yet (or has no AI
       // key). The detective degrades to Lichess/Chess.com — surface why.
@@ -141,6 +146,7 @@ export function fetchEdgeIdentity(query: PlayerQuery, signal?: AbortSignal): Pro
       notes: Array.isArray(data.notes) ? (data.notes as string[]) : [],
       tournamentGraph,
       graphTraversalReady: data.graphTraversalReady === true || !!tournamentGraph?.graphTraversalReady,
+      partial: data.partial === true,
     };
   })();
 
@@ -182,7 +188,10 @@ export function expandMemberGraph(memberId: string, signal?: AbortSignal): Promi
   if (existing) return existing;
 
   const promise = (async (): Promise<TournamentGraph | null> => {
-    const data = await invokeEdge({ expandMemberId: id }, 300_000);
+    // The expand build carries its own server-side wall-clock budget too, so a
+    // timeout comfortably above it is all that's needed (was 300s — a dead call
+    // used to stall the whole pivot stage for five minutes).
+    const data = await invokeEdge({ expandMemberId: id }, 90_000);
     if (!data) return null;
     return (data.tournamentGraph as TournamentGraph | null) ?? null;
   })();

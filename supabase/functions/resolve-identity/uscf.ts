@@ -27,8 +27,38 @@
 // the caller degrades to "no USCF data" instead of breaking the search.
 // ============================================================================
 
+import { cacheGet, cachePut, type MuirCacheKind } from "../_shared/identityStore.ts";
+
 const API = "https://ratings-api.uschess.org/api/v1";
 const UA = "Mozilla/5.0 (compatible; ScoutTree/1.0; +https://chess-scout.vercel.app)";
+
+// Persisted MUIR cache TTLs (Postgres muir_cache, via identityStore). The graph
+// build's dominant cost is the per-event/section/crosstable fan-out, and those
+// payloads are effectively IMMUTABLE once an event is rated — so cache them long
+// and serve repeats from Postgres instead of re-hammering an API US Chess has
+// said is unsupported and rate-limited. A member's event LIST grows as they
+// play, so it gets a short TTL. All of it fails soft: with no service-role store
+// configured (the Node CLI / local runs) cacheGet/cachePut are instant no-ops
+// and every call falls straight through to MUIR, so behaviour is unchanged.
+const EVENT_CACHE_TTL_MS = 30 * 24 * 60 * 60_000; // 30d — immutable event/section/crosstable
+const EVENTS_LIST_TTL_MS = 6 * 60 * 60_000; // 6h — a member's event history grows over time
+
+/** cacheGet → (on miss) fetchJson → cachePut. Every read/write is fail-soft, so
+ *  a store outage degrades to a direct MUIR fetch, never an error. */
+async function cachedFetchJson(
+  kind: MuirCacheKind,
+  cacheKey: string,
+  ttlMs: number,
+  path: string,
+  timeoutMs = 12000,
+  retries = 3
+): Promise<any | null> {
+  const hit = await cacheGet<any>(kind, cacheKey, ttlMs);
+  if (hit !== null && hit !== undefined) return hit;
+  const data = await fetchJson(path, timeoutMs, retries);
+  if (data) void cachePut(kind, cacheKey, data);
+  return data;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -386,7 +416,13 @@ export async function fetchMemberEventsSince(
   if (!clean) return [];
   const out: UscfEventRef[] = [];
   for (let page = 0; page < pageCap; page++) {
-    const data = await fetchJson(`/members/${clean}/events?Offset=${page * pageSize}&Size=${pageSize}`);
+    const offset = page * pageSize;
+    const data = await cachedFetchJson(
+      "events",
+      `${clean}:${offset}:${pageSize}`,
+      EVENTS_LIST_TTL_MS,
+      `/members/${clean}/events?Offset=${offset}&Size=${pageSize}`
+    );
     const items: any[] = Array.isArray(data?.items) ? data.items : [];
     if (!items.length) break;
     let pageMax = "0";
@@ -408,7 +444,7 @@ interface SectionRef {
 }
 
 async function fetchEventSections(eventId: string): Promise<{ sections: SectionRef[]; startDate?: string; endDate?: string; name?: string }> {
-  const data = await fetchJson(`/rated-events/${eventId}`);
+  const data = await cachedFetchJson("event", eventId, EVENT_CACHE_TTL_MS, `/rated-events/${eventId}`);
   const sections: SectionRef[] = Array.isArray(data?.sections)
     ? data.sections.map((s: any) => ({ number: s.number, name: s.name }))
     : [];
@@ -426,7 +462,7 @@ interface SectionMeta {
 }
 
 async function fetchSectionMeta(eventId: string, number: number): Promise<SectionMeta | null> {
-  const s = await fetchJson(`/rated-events/${eventId}/sections/${number}`);
+  const s = await cachedFetchJson("section", `${eventId}/${number}`, EVENT_CACHE_TTL_MS, `/rated-events/${eventId}/sections/${number}`);
   if (!s) return null;
   return {
     isOnline: !!s.isOnline,
@@ -448,7 +484,12 @@ function colorFrom(raw: any): GameColor {
 
 /** Standings → roster of players with round-by-round games. */
 async function fetchSectionPlayers(eventId: string, number: number, rootId: string): Promise<UscfSectionPlayer[]> {
-  const data = await fetchJson(`/rated-events/${eventId}/sections/${number}/standings?Offset=0&Size=250`);
+  const data = await cachedFetchJson(
+    "crosstable",
+    `${eventId}/${number}`,
+    EVENT_CACHE_TTL_MS,
+    `/rated-events/${eventId}/sections/${number}/standings?Offset=0&Size=250`
+  );
   const items: any[] = Array.isArray(data?.items) ? data.items : [];
   const players: UscfSectionPlayer[] = [];
   for (const row of items) {
@@ -488,6 +529,18 @@ export interface BuildGraphOptions {
   maxSections?: number;
   /** Max candidate events to inspect. */
   maxEvents?: number;
+  /**
+   * Absolute wall-clock deadline (epoch ms) after which the build stops
+   * SCHEDULING new MUIR work and returns whatever it has gathered so far. This
+   * is the safeguard that keeps a graph build for a very active player from
+   * overrunning the Supabase edge function's own wall-clock limit — which used
+   * to get the isolate killed mid-build, so the function returned NOTHING and
+   * the client hung. With a deadline the caller always gets a (possibly partial)
+   * graph and can degrade gracefully. Omit for no limit (the Node CLI default).
+   */
+  deadlineMs?: number;
+  /** Called once if the deadline cut the build short (partial result). */
+  onTruncated?: () => void;
 }
 
 /**
@@ -505,6 +558,16 @@ export async function buildOnlineGraphForMember(
   // own wall-clock limit — these keep a full build comfortably inside it.
   const maxSections = opts.maxSections ?? 16;
   const maxEvents = opts.maxEvents ?? 100;
+  const deadline = opts.deadlineMs ?? Infinity;
+  let truncated = false;
+  const overBudget = (): boolean => {
+    if (Date.now() < deadline) return false;
+    if (!truncated) {
+      truncated = true;
+      opts.onTruncated?.();
+    }
+    return true;
+  };
 
   // Online-rated systems launched in 2020 — page back to that era (it can sit
   // many pages deep for active players) and ignore anything older.
@@ -537,11 +600,11 @@ export async function buildOnlineGraphForMember(
   // Concurrency 5 (was 2): the adaptive MUIR pacer is the real rate control —
   // these workers just keep requests IN FLIGHT so RTT overlaps the gap.
   const perEvent = await mapLimit(candidates, 5, async (ev): Promise<Found[]> => {
-    if (foundCount >= maxSections || (unnamedMisses >= 20 && !named.has(ev))) return [];
+    if (foundCount >= maxSections || (unnamedMisses >= 20 && !named.has(ev)) || overBudget()) return [];
     const { sections, startDate, endDate, name } = await fetchEventSections(ev.eventId);
     const evRef: UscfEventRef = { ...ev, name: ev.name || name || "", startDate: ev.startDate || startDate, endDate: ev.endDate || endDate };
     const metas = await mapLimit(sections, 3, async (sec) => {
-      if (foundCount >= maxSections) return null;
+      if (foundCount >= maxSections || overBudget()) return null;
       const meta = await fetchSectionMeta(ev.eventId, sec.number);
       return meta && meta.isOnline ? { ev: evRef, section: sec, meta } : null;
     });
@@ -555,6 +618,7 @@ export async function buildOnlineGraphForMember(
   // Phase 2: pull the crosstables IN PARALLEL — independent GETs, and the
   // adaptive muirThrottle keeps the actual request rate under MUIR's limit.
   const online = await mapLimit(foundSections, 5, async ({ ev, section, meta }): Promise<OnlineSection | null> => {
+    if (overBudget()) return null; // out of time — return the crosstables gathered so far
     const players = await fetchSectionPlayers(ev.eventId, section.number, member.id);
     if (!players.some((p) => p.isTarget)) return null; // target not actually here
     const evName = ev.name || "";
