@@ -289,6 +289,17 @@ const ONLINE_NAME_RE =
 const nameForMatch = (s: string) => s.replace(/_/g, " ");
 export const looksOnline = (name: string) => ONLINE_NAME_RE.test(nameForMatch(name));
 
+/** MUIR's online rating systems (OR/OQ/OB, introduced in the 2020 online-play
+ *  era). A section rated under any of these IS an online section — the
+ *  authoritative signal, independent of the event's TITLE and independent of
+ *  MUIR's own (occasionally absent) per-section `isOnline` flag. Determining
+ *  online status from the rating TYPE — not name keywords — is what lets online
+ *  events whose titles give no hint (e.g. "2021 US JUNIOR CHESS CONGRESS") into
+ *  the graph instead of being silently dropped. */
+const ONLINE_RATING_SYSTEMS = new Set(["OR", "OQ", "OB"]);
+export const isOnlineRatingSystem = (rs?: string): boolean =>
+  !!rs && ONLINE_RATING_SYSTEMS.has(rs.trim().toUpperCase());
+
 function platformGuess(text: string): string | undefined {
   if (/lichess/i.test(text)) return "lichess";
   if (/chess\.?com/i.test(text)) return "chesscom";
@@ -587,30 +598,33 @@ export async function buildOnlineGraphForMember(
 
   // Phase 1: find which sections are actually online. Concurrency 4 hides
   // MUIR's per-request latency without raising the request RATE — every call
-  // still queues behind muirThrottle's global spacing — plus early stopping:
-  // named events are near-certain hits, and once the unnamed scan keeps
-  // missing there is no point burning MUIR's rate limit further.
+  // still queues behind muirThrottle's global spacing. There is deliberately NO
+  // name-based early stopping: an event's TITLE is not evidence of whether it
+  // was online-rated (that dropped whole online events whose names give no
+  // hint), so EVERY candidate is inspected and a section counts as online when
+  // MUIR flags it OR when it carries an online rating system (OR/OQ/OB). The
+  // only ceilings are the section cap (maxSections) and the wall-clock deadline
+  // (overBudget) — request-count bounds, not title filters.
   interface Found {
     ev: UscfEventRef;
     section: SectionRef;
     meta: SectionMeta;
   }
   let foundCount = 0;
-  let unnamedMisses = 0;
   // Concurrency 5 (was 2): the adaptive MUIR pacer is the real rate control —
   // these workers just keep requests IN FLIGHT so RTT overlaps the gap.
   const perEvent = await mapLimit(candidates, 5, async (ev): Promise<Found[]> => {
-    if (foundCount >= maxSections || (unnamedMisses >= 20 && !named.has(ev)) || overBudget()) return [];
+    if (foundCount >= maxSections || overBudget()) return [];
     const { sections, startDate, endDate, name } = await fetchEventSections(ev.eventId);
     const evRef: UscfEventRef = { ...ev, name: ev.name || name || "", startDate: ev.startDate || startDate, endDate: ev.endDate || endDate };
     const metas = await mapLimit(sections, 3, async (sec) => {
       if (foundCount >= maxSections || overBudget()) return null;
       const meta = await fetchSectionMeta(ev.eventId, sec.number);
-      return meta && meta.isOnline ? { ev: evRef, section: sec, meta } : null;
+      const online = !!meta && (meta.isOnline || isOnlineRatingSystem(meta.ratingSystem));
+      return online ? { ev: evRef, section: sec, meta: meta! } : null;
     });
     const found = metas.filter((x): x is Found => !!x);
     foundCount += found.length;
-    if (!found.length && !named.has(ev)) unnamedMisses++;
     return found;
   });
   const foundSections = perEvent.flat().slice(0, maxSections);

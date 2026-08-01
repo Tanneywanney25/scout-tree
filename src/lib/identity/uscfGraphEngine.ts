@@ -3409,19 +3409,81 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // Main loop: every online event, worked by a pool of EVENT AGENTS in the
   // most promising order — several events get the full treatment at once.
   // ---------------------------------------------------------------------------
-  const events = [...graph.onlineEvents].sort((a, b) => {
-    // Traceable platform first (icc/chesskid have no public API), then small
-    // sections (rosters + elimination bite harder), then recency.
-    const rank = (e: GraphEvent) => {
-      const g = (e.platformGuess || "").toLowerCase();
-      if (g === "chesscom" || g === "lichess") return 0;
-      if (g === "icc" || g === "chesskid") return 2;
-      return 1;
-    };
-    if (rank(a) !== rank(b)) return rank(a) - rank(b);
-    if (a.players.length !== b.players.length) return a.players.length - b.players.length;
-    return (b.startDate || "").localeCompare(a.startDate || "");
-  });
+  // Traceable platform first (icc/chesskid have no public API), then small
+  // sections (rosters + elimination bite harder), then recency.
+  const eventRank = (e: GraphEvent): number => {
+    const g = (e.platformGuess || "").toLowerCase();
+    if (g === "chesscom" || g === "lichess") return 0;
+    if (g === "icc" || g === "chesskid") return 2;
+    return 1;
+  };
+  const sortEvents = (list: GraphEvent[]): GraphEvent[] =>
+    list.sort((a, b) => {
+      if (eventRank(a) !== eventRank(b)) return eventRank(a) - eventRank(b);
+      if (a.players.length !== b.players.length) return a.players.length - b.players.length;
+      return (b.startDate || "").localeCompare(a.startDate || "");
+    });
+  const events = sortEvents([...graph.onlineEvents]);
+
+  // ---------------------------------------------------------------------------
+  // Early platform discovery — pin the host platform of EVERY event whose
+  // platform we don't already know, up front and CONCURRENTLY, before any
+  // expensive traversal work. discover() is memoized per event, so the platform
+  // search each event would run later (in workEvent) is now instant. Knowing
+  // every platform up front answers the one question that decides whether the
+  // tournament-graph approach can work at all: does the target have any
+  // TRACEABLE event? Chess.com and Lichess expose public game/tournament APIs
+  // whose data we can align crosstable rounds against; ICC, ChessKid and
+  // unknown hosts do not. With zero traceable events there is nothing for the
+  // event loop or the opponent pivot to align — they can only burn minutes on
+  // shard failures — so we skip both and let the caller fall straight through
+  // to the Google-index / school / name-search fallback.
+  // ---------------------------------------------------------------------------
+  const platformFromInfo = (info: EventPlatformInfo | null): string | undefined => {
+    if (!info) return undefined;
+    if (info.platform && info.platform !== "unknown") return info.platform;
+    if (info.chesscomSlugs?.length) return "chesscom";
+    if (info.lichessSwissIds?.length || info.lichessArenaIds?.length) return "lichess";
+    return undefined;
+  };
+  const platformKnown = (e: GraphEvent): boolean => {
+    const g = (e.platformGuess || "").toLowerCase();
+    return g === "chesscom" || g === "lichess" || g === "icc" || g === "chesskid";
+  };
+  /** A traceable event ran on a platform with a public game API (Chess.com or
+   *  Lichess) — the only events whose games the pivot can pull and align. */
+  const isTraceableEvent = (e: GraphEvent): boolean => {
+    const g = (e.platformGuess || "").toLowerCase();
+    return g === "chesscom" || g === "lichess";
+  };
+  // Bulk discovery + the traceability gate belong to the TOP-LEVEL target
+  // search only. A pivot dive (depth 1) recurses on an opponent's whole graph;
+  // front-loading discovery for every one of their events would add latency,
+  // and the dive already self-limits via its budget and the parent's stopWhen —
+  // so a dive keeps the original lazy, per-event discovery and always runs.
+  if (hooks.discoverPlatform && depth === 0) {
+    const unknownEvents = events.filter((e) => !platformKnown(e));
+    if (unknownEvents.length) {
+      log(`Discovering the host platform of ${unknownEvents.length} event(s) up front to see which are traceable before committing to a full trace…`);
+      await pool(
+        unknownEvents,
+        3,
+        async (ev) => {
+          if (outOfTime()) return;
+          const p = platformFromInfo(await discover(ev));
+          if (p) ev.platformGuess = p;
+        },
+        outOfTime
+      );
+      sortEvents(events); // re-rank now that more platforms are known
+    }
+  }
+  const hasTraceableEvents = depth > 0 || events.some(isTraceableEvent);
+  if (!hasTraceableEvents) {
+    log(
+      `None of ${targetName}'s ${events.length} online event(s) ran on Chess.com or Lichess — the only platforms with a public game API to align crosstable rounds against (the rest are ICC / ChessKid / unknown). Skipping the event loop and the opponent pivot and handing off to the Google-index / school / name-search fallback.`
+    );
+  }
 
   /** Fire the flyer/web search for upcoming unknown-platform events NOW so an
    *  event never has to sit and wait for it when its turn comes (memoized —
@@ -3438,7 +3500,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
   // The target's own Google-index search is the single highest-value lookup —
   // start it immediately so its leads are ready when the first event asks.
-  if (hooks.findUsernames && events.length && (appearances.get(targetId) || []).length) {
+  if (hooks.findUsernames && hasTraceableEvents && events.length && (appearances.get(targetId) || []).length) {
     void googleCandidatesFor(targetId, events[0]);
   }
 
@@ -3470,7 +3532,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     for (const per of mapped.values()) n += per.size;
     return n;
   };
-  for (let pass = 0; pass < 12 && !found && !outOfTime(mainDeadline); pass++) {
+  for (let pass = 0; pass < 12 && !found && !outOfTime(mainDeadline) && hasTraceableEvents; pass++) {
     const pending = events.filter((e) => !workStates.get(e.eventId)?.exhausted);
     if (!pending.length) break;
     const beforeMapped = mappedTotal();
@@ -3544,12 +3606,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // target directly); other section players second (their chains still reach
   // the target through the pairing frontier).
   // ---------------------------------------------------------------------------
-  if (!found && depth === 0 && hooks.expandMember && deadline - Date.now() <= 35_000) {
+  if (hasTraceableEvents && !found && depth === 0 && hooks.expandMember && deadline - Date.now() <= 35_000) {
     log(
       `No time left for the opponent-pivot stage (${Math.max(0, Math.round((deadline - Date.now()) / 1000))}s remaining) — a bigger budget would let it run.`
     );
   }
-  if (!found && depth === 0 && hooks.expandMember && deadline - Date.now() > 35_000) {
+  if (hasTraceableEvents && !found && depth === 0 && hooks.expandMember && deadline - Date.now() > 35_000) {
     const deepStop = () => found || outOfTime() || deadline - Date.now() < 25_000;
     const RANK_WINDOW = 8; // graphs fetched per ranking window (MUIR-paced) — small enough that the first dives start fast
 
@@ -3608,9 +3670,13 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           };
         }
         setMapping(oppId, platform, { profile: prof, how: "deep", chain: [] });
-        // Trace the shared events from this hard-won seed.
+        // Trace the shared events from this hard-won seed — but only the
+        // TRACEABLE ones: an ICC/ChessKid/unknown shared event has no public
+        // games to pull, so pulling and aligning it only burns time on shard
+        // failures without ever naming the target.
         for (const app of appearances.get(oppId) || []) {
           if (found || outOfTime()) break;
+          if (!isTraceableEvent(app.event)) continue;
           if (!(appearances.get(targetId) || []).some((ta) => ta.event.eventId === app.event.eventId)) continue;
           const state: EventState = { links: new Map(), junkLinks: new Set(), linkSources: new Map(), frontier: [], visited: new Set(), oppSeen: new Map() };
           if (await traceFromSource(app.event, state, oppId, platform, mapped.get(oppId)!.get(platform)!, deadline)) found = true;
@@ -3704,9 +3770,19 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       }
     };
 
+    // Only pivot through players who share a TRACEABLE event with the target:
+    // a chain can only reach the target across an event whose games we can pull
+    // and align, so a player met solely in an ICC/ChessKid/unknown event is a
+    // dead end no matter how rich their own online history is.
+    const targetTraceableEventIds = new Set(
+      (appearances.get(targetId) || []).filter((a) => isTraceableEvent(a.event)).map((a) => a.event.eventId)
+    );
+    const sharesTraceableEvent = (id: string): boolean =>
+      (appearances.get(id) || []).some((a) => targetTraceableEventIds.has(a.event.eventId));
+
     // Ring 1: unresolved direct opponents — their own games name the target.
     const ring1 = Array.from(directOpponents)
-      .filter((id) => !mapped.has(id))
+      .filter((id) => !mapped.has(id) && sharesTraceableEvent(id))
       .sort((a, b) => (appearances.get(b)?.length || 0) - (appearances.get(a)?.length || 0));
     if (ring1.length) {
       log(
@@ -3719,7 +3795,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     // direct ring genuinely exhausted with time to spare.
     if (!found && !deepStop() && deadline - Date.now() > 60_000) {
       const ring2 = Array.from(memberName.keys())
-        .filter((id) => id !== targetId && !directOpponents.has(id) && !mapped.has(id))
+        .filter((id) => id !== targetId && !directOpponents.has(id) && !mapped.has(id) && sharesTraceableEvent(id))
         .sort((a, b) => (appearances.get(b)?.length || 0) - (appearances.get(a)?.length || 0))
         .slice(0, 24);
       if (ring2.length) {
