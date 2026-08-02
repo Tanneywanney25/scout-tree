@@ -517,6 +517,133 @@ function chesscomOutcome(myResult?: string, oppResult?: string): Outcome | undef
   return undefined;
 }
 
+/** setTimeout that also resolves the instant the search is aborted, so a
+ *  cancelled hunt never sits out a full backoff. */
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+/** Parse a batch of raw Chess.com game objects into `ArchiveGame`s from ONE
+ *  player's perspective. Shared by the monthly-archive reader and the
+ *  tournament-bracket fallback (the /pub/tournament group `games` objects have
+ *  the exact same shape as monthly-archive games). Games the handle didn't play
+ *  in are skipped — which is what makes it usable over a whole tournament's
+ *  mixed game list, not just a single player's archive. */
+function parseChesscomGamesFor(games: unknown, uLower: string): ArchiveGame[] {
+  const out: ArchiveGame[] = [];
+  for (const g of Array.isArray(games) ? games : []) {
+    const wU = g.white?.username?.toLowerCase();
+    const bU = g.black?.username?.toLowerCase();
+    // In a monthly archive uLower is always a participant; in a tournament game
+    // list most games aren't theirs, so skip anything they didn't play.
+    if (wU !== uLower && bU !== uLower) continue;
+    const sourceColor: "white" | "black" = wU === uLower ? "white" : "black";
+    const me = sourceColor === "white" ? g.white : g.black;
+    const them = sourceColor === "white" ? g.black : g.white;
+    const opp = them?.username;
+    if (!opp || opp.toLowerCase() === uLower) continue;
+    const clock = chesscomClock(g.time_control);
+    out.push({
+      oppHandle: opp,
+      sourceColor,
+      sourceOutcome: chesscomOutcome(me?.result, them?.result),
+      endMs: (g.end_time || 0) * 1000,
+      rated: g.rated !== false,
+      timeClass: g.time_class,
+      baseSecs: clock?.baseSecs,
+      incSecs: clock?.incSecs,
+      url: g.url,
+      chesscomTournament: typeof g.tournament === "string" ? g.tournament : undefined,
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Chess.com TOURNAMENT-BRACKET game source — the shard-proof fallback.
+//
+// The monthly archive shards (/pub/player/{u}/games/{y}/{m}) intermittently
+// 5xx, and a failed month is a HOLE that can break a pairing chain. But most
+// USCF online events ran as a concrete Chess.com tournament, and that
+// tournament's games live on a DIFFERENT set of endpoints
+// (/pub/tournament/{id} → rounds → groups → games) served off different
+// infrastructure. When a player's month shard is failing, we can pull the
+// event's tournament bracket instead and recover exactly the games we need —
+// no monthly archive involved. There is NO /pub/tournament/{id}/games endpoint
+// (verified against the Chess.com PubAPI docs); the games are nested under
+// rounds and groups, so we walk them once per tournament, memoize the whole
+// game list, and parse each requesting player's slice out of it.
+//
+// Bounded on purpose: a giant Swiss could otherwise fan out into hundreds of
+// group GETs, which would defeat the point (avoiding load). We cap the walk and
+// log when it truncates.
+// ---------------------------------------------------------------------------
+
+const TOURNEY_MAX_REQUESTS = 40; // hard cap on GETs per tournament walk (incl. the root)
+const tournamentGamesCache = new Map<string, Promise<unknown[]>>();
+
+/** Every raw game object in a Chess.com tournament bracket, memoized per slug.
+ *  Walks /pub/tournament/{slug} → each round → each group, collecting the
+ *  `games` arrays. Fails soft to whatever it has gathered (an empty array on a
+ *  total failure), so a caller can only ever GAIN games from it, never lose
+ *  the behaviour it already had. */
+function fetchChesscomTournamentGames(slugOrUrl: string, signal?: AbortSignal): Promise<unknown[]> {
+  const slug = chesscomSlug(slugOrUrl);
+  const hit = tournamentGamesCache.get(slug);
+  if (hit) return hit;
+  const p = (async (): Promise<unknown[]> => {
+    const games: unknown[] = [];
+    let budget = TOURNEY_MAX_REQUESTS;
+    const getJson = async (url: string): Promise<Record<string, unknown> | null> => {
+      if (budget <= 0 || signal?.aborted) return null;
+      budget--;
+      try {
+        const res = await politeFetch(url, { headers: { Accept: "application/json" }, signal }, "chesscom", 20_000);
+        if (!res.ok) return null;
+        return (await res.json()) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    };
+    try {
+      const root = await getJson(`https://api.chess.com/pub/tournament/${encodeURIComponent(slug)}`);
+      const rounds = Array.isArray(root?.rounds) ? (root!.rounds as string[]) : [];
+      for (const roundUrl of rounds) {
+        if (budget <= 0 || signal?.aborted) break;
+        const round = await getJson(typeof roundUrl === "string" ? roundUrl : "");
+        if (!round) continue;
+        // A round holds either group URLs (larger tournaments) or games directly.
+        if (Array.isArray(round.games)) games.push(...(round.games as unknown[]));
+        const groups = Array.isArray(round.groups) ? (round.groups as string[]) : [];
+        for (const groupUrl of groups) {
+          if (budget <= 0 || signal?.aborted) break;
+          const group = await getJson(typeof groupUrl === "string" ? groupUrl : "");
+          if (Array.isArray(group?.games)) games.push(...(group!.games as unknown[]));
+        }
+      }
+    } catch {
+      /* fall through with whatever we gathered */
+    }
+    return games;
+  })();
+  tournamentGamesCache.set(slug, p);
+  // Never remember a walk that gathered nothing (a transient failure) — a later
+  // caller past the hiccup should get a real attempt.
+  void p.then((g) => {
+    if (!g.length && tournamentGamesCache.get(slug) === p) tournamentGamesCache.delete(slug);
+  });
+  return p;
+}
+
 /** One player's full Chess.com archive for one month, memoized in `cache` so
  *  overlapping event windows never refetch the same month.
  *
@@ -535,6 +662,8 @@ function chesscomOutcome(myResult?: string, oppResult?: string): Outcome | undef
  *      instead of re-fetching — a hard-down shard must not be re-hammered
  *      with full backoff by every judgment that touches its window. */
 const MONTH_FAIL_COOLDOWN_MS = 45_000;
+/** In-place retry backoff for a flaking shard: 1s, then 3s, then 10s. */
+const SHARD_BACKOFF_MS = [1000, 3000, 10000];
 
 function chesscomMonthGames(
   username: string,
@@ -586,8 +715,13 @@ function chesscomMonthGames(
           failedMonths?.delete(key);
           return [];
         }
-        if (attempt < 2 && !signal?.aborted) {
-          await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        // Exponential backoff (1s → 3s → 10s) instead of the old linear
+        // 1.5s/3s: a flaking shard needs time to recover, and hammering it on a
+        // tight cadence just extends the outage. Abort-aware so a cancelled
+        // search never sits out a 10s wait.
+        if (attempt < SHARD_BACKOFF_MS.length && !signal?.aborted) {
+          await abortableDelay(SHARD_BACKOFF_MS[attempt], signal);
+          if (signal?.aborted) return giveUp();
           continue;
         }
         return giveUp();
@@ -598,29 +732,7 @@ function chesscomMonthGames(
       } catch {
         return giveUp(); // corrupt body — treat as the same transient hole
       }
-      const out: ArchiveGame[] = [];
-      for (const g of Array.isArray(data.games) ? data.games : []) {
-        const endT = (g.end_time || 0) * 1000;
-        const wU = g.white?.username?.toLowerCase();
-        const sourceColor: "white" | "black" = wU === uLower ? "white" : "black";
-        const me = sourceColor === "white" ? g.white : g.black;
-        const them = sourceColor === "white" ? g.black : g.white;
-        const opp = them?.username;
-        if (!opp || opp.toLowerCase() === uLower) continue;
-        const clock = chesscomClock(g.time_control);
-        out.push({
-          oppHandle: opp,
-          sourceColor,
-          sourceOutcome: chesscomOutcome(me?.result, them?.result),
-          endMs: endT,
-          rated: g.rated !== false,
-          timeClass: g.time_class,
-          baseSecs: clock?.baseSecs,
-          incSecs: clock?.incSecs,
-          url: g.url,
-          chesscomTournament: typeof g.tournament === "string" ? g.tournament : undefined,
-        });
-      }
+      const out = parseChesscomGamesFor(data.games, uLower);
       failedMonths?.delete(key);
       return out;
     }
@@ -1528,6 +1640,40 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     junkLinks: Set<string>;
     linkSources: Map<string, Set<string>>;
   }
+
+  /** The event's TRUSTED chess.com tournament link ids — the shard-proof game
+   *  source when the monthly archive is failing (see tournamentHoleGames). */
+  const trustedChesscomSlugs = (state: LinkState | undefined): string[] =>
+    state
+      ? Array.from(state.links.values())
+          .filter((l) => l.kind === "chesscom-tournament" && !state.junkLinks.has(linkKey(l)) && linkTrusted(state, l))
+          .map((l) => l.id)
+      : [];
+
+  /** Recover a handle's [startMs,endMs] games from the event's chess.com
+   *  TOURNAMENT bracket instead of the monthly archive. Called ONLY when the
+   *  monthly shard is a HOLE, so it is purely additive — it can turn a hole into
+   *  recovered games but never removes correct data. The bracket lives on
+   *  different endpoints/infra than the flaking monthly shards. Games with no
+   *  end_time are kept (they are the event's own tournament games by
+   *  construction); timed games are still window-filtered as a guard. */
+  const tournamentHoleGames = async (
+    slugs: string[],
+    handle: string,
+    startMs: number,
+    endMs: number
+  ): Promise<ArchiveGame[]> => {
+    const hLower = handle.toLowerCase();
+    for (const slug of slugs) {
+      if (signal?.aborted) break;
+      const raw = await fetchChesscomTournamentGames(slug, signal);
+      const mine = parseChesscomGamesFor(raw, hLower)
+        .filter((g) => g.endMs === 0 || (g.endMs >= startMs && g.endMs <= endMs))
+        .sort((a, b) => a.endMs - b.endMs);
+      if (mine.length) return mine;
+    }
+    return [];
+  };
 
   /** Scope archive games to an event: the best-fitting TRUSTED tournament
    *  link, else the event's exact time control, else its expected time
@@ -2715,7 +2861,24 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const srcName = memberName.get(memberId) || "player";
     const handle = mapping.profile.username;
     log(`Pulling @${handle}'s (${srcName}) ${platformLabel(platform)} games from the "${ev.name}" date window…`);
-    const games = await windowGames(platform, handle, app.startMs, app.endMs);
+    let games = await windowGames(platform, handle, app.startMs, app.endMs);
+    // Shard-proof fallback: a failing monthly-archive shard leaves a HOLE that
+    // breaks the pairing chain, but most of these events ran as a concrete
+    // Chess.com tournament whose games live on separate endpoints/infra. When
+    // the event has a TRUSTED chess.com tournament link, recover this handle's
+    // games straight from the bracket instead of surfacing the hole.
+    if (!games.length && platform === "chesscom" && archiveHole(platform, handle, app.startMs, app.endMs)) {
+      const slugs = trustedChesscomSlugs(state);
+      if (slugs.length) {
+        const recovered = await tournamentHoleGames(slugs, handle, app.startMs, app.endMs);
+        if (recovered.length) {
+          log(
+            `Recovered ${recovered.length} of @${handle}'s (${srcName}) "${ev.name}" game(s) from the Chess.com tournament bracket — routing around the failing monthly-archive shard.`
+          );
+          games = recovered;
+        }
+      }
+    }
     if (!games.length) {
       if (archiveHole(platform, handle, app.startMs, app.endMs)) {
         // The shard failed — we know NOTHING about this window. Blacklisting
