@@ -43,3 +43,4 @@ verify_jwt = false
 
 [functions.resolve-identity]
 verify_jwt = false
+region = "us-east-2"   
