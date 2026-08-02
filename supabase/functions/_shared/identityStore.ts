@@ -85,6 +85,80 @@ export async function cachePut(kind: MuirCacheKind, key: string, payload: unknow
 }
 
 // ---------------------------------------------------------------------------
+// event_platform_cache — persistent "which platform hosted this USCF event"
+// answers (see migrations/20260801000000_event_platform_cache.sql). Pinning an
+// event's platform costs a grounded AI web-search; the answer is immutable and
+// shared by everyone who played the event, so caching it once turns a 2-4s
+// discovery into an instant DB read reused across every future search. The
+// whole discovery payload is stored so a hit reproduces the roster shortcut's
+// tournament slugs / swiss ids, not just the platform label.
+// ---------------------------------------------------------------------------
+
+export interface EventPlatformRow {
+  platform: string;
+  /** The full DiscoveredEventInfo payload (platform + slugs/ids/confidence/note). */
+  info?: unknown;
+  source?: string;
+}
+
+/** A cached platform for the event, or null on miss / expiry / store error.
+ *  The TTL is enforced server-side (expires_at > now), so an expired row reads
+ *  as a miss and the caller re-runs discovery. Fails soft everywhere. */
+export async function getEventPlatform(eventId: string): Promise<EventPlatformRow | null> {
+  const rest = supabaseRest();
+  const id = (eventId || "").trim();
+  if (!rest || !id) return null;
+  try {
+    const res = await fetch(
+      `${rest.url}/rest/v1/event_platform_cache?event_id=eq.${encodeURIComponent(id)}&expires_at=gt.${encodeURIComponent(
+        new Date().toISOString()
+      )}&select=platform,info,source&limit=1`,
+      { headers: headers(rest.key) }
+    );
+    if (!res.ok) return null;
+    const rows = (await res.json()) as EventPlatformRow[];
+    const row = Array.isArray(rows) ? rows[0] : undefined;
+    return row && typeof row.platform === "string" ? row : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Upsert an event's resolved platform + full discovery payload. Refreshes the
+ *  1-year TTL on write. Fire-and-forget: the boolean is for logs only. */
+export async function putEventPlatform(
+  eventId: string,
+  platform: string,
+  info: unknown,
+  source = "web_search"
+): Promise<boolean> {
+  const rest = supabaseRest();
+  const id = (eventId || "").trim();
+  if (!rest || !id || !platform) return false;
+  try {
+    const now = Date.now();
+    const res = await fetch(`${rest.url}/rest/v1/event_platform_cache?on_conflict=event_id`, {
+      method: "POST",
+      headers: headers(rest.key, {
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal",
+      }),
+      body: JSON.stringify({
+        event_id: id,
+        platform,
+        info: info ?? null,
+        source,
+        fetched_at: new Date(now).toISOString(),
+        expires_at: new Date(now + 365 * 86_400_000).toISOString(),
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // resolved_handles
 // ---------------------------------------------------------------------------
 

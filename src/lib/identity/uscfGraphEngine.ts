@@ -108,7 +108,15 @@ const EVENT_AGENTS = 4; // events worked concurrently
 const TRACE_AGENTS = 3; // pairing tracers per event (frontier drained in parallel)
 const SEED_AGENTS = 6; // seed scouts per event (members resolved in parallel)
 const VERIFY_POOL = 8; // concurrent candidate verifications per scan
-const DEEP_AGENTS = 3; // opponents expanded concurrently in the deep phase
+const DEEP_AGENTS = 3; // opponents DIVED (full sub-traversal) concurrently in the deep phase
+// Opponent GRAPH fetches (expandMember → MUIR, now served from muir_cache in
+// well under 50ms on a warm cache) are cheap, independent, and — unlike the
+// dives — never touch the Chess.com gate or the Lichess pacer, so they can burst
+// far wider than the dives themselves. Ranking a window of opponents used to
+// crawl at DEEP_AGENTS=3; fetching a whole window at once collapses the
+// pivot's ranking latency from ~10s to under 2s. A genuine cache MISS falls
+// back to a live MUIR fetch, which the edge function's own budget throttles.
+const EXPAND_AGENTS = 12; // opponent graphs fetched concurrently while ranking a pivot window
 const DISCOVER_LOOKAHEAD = 2; // upcoming events whose flyer search is prefetched
 const DAY = 86_400_000;
 
@@ -1487,6 +1495,24 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     return { score: scoreFromEvidence(evi, 0), evidence: evi };
   };
 
+  /** A conservative pre-archive reject for a NAME-derived (name-guess /
+   *  autocomplete / low-corroboration Google-lead) candidate: the profile
+   *  CONFIDENTLY contradicts the USCF record on TWO independent hard signals at
+   *  once — a foreign country AND a rating gap far beyond any USCF↔online offset
+   *  (>1000). Either signal alone is DELIBERATELY not fatal here (online ratings
+   *  routinely sit many hundreds of points off the USCF number — see
+   *  onlineRatingMatchWeight — and a verified WA junior was once observed flying
+   *  a Canada flag), so requiring BOTH keeps this from ever rejecting a real
+   *  account while still skipping the costly archive pull for the unmistakable
+   *  same-name-stranger case (e.g. a 500-rated account in India for a
+   *  2000-rated US member). Only used for name-derived seeds; structural paths
+   *  (roster, pairing, a published USCF/FIDE id) are never gated on it. */
+  const clearlyWrongPerson = (memberRating: number | undefined, prof: VerifiedProfile): boolean => {
+    const foreign = isForeignCountry(prof.country);
+    const bigRatingGap = !!memberRating && !!prof.rating && Math.abs(memberRating - prof.rating) > 1000;
+    return foreign && bigRatingGap;
+  };
+
   /** Is this link PROVEN to be the event's own tournament? Flyer-sourced
    *  links are, by construction. A games-derived link needs TWO distinct
    *  crosstable members' window games tying to it: one source alone can be a
@@ -1705,7 +1731,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         // Prefetch every shortlisted lead's window games at once (windowGames
         // is memoized, so this is pure overlap), then JUDGE them strictly
         // best-attribute-first — identical accept order to the serial scan.
-        const shortlist = scored.filter((s) => s.score >= ATTR_SHORTLIST);
+        // Early rejection: a lead whose profile is a clear same-name stranger
+        // (foreign country AND a >1000pt rating gap) is dropped BEFORE its
+        // archive is pulled — the single most expensive step per candidate.
+        const shortlist = scored.filter(
+          (s) => s.score >= ATTR_SHORTLIST && !clearlyWrongPerson(memberRating.get(memberId), s.prof)
+        );
         for (const s of shortlist) void windowGames(platform, s.prof.username, win.startMs, win.endMs);
 
         let fallback: VerifiedProfile | null = null;
@@ -1795,6 +1826,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           VERIFY_POOL,
           async (prof, order) => {
             if (stopHere()) return;
+            // Early rejection: a name-match that is a clear same-name stranger
+            // (foreign country AND a >1000pt rating gap) never justifies pulling
+            // its archives — skip before the fetch. Name-gating already passed,
+            // so this only fires on the unmistakable wrong-person case.
+            if (clearlyWrongPerson(memberRating.get(memberId), prof)) {
+              log(
+                `Name-guess @${prof.username} (${name}) shows a foreign country and a >1000pt rating gap — a same-name stranger; skipping without an archive pull.`
+              );
+              return;
+            }
             const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
             // A window spanning a failed month/export is a HOLE: even a
             // NON-EMPTY result can be missing exactly the event games, so a
@@ -3597,14 +3638,22 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // ---------------------------------------------------------------------------
   // OPPONENT-PIVOT phase: the target's own account never fell out of their
   // events directly. Before any caller falls back to a platform name search
-  // (the namesake trap), do what a careful human does by hand: rank the OTHER
-  // players in the target's tournaments by how much online tournament history
-  // of their OWN they have (most online events = most likely to have a
-  // discoverable, well-connected account), resolve the strongest one's
-  // username with the full engine, then read the target off the other side of
-  // their shared event games. Direct opponents first (their games contain the
-  // target directly); other section players second (their chains still reach
-  // the target through the pairing frontier).
+  // (the namesake trap), do what a careful human does by hand: resolve some
+  // OTHER player in the target's tournaments with the full engine, then read
+  // the target off the other side of their shared event games.
+  //
+  // The pivot only needs ONE opponent to resolve-and-reveal, and the first
+  // crown ends the whole search — so it races to a quick win rather than
+  // grinding the single biggest opponent. Candidates are worked SIMPLEST-FIRST:
+  // fewest traceable events shared with the target (a smaller crosstable to
+  // back-trace, and a correlated shallower own graph), then — once each
+  // window's own graphs are fetched — smallest online history first. The old
+  // "biggest, best-connected opponent first" ordering maximised discoverability
+  // per opponent but regularly spent the entire budget on one deep dive; racing
+  // the small graphs reaches a first crown far sooner on the typical target.
+  // Direct opponents first (their games contain the target directly); other
+  // section players second (their chains still reach the target through the
+  // pairing frontier).
   // ---------------------------------------------------------------------------
   if (hasTraceableEvents && !found && depth === 0 && hooks.expandMember && deadline - Date.now() <= 35_000) {
     log(
@@ -3613,7 +3662,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   }
   if (hasTraceableEvents && !found && depth === 0 && hooks.expandMember && deadline - Date.now() > 35_000) {
     const deepStop = () => found || outOfTime() || deadline - Date.now() < 25_000;
-    const RANK_WINDOW = 8; // graphs fetched per ranking window (MUIR-paced) — small enough that the first dives start fast
+    const RANK_WINDOW = 12; // graphs fetched per ranking window — a full EXPAND_AGENTS burst, so a window is ranked in one round-trip
 
     /** Resolve one pivot candidate's own username, then trace shared events. */
     const divePivot = async (oppId: string, sub: TournamentGraph, ownEvents: number): Promise<void> => {
@@ -3702,22 +3751,22 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       }
     };
 
-    /** Rank a candidate ring by REAL online volume (own graphs, windowed so a
-     *  long list doesn't fetch everything before the first dive), dive best
-     *  first. While one window DIVES (platform-bound work), the next window's
-     *  graphs are already FETCHING (MUIR-bound work) — the two use disjoint
-     *  resources, so the overlap hides the ranking latency entirely. */
+    /** Fetch a candidate window's own graphs (an EXPAND_AGENTS-wide burst, so
+     *  the whole window ranks in ~one round-trip against the warm muir_cache),
+     *  then dive SMALLEST-graph-first. While one window DIVES (platform-bound
+     *  work), the next window's graphs are already FETCHING (MUIR-bound work) —
+     *  the two use disjoint resources, so the overlap hides ranking latency. */
     const fetchRankWindow = async (ids: string[]): Promise<Map<string, TournamentGraph | null>> => {
       const graphs = new Map<string, TournamentGraph | null>();
       await pool(
         ids,
-        DEEP_AGENTS,
+        EXPAND_AGENTS, // cache-cheap MUIR fetches burst wide (they bypass the platform gates); the dives below stay at DEEP_AGENTS
         async (id) => {
           if (deepStop()) return;
           const g = await hooks.expandMember!(id).catch(() => null);
           graphs.set(id, g);
-          // Narrate each fetch: the ranking window can take a while (MUIR
-          // paced) and a silent stretch reads as a wedged engine upstream.
+          // Narrate each fetch: even a wide burst can take a moment on a cold
+          // muir_cache, and a silent stretch reads as a wedged engine upstream.
           log(
             `Pivot: ${memberName.get(id) || id} has ${g?.onlineEvents.length || 0} online event(s) of their own${
               g?.onlineEvents.length ? "" : " — not a useful pivot"
@@ -3750,13 +3799,19 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             return { id, g, events, rounds };
           })
           .filter((r): r is typeof r & { g: TournamentGraph } => !!r.g && r.events > 0)
-          .sort((a, b) => b.events - a.events || b.rounds - a.rounds);
+          // SMALLEST graph first: a shallower own-history resolves fastest, and
+          // the FIRST opponent whose games reveal the target ends the whole
+          // hunt — so racing to a quick resolution beats grinding the biggest,
+          // best-connected opponent (which regularly ate the entire budget).
+          // The window is already ordered fewest-traceable-shared-events-first
+          // (see ring construction); this breaks ties by own online volume.
+          .sort((a, b) => a.events - b.events || a.rounds - b.rounds);
         if (!ranked.length) continue;
         log(
           `Pivot ranking (${ring}): ${ranked
             .slice(0, 5)
             .map((r) => `${memberName.get(r.id) || r.id} — ${r.events} event(s)/${r.rounds} game(s)`)
-            .join("; ")}${ranked.length > 5 ? "; …" : ""} — working the best-connected first.`
+            .join("; ")}${ranked.length > 5 ? "; …" : ""} — working the smallest, fastest-to-resolve graphs first.`
         );
         await pool(
           ranked,
@@ -3779,14 +3834,24 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     );
     const sharesTraceableEvent = (id: string): boolean =>
       (appearances.get(id) || []).some((a) => targetTraceableEventIds.has(a.event.eventId));
+    // How many TRACEABLE events a member shares with the target — the pivot's
+    // primary priority. Fewer shared traceable events ⇒ a smaller crosstable to
+    // back-trace and (correlated) a shallower own graph to resolve ⇒ the fastest
+    // path to a first crown, which ends the search. Ties break toward the fewest
+    // total shared events. Both ASCENDING: simplest opponents first.
+    const traceableSharedCount = (id: string): number =>
+      (appearances.get(id) || []).filter((a) => targetTraceableEventIds.has(a.event.eventId)).length;
+    const totalSharedCount = (id: string): number => (appearances.get(id) || []).length;
+    const bySimplestPivot = (a: string, b: string): number =>
+      traceableSharedCount(a) - traceableSharedCount(b) || totalSharedCount(a) - totalSharedCount(b);
 
     // Ring 1: unresolved direct opponents — their own games name the target.
     const ring1 = Array.from(directOpponents)
       .filter((id) => !mapped.has(id) && sharesTraceableEvent(id))
-      .sort((a, b) => (appearances.get(b)?.length || 0) - (appearances.get(a)?.length || 0));
+      .sort(bySimplestPivot);
     if (ring1.length) {
       log(
-        `Still nothing — pivoting through ${targetName}'s opponents: ranking ${ring1.length} unresolved direct opponent(s) by their own online tournament history.`
+        `Still nothing — pivoting through ${targetName}'s opponents: ranking ${ring1.length} unresolved direct opponent(s) simplest-first (fewest shared traceable events) to race to a first crown.`
       );
       await pivotRing(ring1, "direct opponents");
     }
@@ -3796,7 +3861,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (!found && !deepStop() && deadline - Date.now() > 60_000) {
       const ring2 = Array.from(memberName.keys())
         .filter((id) => id !== targetId && !directOpponents.has(id) && !mapped.has(id) && sharesTraceableEvent(id))
-        .sort((a, b) => (appearances.get(b)?.length || 0) - (appearances.get(a)?.length || 0))
+        .sort(bySimplestPivot)
         .slice(0, 24);
       if (ring2.length) {
         log(`Direct-opponent pivots exhausted — extending the pivot to ${ring2.length} other section player(s).`);

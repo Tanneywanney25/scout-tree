@@ -498,6 +498,9 @@ function rankForPlatforms(cands: UsernameCandidate[], platforms?: WebPlatform[])
 // ---------------------------------------------------------------------------
 
 export interface DiscoverEventRequest {
+  /** USCF event id — the persistent event_platform_cache key (see index.ts).
+   *  The discovery logic itself ignores it; it only threads through for caching. */
+  eventId?: string;
   name?: string;
   sectionName?: string;
   startDate?: string;

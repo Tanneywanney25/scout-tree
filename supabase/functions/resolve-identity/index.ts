@@ -29,6 +29,7 @@ import {
   handleOptOut,
   memberSearchRateLimited,
 } from "./anchor.ts";
+import { getEventPlatform, putEventPlatform } from "../_shared/identityStore.ts";
 import type { SchoolLookupRequest } from "../../../src/lib/identity/schoolTypes.ts";
 
 // ============================================================================
@@ -479,10 +480,58 @@ async function handleExpand(memberId: string, acceptEncoding: string | null): Pr
 // then hands the client the full participant roster. Logic in googleSearch.ts.
 // ---------------------------------------------------------------------------
 
+/** Resolve the platform that best summarises a discovery payload — the AI sets
+ *  `platform` directly, but an answer that only found tournament links still
+ *  implies its platform, and that is what makes the row's `platform` column
+ *  useful. Mirrors the client's platformFromInfo so a cache hit and a fresh
+ *  answer agree. */
+function summarisePlatform(info: {
+  platform?: string;
+  chesscomSlugs?: string[];
+  lichessSwissIds?: string[];
+  lichessArenaIds?: string[];
+}): string {
+  if (info.platform && info.platform !== "unknown") return info.platform;
+  if (info.chesscomSlugs?.length) return "chesscom";
+  if (info.lichessSwissIds?.length || info.lichessArenaIds?.length) return "lichess";
+  return "unknown";
+}
+
 async function handleDiscoverEvent(ev: DiscoverEventRequest): Promise<Response> {
+  const eventId = (ev.eventId || "").trim();
+
+  // Persistent cache first: which platform hosted this event is immutable and
+  // shared across every search, so a hit turns the 2-4s grounded AI web-search
+  // into an instant DB read. Only known USCF event ids may hit the cache.
+  if (eventId) {
+    const cached = await getEventPlatform(eventId);
+    if (cached) {
+      const info =
+        cached.info && typeof cached.info === "object"
+          ? (cached.info as Record<string, unknown>)
+          : { platform: cached.platform };
+      console.log("[resolve-identity] discoverEvent (cache hit):", JSON.stringify({ eventId, name: ev.name, platform: cached.platform }));
+      return json({ available: true, cached: true, ...info });
+    }
+  }
+
   const info = await discoverEventOnWeb(ev);
   if (!info) return json({ available: false });
-  console.log("[resolve-identity] discoverEvent:", JSON.stringify({ name: ev.name, ...info }));
+  console.log("[resolve-identity] discoverEvent:", JSON.stringify({ eventId, name: ev.name, ...info }));
+
+  // Persist for the next search that touches this event (fire-and-forget — the
+  // discovery answer never depends on the write landing). Stored with the full
+  // payload so a hit reproduces the roster shortcut's tournament links too.
+  // Guard: a shaky, link-less, low-confidence guess is NOT locked in for a year
+  // — a cached wrong platform would steer the event to the wrong site's API on
+  // every future search. Concrete tournament links, or a confidence the AI
+  // didn't flag as weak, are safe to cache.
+  const hasLinks = !!(info.chesscomSlugs?.length || info.lichessSwissIds?.length || info.lichessArenaIds?.length);
+  const confidentEnough = info.confidence === undefined || info.confidence >= 0.4;
+  if (eventId && (hasLinks || confidentEnough)) {
+    void putEventPlatform(eventId, summarisePlatform(info), info, "web_search");
+  }
+
   return json({
     available: true,
     platform: info.platform,

@@ -226,6 +226,10 @@ export function discoverEventPlatform(ev: GraphEvent, signal?: AbortSignal): Pro
     const data = await invokeEdge(
       {
         discoverEvent: {
+          // The event id keys the persistent event_platform_cache server-side —
+          // a repeat discovery for the same event answers instantly (see the
+          // edge function's handleDiscoverEvent).
+          eventId: ev.eventId,
           name: ev.name,
           sectionName: ev.sectionName,
           startDate: ev.startDate,
