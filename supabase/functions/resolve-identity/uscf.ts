@@ -449,17 +449,91 @@ export async function fetchMemberEventsSince(
   return out;
 }
 
-interface SectionRef {
-  number: number;
-  name?: string;
+/** One online section the TARGET actually played, learned from their game feed. */
+interface OnlineSecRef {
+  eventId: string;
+  eventName: string;
+  startDate?: string;
+  endDate?: string;
+  sectionNumber: number;
+  sectionName?: string;
+  ratingSystem: string; // OR / OQ / OB
+  gameCount: number;
 }
 
-async function fetchEventSections(eventId: string): Promise<{ sections: SectionRef[]; startDate?: string; endDate?: string; name?: string }> {
-  const data = await cachedFetchJson("event", eventId, EVENT_CACHE_TTL_MS, `/rated-events/${eventId}`);
-  const sections: SectionRef[] = Array.isArray(data?.sections)
-    ? data.sections.map((s: any) => ({ number: s.number, name: s.name }))
-    : [];
-  return { sections, startDate: data?.startDate, endDate: data?.endDate, name: data?.name };
+/**
+ * Read the member's ONLINE sections straight from their game history.
+ *
+ * The /members/{id}/games feed lists every game the player played, and — unlike
+ * the event list — each row carries its event id, section number AND rating
+ * system. So one member-scoped walk tells us EXACTLY which sections the target
+ * played online (OR/OQ/OB) with zero crosstable probing.
+ *
+ * This replaced an event-list walk that then pulled section standings BLIND to
+ * find the target: on a player with multi-section online events (a 5-class
+ * "…ON ICC" open, K-3/K-5/K-8 scholastics, or a split round-robin the target
+ * played several boards of) that approach mis-capped — sections the target
+ * never played flooded the section budget and starved their real online
+ * sections in OTHER events out of the graph — and cost a storm of large
+ * standings GETs (which tripped MUIR's limiter). Reading the games feed is both
+ * correct (it is precisely the target's sections, multi-section events included)
+ * and cheap (a handful of paged member GETs).
+ *
+ * Newest-first and paged; stops once a whole page predates the online era, or
+ * the wall-clock deadline is hit. Fails soft to whatever it gathered.
+ */
+async function fetchMemberOnlineSections(
+  id: string,
+  sinceDate: string,
+  overBudget: () => boolean,
+  pageCap = 30,
+  pageSize = 100
+): Promise<OnlineSecRef[]> {
+  const clean = id.replace(/\D/g, "");
+  if (!clean) return [];
+  const secs = new Map<string, OnlineSecRef>();
+  for (let page = 0; page < pageCap; page++) {
+    if (overBudget()) break;
+    const offset = page * pageSize;
+    const data = await cachedFetchJson(
+      "games",
+      `${clean}:${offset}:${pageSize}`,
+      EVENTS_LIST_TTL_MS,
+      `/members/${clean}/games?Offset=${offset}&Size=${pageSize}`
+    );
+    const items: any[] = Array.isArray(data?.items) ? data.items : [];
+    if (!items.length) break;
+    let pageMax = "0";
+    for (const g of items) {
+      const evDate = g?.event?.startDate || "";
+      if (evDate > pageMax) pageMax = evDate;
+      if (evDate && evDate < sinceDate) continue;
+      if (!isOnlineRatingSystem(g?.ratingSystem)) continue;
+      const eventId = String(g?.event?.id || "");
+      const sectionNumber = g?.section?.number;
+      if (!eventId || typeof sectionNumber !== "number") continue;
+      const key = `${eventId}#${sectionNumber}`;
+      const cur = secs.get(key);
+      if (cur) {
+        cur.gameCount++;
+      } else {
+        secs.set(key, {
+          eventId,
+          eventName: String(g?.event?.name || ""),
+          startDate: g?.event?.startDate,
+          endDate: g?.event?.endDate,
+          sectionNumber,
+          sectionName: g?.section?.name,
+          ratingSystem: String(g.ratingSystem).toUpperCase(),
+          gameCount: 1,
+        });
+      }
+    }
+    // Newest-first: once an entire page predates the era, we're done.
+    if (pageMax !== "0" && pageMax < sinceDate) break;
+    if (!data?.hasNextPage) break;
+  }
+  return Array.from(secs.values());
 }
 
 interface SectionMeta {
@@ -538,7 +612,11 @@ async function fetchSectionPlayers(eventId: string, number: number, rootId: stri
 export interface BuildGraphOptions {
   /** Max online sections to include (each is one crosstable). */
   maxSections?: number;
-  /** Max candidate events to inspect. */
+  /** @deprecated Ignored. The build now reads the target's online sections
+   *  directly from their game feed (see fetchMemberOnlineSections) rather than
+   *  scanning an event list, so there is no candidate-event count to bound;
+   *  scope is governed by maxSections and the games-feed page cap. Retained so
+   *  existing callers keep compiling. */
   maxEvents?: number;
   /**
    * Absolute wall-clock deadline (epoch ms) after which the build stops
@@ -568,7 +646,6 @@ export async function buildOnlineGraphForMember(
   // tournament the player has. The only real ceiling is the edge function's
   // own wall-clock limit — these keep a full build comfortably inside it.
   const maxSections = opts.maxSections ?? 16;
-  const maxEvents = opts.maxEvents ?? 100;
   const deadline = opts.deadlineMs ?? Infinity;
   let truncated = false;
   const overBudget = (): boolean => {
@@ -580,78 +657,62 @@ export async function buildOnlineGraphForMember(
     return true;
   };
 
-  // Online-rated systems launched in 2020 — page back to that era (it can sit
-  // many pages deep for active players) and ignore anything older.
-  const era = await fetchMemberEventsSince(member.id, "2020-03-01");
-  // Candidate order matters for active players with hundreds of events:
-  //   1. events whose NAME signals online play (any date),
-  //   2. events from the 2020-03..2022-06 window when nearly every rated event
-  //      was online (they sit at the END of the newest-first era list, so a
-  //      naive "newest N" scan misses them entirely),
-  //   3. whatever else is newest.
-  const named = new Set(era.filter((e) => looksOnline(e.name)));
-  const pandemicEra = new Set(
-    era.filter((e) => !named.has(e) && (e.startDate || "") >= "2020-03-01" && (e.startDate || "") <= "2022-06-30")
-  );
-  const rest = era.filter((e) => !named.has(e) && !pandemicEra.has(e));
-  const candidates = [...named, ...pandemicEra, ...rest].slice(0, maxEvents);
+  // 1. Which sections did the target actually play ONLINE? Read it straight
+  //    from their game history (see fetchMemberOnlineSections) — one member
+  //    walk, no crosstable probing, and it is precisely the target's sections
+  //    (multi-section events included). Online-rated systems launched in 2020,
+  //    so page back to that era.
+  const onlineSecs = await fetchMemberOnlineSections(member.id, "2020-03-01", overBudget);
+  if (!onlineSecs.length) return [];
 
-  // Phase 1: find which sections are actually online. Concurrency 4 hides
-  // MUIR's per-request latency without raising the request RATE — every call
-  // still queues behind muirThrottle's global spacing. There is deliberately NO
-  // name-based early stopping: an event's TITLE is not evidence of whether it
-  // was online-rated (that dropped whole online events whose names give no
-  // hint), so EVERY candidate is inspected and a section counts as online when
-  // MUIR flags it OR when it carries an online rating system (OR/OQ/OB). The
-  // only ceilings are the section cap (maxSections) and the wall-clock deadline
-  // (overBudget) — request-count bounds, not title filters.
-  interface Found {
-    ev: UscfEventRef;
-    section: SectionRef;
-    meta: SectionMeta;
-  }
-  let foundCount = 0;
-  // Concurrency 5 (was 2): the adaptive MUIR pacer is the real rate control —
-  // these workers just keep requests IN FLIGHT so RTT overlaps the gap.
-  const perEvent = await mapLimit(candidates, 5, async (ev): Promise<Found[]> => {
-    if (foundCount >= maxSections || overBudget()) return [];
-    const { sections, startDate, endDate, name } = await fetchEventSections(ev.eventId);
-    const evRef: UscfEventRef = { ...ev, name: ev.name || name || "", startDate: ev.startDate || startDate, endDate: ev.endDate || endDate };
-    const metas = await mapLimit(sections, 3, async (sec) => {
-      if (foundCount >= maxSections || overBudget()) return null;
-      const meta = await fetchSectionMeta(ev.eventId, sec.number);
-      const online = !!meta && (meta.isOnline || isOnlineRatingSystem(meta.ratingSystem));
-      return online ? { ev: evRef, section: sec, meta: meta! } : null;
-    });
-    const found = metas.filter((x): x is Found => !!x);
-    foundCount += found.length;
-    return found;
-  });
-  const foundSections = perEvent.flat().slice(0, maxSections);
+  // 2. Prioritise the sections most useful to the traversal, because the
+  //    section budget (and any deadline truncation) must keep the TRACEABLE
+  //    half of the history — not fill up on ICC. Chess.com / Lichess (a public
+  //    game API the engine can align crosstable rounds against) go FIRST,
+  //    unknown-platform online events next (the web/flyer search may place
+  //    them), and ICC / ChessKid — which have NO public game API, so a
+  //    crosstable there can never be traced — LAST. Newest-first within a tier.
+  //    (Before this, a player's ICC opens — newer and name-matched — filled the
+  //    whole budget and hid their traceable events entirely.)
+  const traceTier = (s: OnlineSecRef): number => {
+    const p = platformGuess(nameForMatch(`${s.eventName} ${s.sectionName || ""}`));
+    if (p === "chesscom" || p === "lichess") return 0;
+    if (p === "icc" || p === "chesskid") return 2;
+    return 1; // unknown platform — a discoverPlatform candidate, still traceable
+  };
+  onlineSecs.sort((a, b) => traceTier(a) - traceTier(b) || (b.startDate || "").localeCompare(a.startDate || ""));
+  const chosen = onlineSecs.slice(0, maxSections);
 
-  // Phase 2: pull the crosstables IN PARALLEL — independent GETs, and the
-  // adaptive muirThrottle keeps the actual request rate under MUIR's limit.
-  const online = await mapLimit(foundSections, 5, async ({ ev, section, meta }): Promise<OnlineSection | null> => {
-    if (overBudget()) return null; // out of time — return the crosstables gathered so far
-    const players = await fetchSectionPlayers(ev.eventId, section.number, member.id);
-    if (!players.some((p) => p.isTarget)) return null; // target not actually here
-    const evName = ev.name || "";
+  // 3. Pull the crosstable (full roster) + section meta for EXACTLY those
+  //    sections — the ONLY standings GETs in the whole build, one per kept
+  //    section, no blind probing. IN PARALLEL, throttled by the adaptive MUIR
+  //    pacer; `overBudget` returns whatever was gathered so far.
+  const built = await mapLimit(chosen, 4, async (s): Promise<OnlineSection | null> => {
+    if (overBudget()) return null;
+    const [meta, players] = await Promise.all([
+      fetchSectionMeta(s.eventId, s.sectionNumber),
+      fetchSectionPlayers(s.eventId, s.sectionNumber, member.id),
+    ]);
+    // The games feed already proved the target is here; this is a defensive
+    // guard against a section-number mismatch, not the primary filter.
+    if (!players.some((p) => p.isTarget)) return null;
+    const evName = s.eventName || "";
     return {
-      eventId: ev.eventId,
+      eventId: s.eventId,
       name: evName,
-      sectionName: section.name,
-      sectionNumber: section.number,
-      startDate: meta.startDate || ev.startDate,
-      endDate: meta.endDate || ev.endDate,
-      ratingSystem: meta.ratingSystem || "OR",
-      timeControl: meta.timeControl,
-      roundCount: meta.roundCount,
-      isBlitz: meta.isBlitz,
-      platformGuess: platformGuess(nameForMatch(`${evName} ${section.name || ""}`)),
+      sectionName: s.sectionName,
+      sectionNumber: s.sectionNumber,
+      startDate: meta?.startDate || s.startDate,
+      endDate: meta?.endDate || s.endDate,
+      ratingSystem: s.ratingSystem || meta?.ratingSystem || "OR",
+      timeControl: meta?.timeControl,
+      roundCount: meta?.roundCount,
+      isBlitz: meta?.isBlitz,
+      platformGuess: platformGuess(nameForMatch(`${evName} ${s.sectionName || ""}`)),
       players,
     };
   });
-  return online.filter((x): x is OnlineSection => !!x);
+  return built.filter((x): x is OnlineSection => !!x);
 }
 
 // ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ export type MuirCacheKind =
   | "member"
   | "member-search"
   | "events"
+  | "games"
   | "event"
   | "section"
   | "crosstable"
