@@ -94,9 +94,66 @@ export function semaphore(limit: number): Gate {
 }
 
 /** Global cap on simultaneous Chess.com pub-API requests, shared by every
- *  agent in the search (verifications, monthly archives, tournament rosters). */
-const CC_MAX_INFLIGHT = 12;
+ *  agent in the search (verifications, monthly archives, tournament rosters).
+ *  Chess.com's staff describe serial access as unlimited and parallel access as
+ *  refusable with 429 (practical ceiling ≈3 archive req/s). So this is DELIBERATELY
+ *  low: the search still runs any number of logical agents, but only a few
+ *  HTTP requests are ever in flight, and the pacer below spaces them. 4 is a
+ *  measured compromise — a live probe showed 12-wide caused no 5xx, but a low
+ *  cap keeps us clear of the ~3 req/s ceiling; 4 (vs 2) avoids one slow multi-MB
+ *  archive head-of-line-blocking the pipeline. The pacer below, not this cap, is
+ *  the real rate governor. The conductor can still retune it via gate.setLimit. */
+const CC_MAX_INFLIGHT = 4;
 export const chesscomGate = semaphore(CC_MAX_INFLIGHT);
+
+// Chess.com pacer — a minimum gap between the START of consecutive Chess.com
+// requests, so even at the (low) concurrency cap the aggregate stays under the
+// ~3 req/s archive ceiling their staff cite. Serial-with-a-gap is the access
+// pattern they document as unlimited; bursts are what earn a 429.
+let chesscomNextSlot = 0;
+let chesscomGapMs = 350; // configurable (Phase 1); the real rate governor
+export function setChesscomGapMs(ms: number): void {
+  chesscomGapMs = Math.max(0, Math.floor(ms));
+}
+async function chesscomSlot(): Promise<void> {
+  const now = Date.now();
+  const wait = Math.max(0, chesscomNextSlot - now);
+  chesscomNextSlot = Math.max(now, chesscomNextSlot) + chesscomGapMs;
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+
+// Global Chess.com queue pause. A 429 means we already misbehaved, so it must
+// stop the WHOLE queue, not just back off the one unlucky request — every
+// in-flight and future Chess.com call waits out the pause before proceeding.
+let chesscomPauseUntil = 0;
+async function awaitChesscomPause(signal?: AbortSignal): Promise<void> {
+  for (;;) {
+    const wait = chesscomPauseUntil - Date.now();
+    if (wait <= 0 || signal?.aborted) return;
+    await new Promise((r) => setTimeout(r, Math.min(wait, 1000)));
+  }
+}
+
+/** Classify a Chess.com HTTP status into the endpoint-ladder's decision classes.
+ *  This is the Phase 1 rule the callers act on:
+ *    ok         — 2xx, a real answer.
+ *    absent     — 404, the account/month genuinely does not exist (a VERDICT).
+ *    gone       — 410, Chess.com guarantees data will never exist here (permanent).
+ *    structural — 500, their code failed building the response (size limits etc.).
+ *                 Do NOT retry: a repeat just escalates us toward a 429. Fall
+ *                 through the ladder / record for the session instead.
+ *    transient  — 502/503/504/524, proxy-layer hiccups worth ONE retry after a wait.
+ *    rate       — 429, throttling (handled inside politeFetch by pausing the queue). */
+export type ChesscomStatusClass = "ok" | "absent" | "gone" | "structural" | "transient" | "rate" | "other";
+export function classifyChesscomStatus(status: number): ChesscomStatusClass {
+  if (status >= 200 && status < 300) return "ok";
+  if (status === 404) return "absent";
+  if (status === 410) return "gone";
+  if (status === 429) return "rate";
+  if (status === 500) return "structural";
+  if (status === 502 || status === 503 || status === 504 || status === 524) return "transient";
+  return "other";
+}
 
 // Lichess enforces per-IP rate limits and answers bursts with 429s (or a
 // temporary ban). One global pacer spaces every Lichess call in the process.
@@ -254,7 +311,14 @@ export async function politeFetch(
         await lichessSlot();
         res = await attemptOnce();
       } else {
-        res = await chesscomGate.run(attemptOnce);
+        // Chess.com: wait out any active global pause, then pace + gate. The
+        // pace is taken INSIDE the gate slot so the min-gap governs real
+        // wire time, not queue-wait time.
+        await awaitChesscomPause(outer);
+        res = await chesscomGate.run(async () => {
+          await chesscomSlot();
+          return attemptOnce();
+        });
       }
       breakerSuccess(platform); // any HTTP response = the platform is talking
       notifyNet(platform, res.status === 429 ? "429" : "ok");
@@ -273,7 +337,17 @@ export async function politeFetch(
       continue;
     }
     if (res.status === 429 && attempt < maxRetries && !outer?.aborted) {
-      await sleep((platform === "lichess" ? 2500 : 2000) * (attempt + 1));
+      const backoff = (platform === "lichess" ? 2500 : 2000) * (attempt + 1);
+      if (platform === "chesscom") {
+        // A 429 means we already misbehaved: pause the WHOLE queue, loudly.
+        // (The engine treats 429 as "slow down", never "absent".)
+        chesscomPauseUntil = Math.max(chesscomPauseUntil, Date.now() + backoff);
+        console.warn(
+          `[net] Chess.com 429 (rate-limited) on ${url} — pausing the whole Chess.com queue ${backoff}ms. ` +
+            `This should not happen with the pacer; if it recurs, lower the concurrency or raise the gap.`
+        );
+      }
+      await sleep(backoff);
       continue;
     }
     return res;

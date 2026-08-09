@@ -12,7 +12,7 @@
 // ============================================================================
 
 import type { Platform } from "./types";
-import { politeFetch } from "./net";
+import { politeFetch, classifyChesscomStatus } from "./net";
 
 export interface VerifiedProfile {
   platform: Platform;
@@ -235,27 +235,32 @@ export async function verifyChesscom(
     try {
       res = await politeFetch(
         `https://api.chess.com/pub/player/${encodeURIComponent(clean)}`,
-        { headers: { Accept: "application/json" }, signal },
+        { headers: { Accept: "application/json", "Accept-Encoding": "gzip" }, signal },
         "chesscom"
       );
     } catch {
       return undefined; // politeFetch already retried network errors
     }
     if (res.ok) break;
-    // A real 404 (no such user) is a verdict; a 404 whose body carries a 5xx
-    // error code is the shard flake in disguise; everything else is transient.
-    let transient = res.status !== 404;
-    if (!transient) {
+    // Classify instead of blindly retrying (Phase 1): a 500 is Chess.com's code
+    // failing, not a missing account, and retrying escalates us to 429.
+    let cls = classifyChesscomStatus(res.status);
+    // A 404 whose body carries a 5xx error code is the shard flake in disguise —
+    // an account that exists but whose profile shard failed; treat as structural.
+    if (cls === "absent") {
+      let flake = false;
       try {
-        const body = await res.text();
-        transient = /"code"\s*:\s*5\d\d|internal error/i.test(body);
+        flake = /"code"\s*:\s*5\d\d|internal error/i.test(await res.text());
       } catch {
-        transient = true;
+        flake = true;
       }
+      if (flake) cls = "structural";
     }
-    if (!transient) return null;
-    if (attempt < 2 && !signal?.aborted) {
-      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+    if (cls === "absent" || cls === "gone") return null; // a verdict: no such account
+    if (cls === "structural") return undefined; // 500 — a hole, do NOT retry
+    // transient (502/503/504/524) — one retry, then give up as a hole.
+    if (attempt < 1 && !signal?.aborted) {
+      await new Promise((r) => setTimeout(r, 2000));
       continue;
     }
     return undefined;
@@ -271,7 +276,7 @@ export async function verifyChesscom(
     // cheaper than a wasted gate slot on every miss.
     const statsRes = await politeFetch(
       `https://api.chess.com/pub/player/${encodeURIComponent(clean)}/stats`,
-      { headers: { Accept: "application/json" }, signal },
+      { headers: { Accept: "application/json", "Accept-Encoding": "gzip" }, signal },
       "chesscom"
     ).catch(() => null);
 

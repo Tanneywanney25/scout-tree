@@ -1,0 +1,1167 @@
+{
+  "summary": {
+    "origin": "node-datacenter (Supabase-Edge-representative)",
+    "pairsProbed": 18,
+    "a5xx": 0,
+    "a404": 0,
+    "a2xx": 17,
+    "maxArchiveMB": 4.3,
+    "pearson_size_vs_5xx": null,
+    "buckets": {
+      "0-1k": {
+        "total": 0,
+        "fail": 0
+      },
+      "1k-5k": {
+        "total": 4,
+        "fail": 0
+      },
+      "5k-20k": {
+        "total": 6,
+        "fail": 0
+      },
+      "20k+": {
+        "total": 6,
+        "fail": 0
+      }
+    },
+    "pgnRescuesOfA5xx": "0/0",
+    "variantD_liveTC_statuses": [
+      200,
+      429
+    ],
+    "variantD_endpointExists": true,
+    "variantE": {
+      "serialMs": 7296,
+      "concMs": 171,
+      "serial5xx": 0,
+      "conc5xx": 0,
+      "serial429": 0,
+      "conc429": 0
+    }
+  },
+  "results": [
+    {
+      "username": "arkadiikhromaev",
+      "year": "2026",
+      "month": "03",
+      "statsTotalGames": 1445,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/2026/03",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 678,
+          "bytes": 1339082,
+          "games": 344
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/2026/03",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 162,
+          "bytes": 1339082,
+          "games": 344
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/2026/03/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 573,
+          "bytes": 986257,
+          "games": 344
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 263,
+          "bytes": 12,
+          "games": 0
+        }
+      ]
+    },
+    {
+      "username": "arkadiikhromaev",
+      "year": "2026",
+      "month": "06",
+      "statsTotalGames": 1445,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/2026/06",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 200,
+          "bytes": 2902,
+          "games": 1
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/2026/06",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 45,
+          "bytes": 2902,
+          "games": 1
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/2026/06/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 208,
+          "bytes": 1928,
+          "games": 1
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 45,
+          "bytes": 12,
+          "games": 0
+        }
+      ]
+    },
+    {
+      "username": "dolphin_2010",
+      "year": "2026",
+      "month": "07",
+      "statsTotalGames": 5221,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/dolphin_2010/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 316,
+          "bytes": 1388608,
+          "games": 306
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/dolphin_2010/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 241,
+          "bytes": 1388608,
+          "games": 306
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/dolphin_2010/games/2026/07/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 743,
+          "bytes": 1063284,
+          "games": 306
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/dolphin_2010/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 865,
+          "bytes": 1422290,
+          "games": 332
+        }
+      ]
+    },
+    {
+      "username": "dolphin_2010",
+      "year": "2026",
+      "month": "08",
+      "statsTotalGames": 5221,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/dolphin_2010/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 1085,
+          "bytes": 1131671,
+          "games": 266
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/dolphin_2010/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 143,
+          "bytes": 1131671,
+          "games": 266
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/dolphin_2010/games/2026/08/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 514,
+          "bytes": 852772,
+          "games": 266
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/dolphin_2010/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 195,
+          "bytes": 1422290,
+          "games": 332
+        }
+      ]
+    },
+    {
+      "username": "gmbrewchess",
+      "year": "2026",
+      "month": "07",
+      "statsTotalGames": 1347,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/gmbrewchess/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 1818,
+          "bytes": 4512878,
+          "games": 1118
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/gmbrewchess/games/2026/07",
+          "status": 429,
+          "statusClass": "429",
+          "ms": 44,
+          "bytes": 5618,
+          "games": null
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/gmbrewchess/games/2026/07/pgn",
+          "status": 429,
+          "statusClass": "429",
+          "ms": 92,
+          "bytes": 5780,
+          "games": null
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/gmbrewchess/games/live/180/1",
+          "status": 429,
+          "statusClass": "429",
+          "ms": 79,
+          "bytes": 5777,
+          "games": null
+        }
+      ]
+    },
+    {
+      "username": "gmbrewchess",
+      "year": "2026",
+      "month": "08",
+      "statsTotalGames": 1347,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/gmbrewchess/games/2026/08",
+          "status": 429,
+          "statusClass": "429",
+          "ms": 98,
+          "bytes": 5768,
+          "games": null
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/gmbrewchess/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 542,
+          "bytes": 923821,
+          "games": 231
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/gmbrewchess/games/2026/08/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 439,
+          "bytes": 685673,
+          "games": 231
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/gmbrewchess/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 234,
+          "bytes": 12,
+          "games": 0
+        }
+      ]
+    },
+    {
+      "username": "philippians46",
+      "year": "2026",
+      "month": "07",
+      "statsTotalGames": 26384,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/philippians46/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 1142,
+          "bytes": 2578319,
+          "games": 761
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/philippians46/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 291,
+          "bytes": 2578319,
+          "games": 761
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/philippians46/games/2026/07/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 819,
+          "bytes": 1806993,
+          "games": 577
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/philippians46/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 791,
+          "bytes": 1046381,
+          "games": 253
+        }
+      ]
+    },
+    {
+      "username": "philippians46",
+      "year": "2026",
+      "month": "08",
+      "statsTotalGames": 26384,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/philippians46/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 209,
+          "bytes": 647640,
+          "games": 186
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/philippians46/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 126,
+          "bytes": 647640,
+          "games": 186
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/philippians46/games/2026/08/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 398,
+          "bytes": 458792,
+          "games": 148
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/philippians46/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 177,
+          "bytes": 1046381,
+          "games": 253
+        }
+      ]
+    },
+    {
+      "username": "nihalsarin",
+      "year": "2026",
+      "month": "07",
+      "statsTotalGames": 54175,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/nihalsarin/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 254,
+          "bytes": 753900,
+          "games": 176
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/nihalsarin/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 123,
+          "bytes": 753900,
+          "games": 176
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/nihalsarin/games/2026/07/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 415,
+          "bytes": 566773,
+          "games": 176
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/nihalsarin/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 2943,
+          "bytes": 6307714,
+          "games": 1569
+        }
+      ]
+    },
+    {
+      "username": "nihalsarin",
+      "year": "2026",
+      "month": "08",
+      "statsTotalGames": 54175,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/nihalsarin/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 194,
+          "bytes": 231809,
+          "games": 57
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/nihalsarin/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 63,
+          "bytes": 231809,
+          "games": 57
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/nihalsarin/games/2026/08/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 278,
+          "bytes": 169480,
+          "games": 57
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/nihalsarin/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 639,
+          "bytes": 6307714,
+          "games": 1569
+        }
+      ]
+    },
+    {
+      "username": "hikaru",
+      "year": "2026",
+      "month": "07",
+      "statsTotalGames": null,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/hikaru/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 504,
+          "bytes": 2497804,
+          "games": 588
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/hikaru/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 268,
+          "bytes": 2497804,
+          "games": 588
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/hikaru/games/2026/07/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 353,
+          "bytes": 1855162,
+          "games": 588
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/hikaru/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 8412,
+          "bytes": 19025802,
+          "games": 4638
+        }
+      ]
+    },
+    {
+      "username": "hikaru",
+      "year": "2026",
+      "month": "08",
+      "statsTotalGames": null,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/hikaru/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 190,
+          "bytes": 578160,
+          "games": 144
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/hikaru/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 95,
+          "bytes": 578160,
+          "games": 144
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/hikaru/games/2026/08/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 367,
+          "bytes": 422211,
+          "games": 144
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/hikaru/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 1875,
+          "bytes": 19025802,
+          "games": 4638
+        }
+      ]
+    },
+    {
+      "username": "magnuscarlsen",
+      "year": "2026",
+      "month": "07",
+      "statsTotalGames": 9181,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/magnuscarlsen/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 191,
+          "bytes": 442771,
+          "games": 111
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/magnuscarlsen/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 99,
+          "bytes": 442771,
+          "games": 111
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/magnuscarlsen/games/2026/07/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 221,
+          "bytes": 322137,
+          "games": 111
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/magnuscarlsen/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 3733,
+          "bytes": 7934851,
+          "games": 1997
+        }
+      ]
+    },
+    {
+      "username": "magnuscarlsen",
+      "year": "2026",
+      "month": "08",
+      "statsTotalGames": 9181,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/magnuscarlsen/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 206,
+          "bytes": 123024,
+          "games": 30
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/magnuscarlsen/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 56,
+          "bytes": 123024,
+          "games": 30
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/magnuscarlsen/games/2026/08/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 240,
+          "bytes": 90620,
+          "games": 30
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/magnuscarlsen/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 792,
+          "bytes": 7934851,
+          "games": 1997
+        }
+      ]
+    },
+    {
+      "username": "mishanick",
+      "year": "2026",
+      "month": "07",
+      "statsTotalGames": 32465,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/mishanick/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 303,
+          "bytes": 1339132,
+          "games": 283
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/mishanick/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 202,
+          "bytes": 1339132,
+          "games": 283
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/mishanick/games/2026/07/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 659,
+          "bytes": 1017706,
+          "games": 283
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/mishanick/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 7431,
+          "bytes": 18598750,
+          "games": 4441
+        }
+      ]
+    },
+    {
+      "username": "mishanick",
+      "year": "2026",
+      "month": "08",
+      "statsTotalGames": 32465,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/mishanick/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 418,
+          "bytes": 616601,
+          "games": 135
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/mishanick/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 100,
+          "bytes": 616601,
+          "games": 135
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/mishanick/games/2026/08/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 423,
+          "bytes": 465399,
+          "games": 135
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/mishanick/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 1846,
+          "bytes": 18598750,
+          "games": 4441
+        }
+      ]
+    },
+    {
+      "username": "gurelediz",
+      "year": "2026",
+      "month": "07",
+      "statsTotalGames": 14222,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/gurelediz/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 703,
+          "bytes": 1304969,
+          "games": 284
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/gurelediz/games/2026/07",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 192,
+          "bytes": 1304969,
+          "games": 284
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/gurelediz/games/2026/07/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 500,
+          "bytes": 987816,
+          "games": 284
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/gurelediz/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 1558,
+          "bytes": 2091035,
+          "games": 518
+        }
+      ]
+    },
+    {
+      "username": "gurelediz",
+      "year": "2026",
+      "month": "08",
+      "statsTotalGames": 14222,
+      "attempts": [
+        {
+          "variant": "A_json_ua",
+          "url": "https://api.chess.com/pub/player/gurelediz/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 199,
+          "bytes": 19478,
+          "games": 4
+        },
+        {
+          "variant": "B_json_noua",
+          "url": "https://api.chess.com/pub/player/gurelediz/games/2026/08",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 61,
+          "bytes": 19478,
+          "games": 4
+        },
+        {
+          "variant": "C_pgn",
+          "url": "https://api.chess.com/pub/player/gurelediz/games/2026/08/pgn",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 193,
+          "bytes": 15038,
+          "games": 4
+        },
+        {
+          "variant": "D_live_tc",
+          "url": "https://api.chess.com/pub/player/gurelediz/games/live/180/1",
+          "status": 200,
+          "statusClass": "2xx",
+          "ms": 277,
+          "bytes": 2091035,
+          "games": 518
+        }
+      ]
+    }
+  ],
+  "variantE": {
+    "serialAtt": [
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 133,
+        "bytes": 113,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 45,
+        "bytes": 113,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/dolphin_2010/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 149,
+        "bytes": 110,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/dolphin_2010/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 41,
+        "bytes": 110,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/gmbrewchess/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 170,
+        "bytes": 109,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/gmbrewchess/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 44,
+        "bytes": 109,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/philippians46/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 150,
+        "bytes": 111,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/philippians46/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 44,
+        "bytes": 111,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/nihalsarin/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 139,
+        "bytes": 108,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/nihalsarin/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 40,
+        "bytes": 108,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/hikaru/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 164,
+        "bytes": 104,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/hikaru/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 42,
+        "bytes": 104,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/magnuscarlsen/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 141,
+        "bytes": 111,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/magnuscarlsen/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 40,
+        "bytes": 111,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/mishanick/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 147,
+        "bytes": 107,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/mishanick/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 60,
+        "bytes": 107,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/gurelediz/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 151,
+        "bytes": 107,
+        "games": null
+      },
+      {
+        "variant": "E_serial",
+        "url": "https://api.chess.com/pub/player/gurelediz/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 50,
+        "bytes": 107,
+        "games": null
+      }
+    ],
+    "concAtt": [
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 43,
+        "bytes": 113,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/nihalsarin/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 39,
+        "bytes": 108,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/gmbrewchess/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 94,
+        "bytes": 109,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/arkadiikhromaev/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 122,
+        "bytes": 113,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/dolphin_2010/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 117,
+        "bytes": 110,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/nihalsarin/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 41,
+        "bytes": 108,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/philippians46/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 114,
+        "bytes": 111,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/gmbrewchess/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 117,
+        "bytes": 109,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/dolphin_2010/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 121,
+        "bytes": 110,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/hikaru/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 28,
+        "bytes": 104,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/philippians46/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 122,
+        "bytes": 111,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/hikaru/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 22,
+        "bytes": 104,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/magnuscarlsen/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 33,
+        "bytes": 111,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/magnuscarlsen/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 35,
+        "bytes": 111,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/mishanick/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 35,
+        "bytes": 107,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/mishanick/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 41,
+        "bytes": 107,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/gurelediz/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 36,
+        "bytes": 107,
+        "games": null
+      },
+      {
+        "variant": "E_conc",
+        "url": "https://api.chess.com/pub/player/gurelediz/games/undefined/undefined",
+        "status": 404,
+        "statusClass": "4xx-404",
+        "ms": 45,
+        "bytes": 107,
+        "games": null
+      }
+    ]
+  }
+}

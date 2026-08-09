@@ -289,3 +289,226 @@ export async function putOptOut(row: {
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// chess_archive_cache / chess_failure_cache — persistent Chess.com archive +
+// failure cache (see migrations/20260808000000_chess_archive_cache.sql). Service
+// -role only; the browser reaches these only via the edge fetch proxy. Every
+// call is fail-soft, so a store-less local run (Node CLI) is a pure no-op and
+// every fetch falls straight through to Chess.com — behaviour unchanged.
+//
+// TTL is enforced on READ here (a NULL expires_at means "never expires", used
+// for immutable closed months and 410-Gone). Writers set expires_at per the
+// differentiated rules; readers treat an expired row as a miss.
+// ---------------------------------------------------------------------------
+
+const CLOSED_MONTH_AGE_MS = 35 * 86_400_000; // older than this = immutable
+const CURRENT_MONTH_TTL_MS = 6 * 60 * 60_000;
+const STRUCTURAL_TTL_MS = 7 * 86_400_000;
+const TRANSIENT_TTL_MS = 15 * 60_000;
+const WEIGHT_TTL_MS = 30 * 86_400_000;
+
+/** True once the (year, month) is far enough in the past to be immutable. */
+function monthIsClosed(year: number, month: number): boolean {
+  const monthEnd = Date.UTC(year, month, 1); // first instant of the NEXT month
+  return Date.now() - monthEnd > CLOSED_MONTH_AGE_MS;
+}
+const fresh = (expiresAt?: string | null) => !expiresAt || Date.parse(expiresAt) > Date.now();
+
+export interface ArchiveCacheHit {
+  payload: unknown;
+  etag?: string;
+  lastModified?: string;
+}
+
+/** A cached archive for (username, year, month, variant), or null on
+ *  miss/expiry/store error. Returns the revalidation handles so the caller can
+ *  send If-None-Match / If-Modified-Since for a current-month entry. */
+export async function getArchiveCache(
+  username: string,
+  year: number,
+  month: number,
+  variant = "json"
+): Promise<ArchiveCacheHit | null> {
+  const rest = supabaseRest();
+  const u = username.trim().toLowerCase();
+  if (!rest || !u) return null;
+  try {
+    const res = await fetch(
+      `${rest.url}/rest/v1/chess_archive_cache?username=eq.${encodeURIComponent(u)}&year=eq.${year}&month=eq.${month}` +
+        `&endpoint_variant=eq.${encodeURIComponent(variant)}&select=payload,etag,last_modified,expires_at&limit=1`,
+      { headers: headers(rest.key) }
+    );
+    if (!res.ok) return null;
+    const rows = (await res.json()) as Array<{ payload?: unknown; etag?: string; last_modified?: string; expires_at?: string | null }>;
+    const row = Array.isArray(rows) ? rows[0] : undefined;
+    if (!row || row.payload === undefined || row.payload === null || !fresh(row.expires_at)) return null;
+    return { payload: row.payload, etag: row.etag, lastModified: row.last_modified };
+  } catch {
+    return null;
+  }
+}
+
+/** Upsert a successful archive. A closed (immutable) month is stored with NO
+ *  expiry; the current month gets a 6h revalidation window. Fire-and-forget. */
+export async function putArchiveCache(row: {
+  username: string;
+  year: number;
+  month: number;
+  variant?: string;
+  payload: unknown;
+  etag?: string;
+  lastModified?: string;
+  byteSize?: number;
+}): Promise<boolean> {
+  const rest = supabaseRest();
+  const u = row.username.trim().toLowerCase();
+  if (!rest || !u) return false;
+  const closed = monthIsClosed(row.year, row.month);
+  try {
+    const res = await fetch(`${rest.url}/rest/v1/chess_archive_cache?on_conflict=username,year,month,endpoint_variant`, {
+      method: "POST",
+      headers: headers(rest.key, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }),
+      body: JSON.stringify({
+        username: u,
+        year: row.year,
+        month: row.month,
+        endpoint_variant: row.variant ?? "json",
+        payload: row.payload,
+        etag: row.etag ?? null,
+        last_modified: row.lastModified ?? null,
+        byte_size: row.byteSize ?? null,
+        fetched_at: new Date().toISOString(),
+        expires_at: closed ? null : new Date(Date.now() + CURRENT_MONTH_TTL_MS).toISOString(),
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Extend a current-month entry's expiry after a 304 Not Modified. */
+export async function touchArchiveCache(username: string, year: number, month: number, variant = "json"): Promise<boolean> {
+  const rest = supabaseRest();
+  const u = username.trim().toLowerCase();
+  if (!rest || !u) return false;
+  try {
+    const res = await fetch(
+      `${rest.url}/rest/v1/chess_archive_cache?username=eq.${encodeURIComponent(u)}&year=eq.${year}&month=eq.${month}&endpoint_variant=eq.${encodeURIComponent(variant)}`,
+      {
+        method: "PATCH",
+        headers: headers(rest.key, { "Content-Type": "application/json", Prefer: "return=minimal" }),
+        body: JSON.stringify({ expires_at: new Date(Date.now() + CURRENT_MONTH_TTL_MS).toISOString() }),
+      }
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export type FailureClass = "structural" | "transient" | "gone";
+
+/** A live failure record for (username, year, month, variant), or null when
+ *  absent/expired — an expired failure reads as a miss, so the month is retried. */
+export async function getFailureCache(username: string, year: number, month: number, variant = "json"): Promise<FailureClass | null> {
+  const rest = supabaseRest();
+  const u = username.trim().toLowerCase();
+  if (!rest || !u) return null;
+  try {
+    const res = await fetch(
+      `${rest.url}/rest/v1/chess_failure_cache?username=eq.${encodeURIComponent(u)}&year=eq.${year}&month=eq.${month}&endpoint_variant=eq.${encodeURIComponent(variant)}&select=status_class,expires_at&limit=1`,
+      { headers: headers(rest.key) }
+    );
+    if (!res.ok) return null;
+    const rows = (await res.json()) as Array<{ status_class?: string; expires_at?: string | null }>;
+    const row = Array.isArray(rows) ? rows[0] : undefined;
+    if (!row?.status_class || !fresh(row.expires_at)) return null;
+    return row.status_class as FailureClass;
+  } catch {
+    return null;
+  }
+}
+
+/** Record a failure with the class-specific TTL (structural 7d, transient 15m,
+ *  gone never). Fire-and-forget. */
+export async function putFailureCache(row: {
+  username: string;
+  year: number;
+  month: number;
+  variant?: string;
+  statusClass: FailureClass;
+}): Promise<boolean> {
+  const rest = supabaseRest();
+  const u = row.username.trim().toLowerCase();
+  if (!rest || !u) return false;
+  const ttl = row.statusClass === "structural" ? STRUCTURAL_TTL_MS : row.statusClass === "transient" ? TRANSIENT_TTL_MS : null;
+  try {
+    const res = await fetch(`${rest.url}/rest/v1/chess_failure_cache?on_conflict=username,year,month,endpoint_variant`, {
+      method: "POST",
+      headers: headers(rest.key, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }),
+      body: JSON.stringify({
+        username: u,
+        year: row.year,
+        month: row.month,
+        endpoint_variant: row.variant ?? "json",
+        status_class: row.statusClass,
+        failed_at: new Date().toISOString(),
+        expires_at: ttl === null ? null : new Date(Date.now() + ttl).toISOString(),
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// chesscom_account_weight — cached archive-weight estimate for pairing-symmetry
+// routing (see migrations/20260808010000_chesscom_account_weight.sql). Lets the
+// engine prefer the LIGHTER side of a pairing when it has a choice of which
+// known handle's archive to pull. Service-role only, fail-soft.
+// ---------------------------------------------------------------------------
+
+/** The cached weight for an account, or null on miss/expiry/store error. */
+export async function getAccountWeight(username: string): Promise<number | null> {
+  const rest = supabaseRest();
+  const u = username.trim().toLowerCase();
+  if (!rest || !u) return null;
+  try {
+    const res = await fetch(
+      `${rest.url}/rest/v1/chesscom_account_weight?username=eq.${encodeURIComponent(u)}&expires_at=gt.${encodeURIComponent(new Date().toISOString())}&select=weight&limit=1`,
+      { headers: headers(rest.key) }
+    );
+    if (!res.ok) return null;
+    const rows = (await res.json()) as Array<{ weight?: number }>;
+    const row = Array.isArray(rows) ? rows[0] : undefined;
+    return row && typeof row.weight === "number" ? row.weight : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Upsert an account's weight estimate (refreshes the 30-day TTL). */
+export async function putAccountWeight(username: string, weight: number, source = "archives_len"): Promise<boolean> {
+  const rest = supabaseRest();
+  const u = username.trim().toLowerCase();
+  if (!rest || !u) return false;
+  try {
+    const res = await fetch(`${rest.url}/rest/v1/chesscom_account_weight?on_conflict=username`, {
+      method: "POST",
+      headers: headers(rest.key, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }),
+      body: JSON.stringify({
+        username: u,
+        weight: Math.max(0, Math.round(weight)),
+        source,
+        fetched_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + WEIGHT_TTL_MS).toISOString(),
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}

@@ -82,7 +82,7 @@ import type {
   UsernameCandidate,
 } from "./graphTypes";
 import { verifyChesscom, verifyLichess, lichessExistingSubset, type VerifiedProfile } from "./verify";
-import { pool, politeFetch, lichessSlot } from "./net";
+import { pool, politeFetch, lichessSlot, classifyChesscomStatus } from "./net";
 import type { Conductor } from "./conductor";
 import {
   nameSimilarity,
@@ -607,7 +607,7 @@ function fetchChesscomTournamentGames(slugOrUrl: string, signal?: AbortSignal): 
       if (budget <= 0 || signal?.aborted) return null;
       budget--;
       try {
-        const res = await politeFetch(url, { headers: { Accept: "application/json" }, signal }, "chesscom", 20_000);
+        const res = await politeFetch(url, { headers: { Accept: "application/json", "Accept-Encoding": "gzip" }, signal }, "chesscom", 20_000);
         if (!res.ok) return null;
         return (await res.json()) as Record<string, unknown>;
       } catch {
@@ -662,79 +662,172 @@ function fetchChesscomTournamentGames(slugOrUrl: string, signal?: AbortSignal): 
  *      instead of re-fetching — a hard-down shard must not be re-hammered
  *      with full backoff by every judgment that touches its window. */
 const MONTH_FAIL_COOLDOWN_MS = 45_000;
-/** In-place retry backoff for a flaking shard: 1s, then 3s, then 10s. */
-const SHARD_BACKOFF_MS = [1000, 3000, 10000];
+/** One retry for a TRANSIENT proxy-layer failure (502/503/504/524) before the
+ *  month is left as a hole. 500s are NOT retried (see below). */
+const TRANSIENT_RETRY_MS = 2000;
 
+/** The extra Chess.com caches the archive ladder needs beyond the month cache:
+ *  the per-account archives list (Phase 2 cheap verdict) and the session-scoped
+ *  structural/gone month sets (Phase 1 classification). */
+interface ArchiveXCaches {
+  archiveLists: Map<string, Promise<Set<string> | null>>;
+  structural: Set<string>;
+  gone: Set<string>;
+}
+
+/** The set of `${y}-${m}` months that EXIST for an account, from the tiny
+ *  `/pub/player/{u}/games/archives` list — memoized per username. This is the
+ *  Phase 2 cheap verdict: it costs almost nothing and lets us tell "the player
+ *  provably has no games in this month" (month absent from a list that loaded)
+ *  apart from "we couldn't fetch the month" (a data hole) BEFORE pulling any
+ *  heavy monthly archive. Resolves to `null` when the list fetch itself fails,
+ *  in which case the cheap verdict is unavailable and callers fall through. */
+function chesscomArchiveMonths(username: string, x: ArchiveXCaches, signal?: AbortSignal): Promise<Set<string> | null> {
+  const uLower = username.toLowerCase();
+  const hit = x.archiveLists.get(uLower);
+  if (hit) return hit;
+  const p = (async (): Promise<Set<string> | null> => {
+    try {
+      const res = await politeFetch(
+        `https://api.chess.com/pub/player/${uLower}/games/archives`,
+        { headers: { Accept: "application/json", "Accept-Encoding": "gzip" }, signal },
+        "chesscom",
+        4000
+      );
+      if (!res.ok) return null; // list unavailable — fall through to per-month fetch
+      const data = await res.json();
+      const urls: string[] = Array.isArray(data?.archives) ? data.archives : [];
+      const months = new Set<string>();
+      for (const url of urls) {
+        const mm = /\/(\d{4})\/(\d{2})$/.exec(url);
+        if (mm) months.add(`${Number(mm[1])}-${Number(mm[2])}`);
+      }
+      return months;
+    } catch {
+      return null;
+    }
+  })();
+  x.archiveLists.set(uLower, p);
+  // Never remember a failed list — a caller past the hiccup should get a real try.
+  void p.then((s) => {
+    if (s === null && x.archiveLists.get(uLower) === p) x.archiveLists.delete(uLower);
+  });
+  return p;
+}
+
+/** One player's Chess.com archive for one month, memoized in `cache`.
+ *
+ *  The ordered ladder (Phase 2/3):
+ *    0. Cheap verdict — if the account's `/games/archives` list loaded and this
+ *       month is absent from it, return [] as a REAL "nothing then" (no heavy
+ *       fetch, no hole). This is what separates a fetch failure from no-games,
+ *       the exact conflation that produced the user-facing "data hole" message.
+ *    1. Monthly JSON archive, with the responses CLASSIFIED instead of blindly
+ *       retried (Chess.com staff: a 500 is their code failing on response size —
+ *       deterministic, and re-requesting escalates us to 429):
+ *         404 → the month genuinely has no games (a verdict).
+ *         410 → data guaranteed never to exist; recorded, never requested again.
+ *         500 → STRUCTURAL_FAIL: recorded for the search, never re-attempted,
+ *               left as a hole (callers fall through to other game sources).
+ *         502/503/504/524 → transient proxy hiccup: ONE retry after 2s, then hole.
+ *  (The tournament-bracket source above and the pairing-symmetry choice of which
+ *   side to fetch are the other rungs that route around a heavy/failing month.) */
 function chesscomMonthGames(
   username: string,
   y: number,
   m: number,
   cache: Map<string, Promise<ArchiveGame[]>>,
   signal?: AbortSignal,
-  failedMonths?: Map<string, number>
+  failedMonths?: Map<string, number>,
+  x?: ArchiveXCaches
 ): Promise<ArchiveGame[]> {
   const uLower = username.toLowerCase();
   const key = `${uLower}:${y}:${m}`;
   const hit = cache.get(key);
   if (hit) return hit;
+  // Permanent-for-session outcomes never re-hit the wire.
+  if (x?.gone.has(key)) return Promise.resolve([]); // definitive empty (410)
+  if (x?.structural.has(key)) return Promise.resolve([]); // hole (500) — stays marked via archiveHole
   const failedAt = failedMonths?.get(key);
   if (failedAt !== undefined && Date.now() - failedAt < MONTH_FAIL_COOLDOWN_MS) {
-    return Promise.resolve([]); // still cooling down — the hole stays marked, nothing is cached
+    return Promise.resolve([]); // transient cooldown — the hole stays marked
   }
-  const giveUp = (): ArchiveGame[] => {
+  const giveUpTransient = (): ArchiveGame[] => {
     cache.delete(key);
     failedMonths?.set(key, Date.now());
     return [];
   };
   const p = (async (): Promise<ArchiveGame[]> => {
-    for (let attempt = 0; ; attempt++) {
+    // Rung 0 — cheap verdict via the archives list.
+    if (x) {
+      const months = await chesscomArchiveMonths(uLower, x, signal);
+      if (months && !months.has(`${y}-${m}`)) {
+        failedMonths?.delete(key);
+        return []; // provably no games that month — not a hole
+      }
+    }
+    // Rung 1 — monthly JSON archive, classified.
+    let transientRetried = false;
+    for (;;) {
       let res: Response;
       try {
         res = await politeFetch(
           `https://api.chess.com/pub/player/${uLower}/games/${y}/${String(m).padStart(2, "0")}`,
-          { headers: { Accept: "application/json" }, signal },
+          { headers: { Accept: "application/json", "Accept-Encoding": "gzip" }, signal },
           "chesscom",
-          20_000
+          4000
         );
       } catch {
-        return giveUp(); // politeFetch already retried network errors
+        return giveUpTransient(); // politeFetch already retried network errors
       }
-      if (!res.ok) {
-        // A real 404 (month truly absent) caches as empty; a 404 whose body
-        // carries a 5xx error code is the shard flake in disguise.
-        let transient = res.status !== 404;
-        if (!transient) {
-          try {
-            const body = await res.text();
-            transient = /"code"\s*:\s*5\d\d|internal error/i.test(body);
-          } catch {
-            transient = true;
-          }
+      if (res.ok) {
+        let data;
+        try {
+          data = await res.json();
+        } catch {
+          return giveUpTransient(); // corrupt body — a transient hole
         }
-        if (!transient) {
-          failedMonths?.delete(key);
-          return [];
-        }
-        // Exponential backoff (1s → 3s → 10s) instead of the old linear
-        // 1.5s/3s: a flaking shard needs time to recover, and hammering it on a
-        // tight cadence just extends the outage. Abort-aware so a cancelled
-        // search never sits out a 10s wait.
-        if (attempt < SHARD_BACKOFF_MS.length && !signal?.aborted) {
-          await abortableDelay(SHARD_BACKOFF_MS[attempt], signal);
-          if (signal?.aborted) return giveUp();
-          continue;
-        }
-        return giveUp();
+        const out = parseChesscomGamesFor(data.games, uLower);
+        failedMonths?.delete(key);
+        return out;
       }
-      let data;
-      try {
-        data = await res.json();
-      } catch {
-        return giveUp(); // corrupt body — treat as the same transient hole
+      let cls = classifyChesscomStatus(res.status);
+      // A 404 whose BODY carries a 5xx error code is the documented shard flake
+      // in disguise (Chess.com serves 404 for a month that failed internally) —
+      // treat it as structural, not as "month absent".
+      if (cls === "absent") {
+        let flake = false;
+        try {
+          flake = /"code"\s*:\s*5\d\d|internal error/i.test(await res.text());
+        } catch {
+          flake = true;
+        }
+        if (flake) cls = "structural";
       }
-      const out = parseChesscomGamesFor(data.games, uLower);
-      failedMonths?.delete(key);
-      return out;
+      if (cls === "absent") {
+        failedMonths?.delete(key);
+        return []; // real verdict — the month genuinely has no games
+      }
+      if (cls === "gone") {
+        x?.gone.add(key);
+        failedMonths?.delete(key);
+        return []; // permanent definitive empty
+      }
+      if (cls === "structural") {
+        // 500 — do NOT retry (a repeat escalates to 429). Record for the search
+        // and leave the month as a hole so callers fall through, not reject.
+        x?.structural.add(key);
+        cache.delete(key);
+        return [];
+      }
+      // transient (502/503/504/524) or other 4xx/5xx — ONE retry, then a hole.
+      if (!transientRetried && !signal?.aborted) {
+        transientRetried = true;
+        await abortableDelay(TRANSIENT_RETRY_MS, signal);
+        if (signal?.aborted) return giveUpTransient();
+        continue;
+      }
+      return giveUpTransient();
     }
   })();
   cache.set(key, p);
@@ -753,21 +846,34 @@ export function sharedChesscomMonthGames(
   shared: SharedCaches,
   signal?: AbortSignal
 ): Promise<{ oppHandle: string; endMs: number }[]> {
-  return chesscomMonthGames(username, y, m, shared.ccMonths, signal, shared.ccFailedMonths);
+  return chesscomMonthGames(username, y, m, shared.ccMonths, signal, shared.ccFailedMonths, archiveXCaches(shared));
 }
 
-/** Chess.com: pull the monthly archives spanning the window IN PARALLEL (they
- *  are independent GETs behind the global gate), keep in-window games. */
+/** Build the archive ladder's extra-cache bundle from the search-wide caches. */
+function archiveXCaches(shared: SharedCaches): ArchiveXCaches {
+  return { archiveLists: shared.ccArchiveLists, structural: shared.ccStructural, gone: shared.ccGone };
+}
+
+/** Chess.com: pull the monthly archives spanning the window, keep in-window
+ *  games. Fetched SEQUENTIALLY, never with Promise.all — a window is 1-3 months
+ *  and the request discipline (Phase 1) is that Chess.com sees a paced serial
+ *  stream, not a burst that earns a 429. The global gate + pacer would bound a
+ *  Promise.all anyway, but a straight loop makes the contract explicit. */
 async function chesscomWindowGames(
   username: string,
   startMs: number,
   endMs: number,
   monthCache: Map<string, Promise<ArchiveGame[]>>,
   signal?: AbortSignal,
-  failedMonths?: Map<string, number>
+  failedMonths?: Map<string, number>,
+  x?: ArchiveXCaches
 ): Promise<ArchiveGame[]> {
   const months = monthsBetween(startMs, endMs);
-  const perMonth = await Promise.all(months.map(({ y, m }) => chesscomMonthGames(username, y, m, monthCache, signal, failedMonths)));
+  const perMonth: ArchiveGame[][] = [];
+  for (const { y, m } of months) {
+    if (signal?.aborted) break;
+    perMonth.push(await chesscomMonthGames(username, y, m, monthCache, signal, failedMonths, x));
+  }
   return perMonth
     .flat()
     .filter((g) => g.endMs >= startMs && g.endMs <= endMs)
@@ -1155,6 +1261,22 @@ export interface SharedCaches {
    *  the data, not proof the player was idle, and must never be cached or
    *  judged as "no games". Recent failures fast-fail instead of refetching. */
   ccFailedMonths: Map<string, number>;
+  /** Per-username `/pub/player/{u}/games/archives` result — the tiny list of
+   *  months that EXIST for the account. A resolved Set means the cheap verdict
+   *  path is available: a month absent from it is a definitive "played nothing
+   *  then", NOT a data hole (Phase 2). `null` = the list fetch itself failed, so
+   *  the cheap verdict is unavailable and callers fall through to the archive. */
+  ccArchiveLists: Map<string, Promise<Set<string> | null>>;
+  /** Chess.com months (`user:y:m`) that returned a 500 STRUCTURAL_FAIL this
+   *  search. A 500 is Chess.com's code failing to build the response (size
+   *  limits etc.) — deterministic, and retrying just escalates us toward a 429 —
+   *  so it is recorded once and NEVER re-attempted within the search. Counts as
+   *  a data HOLE (we never got the games), same as a transient failure. */
+  ccStructural: Set<string>;
+  /** Chess.com months (`user:y:m`) that returned 410 Gone — Chess.com
+   *  guarantees data will never exist here. A definitive empty (not a hole),
+   *  never requested again. */
+  ccGone: Set<string>;
   /** Lichess windows (`user:startDay:endDay`) whose game export failed —
    *  the same hole semantics as ccFailedMonths. */
   lichessFailedWindows: Set<string>;
@@ -1174,6 +1296,9 @@ export function makeSharedCaches(): SharedCaches {
     ccMonths: new Map(),
     google: new Map(),
     ccFailedMonths: new Map(),
+    ccArchiveLists: new Map(),
+    ccStructural: new Set(),
+    ccGone: new Set(),
     lichessFailedWindows: new Set(),
     profileFailures: new Map(),
   };
@@ -1361,7 +1486,13 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
    *  may treat it as a rejection verdict. */
   const archiveHole = (platform: OnlinePlatform, handle: string, startMs: number, endMs: number): boolean =>
     platform === "chesscom"
-      ? monthsBetween(startMs, endMs).some(({ y, m }) => shared.ccFailedMonths.has(`${handle.toLowerCase()}:${y}:${m}`))
+      ? monthsBetween(startMs, endMs).some(({ y, m }) => {
+          const k = `${handle.toLowerCase()}:${y}:${m}`;
+          // A transient-failed month OR a 500 structural month is a hole (we
+          // never got the games); a 410-Gone / archives-list-absent month is a
+          // real empty, not a hole, and is deliberately NOT counted here.
+          return shared.ccFailedMonths.has(k) || shared.ccStructural.has(k);
+        })
       : shared.lichessFailedWindows.has(windowKeyOf(handle, startMs, endMs));
   const windowGames = (platform: OnlinePlatform, handle: string, startMs: number, endMs: number): Promise<ArchiveGame[]> => {
     const key = `${platform}:${windowKeyOf(handle, startMs, endMs)}`;
@@ -1369,7 +1500,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (hit) return hit;
     const p =
       platform === "chesscom"
-        ? chesscomWindowGames(handle, startMs, endMs, shared.ccMonths, signal, shared.ccFailedMonths)
+        ? chesscomWindowGames(handle, startMs, endMs, shared.ccMonths, signal, shared.ccFailedMonths, archiveXCaches(shared))
         : lichessWindowGames(handle, startMs, endMs, signal, shared.lichessFailedWindows, windowKeyOf(handle, startMs, endMs));
     gamesCache.set(key, p);
     // An aggregate with a failed month/export in its span must not be
@@ -1894,7 +2025,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             if (archiveHole(platform, prof.username, win.startMs, win.endMs)) {
               transientMiss = true;
               log(
-                `Google lead @${prof.username} (${name}): chess.com's archive shard failed for the "${ev.name}" window — data hole, not a verdict; will retry later.`
+                `Still confirming @${prof.username} for ${name} — Chess.com didn't return their "${ev.name}" games this pass; will retry.`
               );
             } else {
               log(
@@ -2096,7 +2227,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           if (!found) log(`${name}: ran out of time mid-verification of ${guessPassers.length} name-matching account(s) — not a verdict.`);
         } else if (transientMiss) {
           log(
-            `${name}: ${guessPassers.length} name-matching account(s) exist but chess.com's archive shards failed while checking them — data hole, not a namesake verdict; will retry.`
+            `${name}: ${guessPassers.length} possible match(es) — still verifying; Chess.com didn't return their game history this pass. Will keep trying.`
           );
         } else {
           log(
@@ -2466,7 +2597,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       evidence.push({
         kind: "other",
         weight: 0,
-        label: `The account's profile couldn't be fetched during the search (platform data hole or a closed/renamed account) — the identification rests on the pairing evidence above`,
+        label: `The account's profile couldn't be loaded during the search (it may be closed or renamed) — the identification rests on the pairing evidence above`,
         source: "uscf-graph",
       });
     } else {
@@ -2656,7 +2787,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
     log(
       `${prefix}${
-        noProfile ? " — its profile wouldn't load (a data hole, not a verdict), but the aligned board still counts" : ""
+        noProfile ? " — its profile wouldn't load, but the aligned board still counts" : ""
       }${disq ? " (currently filed as another section player — likely that mapping, not this board, is the mis-alignment)" : ""} — vote ${votes}/2; holding for a second independent opponent to corroborate before crowning.`
     );
     return false;
@@ -2873,7 +3004,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         const recovered = await tournamentHoleGames(slugs, handle, app.startMs, app.endMs);
         if (recovered.length) {
           log(
-            `Recovered ${recovered.length} of @${handle}'s (${srcName}) "${ev.name}" game(s) from the Chess.com tournament bracket — routing around the failing monthly-archive shard.`
+            `Recovered ${recovered.length} of @${handle}'s (${srcName}) "${ev.name}" game(s) from the Chess.com tournament bracket.`
           );
           games = recovered;
         }
@@ -2888,8 +3019,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         const hk = `${memberId}:${platform}:${ev.eventId}`;
         const n = holeRetries.get(hk) || 0;
         log(
-          `Couldn't fetch @${handle}'s (${srcName}) archive for the "${ev.name}" window — chess.com shard failure, not a namesake verdict; ${
-            n < 2 ? "keeping the mapping and retrying" : "keeping the mapping (retries exhausted here)"
+          `Chess.com didn't return @${handle}'s (${srcName}) "${ev.name}" games this pass — keeping the mapping and ${
+            n < 2 ? "retrying" : "moving on (retries exhausted here)"
           }.`
         );
         if (n < 2) {
@@ -3866,7 +3997,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         // data a fresh fetch would return, so seed the trace-back from them.
         let prof = await verifyOn(platform, acc.username);
         if (!prof) {
-          log(`Couldn't re-fetch @${acc.username}'s profile (data hole) — seeding the trace-back from the dive's own verified details.`);
+          log(`Couldn't re-load @${acc.username}'s profile — seeding the trace-back from the dive's own verified details.`);
           prof = {
             platform,
             username: acc.username,
