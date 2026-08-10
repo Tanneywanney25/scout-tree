@@ -98,12 +98,12 @@ export function semaphore(limit: number): Gate {
  *  Chess.com's staff describe serial access as unlimited and parallel access as
  *  refusable with 429 (practical ceiling ≈3 archive req/s). So this is DELIBERATELY
  *  low: the search still runs any number of logical agents, but only a few
- *  HTTP requests are ever in flight, and the pacer below spaces them. 4 is a
- *  measured compromise — a live probe showed 12-wide caused no 5xx, but a low
- *  cap keeps us clear of the ~3 req/s ceiling; 4 (vs 2) avoids one slow multi-MB
- *  archive head-of-line-blocking the pipeline. The pacer below, not this cap, is
+ *  HTTP requests are ever in flight, and the pacer below spaces them. A live
+ *  probe showed 12-wide caused no 5xx and only a burst 429; 8 lets the engine
+ *  clear the archive volume a full traversal needs without head-of-line blocking
+ *  on slow multi-MB downloads, while the 350ms pacer below — not this cap — stays
  *  the real rate governor. The conductor can still retune it via gate.setLimit. */
-const CC_MAX_INFLIGHT = 4;
+const CC_MAX_INFLIGHT = 8;
 export const chesscomGate = semaphore(CC_MAX_INFLIGHT);
 
 // Chess.com pacer — a minimum gap between the START of consecutive Chess.com

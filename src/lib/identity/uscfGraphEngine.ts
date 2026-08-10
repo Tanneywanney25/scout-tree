@@ -439,11 +439,20 @@ export function parseEventTc(timeControl?: string): EventTc | null {
  *  control accepts an equal increment or none (platforms lack delay); a control
  *  with no increment/delay means an exact base with zero increment. */
 export function gameMatchesTc(g: { baseSecs?: number; incSecs?: number }, tc: EventTc): boolean {
-  if (g.baseSecs === undefined || g.baseSecs !== tc.baseSecs) return false;
+  if (g.baseSecs === undefined) return false;
+  // Phase G: a TIGHT tolerance so a real event game isn't discarded from the
+  // precise time-control bucket over a slight mismatch — a base-time rounding,
+  // or an organiser running delay where the USCF string says increment. Kept
+  // deliberately narrow (±30s base, ±1s increment): a broad window would let a
+  // casual blitz/bullet pool read as a rapid/classical event — exactly the
+  // false-match the precise-TC scope exists to prevent. Genuinely different but
+  // same-class controls are already caught by scopeToEvent's expectedTimeClasses
+  // fallback, so keeping this narrow loses nothing real.
+  if (Math.abs(g.baseSecs - tc.baseSecs) > 30) return false;
   const inc = g.incSecs ?? 0;
-  if (tc.incSecs !== undefined) return inc === tc.incSecs;
-  if (tc.delaySecs !== undefined) return inc === tc.delaySecs || inc === 0;
-  return inc === 0;
+  if (tc.incSecs !== undefined) return Math.abs(inc - tc.incSecs) <= 1;
+  if (tc.delaySecs !== undefined) return Math.abs(inc - tc.delaySecs) <= 1 || inc === 0;
+  return inc <= 1;
 }
 
 /** Soft expectation of platform time classes for a section. */
@@ -467,7 +476,24 @@ function expectedTimeClasses(ev: GraphEvent): Set<string> {
 // Date-windowed game fetchers (the "sort their games by the event's dates")
 // ---------------------------------------------------------------------------
 
-interface ArchiveGame {
+// Phase I — persistent archive cache, injected by the SERVER-side caller (the
+// Node CLI harness or the resolve-identity edge function) so it can use the
+// service-role store; the browser passes nothing and behaves exactly as before.
+// A closed month is immutable, so the biggest latency win is serving it from
+// Postgres instead of re-fetching the same player/month on every search. The
+// engine stays dependency-free — it only calls these hooks, fail-soft.
+export interface PersistentArchiveCache {
+  /** Cached parsed games for a month, or null on miss/expiry/store error. */
+  getMonth(username: string, year: number, month: number): Promise<ArchiveGame[] | null>;
+  /** Persist a month's parsed games (fire-and-forget; closed months never expire). */
+  putMonth(username: string, year: number, month: number, games: ArchiveGame[]): void;
+  /** A recorded failure class for a month (structural/gone block; transient is advisory). */
+  getFailure(username: string, year: number, month: number): Promise<"structural" | "transient" | "gone" | null>;
+  /** Record a month failure with its class-specific TTL (fire-and-forget). */
+  putFailure(username: string, year: number, month: number, cls: "structural" | "transient" | "gone"): void;
+}
+
+export interface ArchiveGame {
   oppHandle: string; // the OTHER player's username
   sourceColor: "white" | "black"; // colour the source account had
   sourceOutcome?: Outcome; // result from the source's point of view
@@ -673,6 +699,8 @@ interface ArchiveXCaches {
   archiveLists: Map<string, Promise<Set<string> | null>>;
   structural: Set<string>;
   gone: Set<string>;
+  /** Phase I — optional server-side persistent cache (undefined in the browser). */
+  persist?: PersistentArchiveCache;
 }
 
 /** The set of `${y}-${m}` months that EXIST for an account, from the tiny
@@ -758,6 +786,27 @@ function chesscomMonthGames(
     return [];
   };
   const p = (async (): Promise<ArchiveGame[]> => {
+    // Phase I — persistent cache (server-side only; a no-op in the browser).
+    // A recorded structural/gone failure short-circuits to a hole/empty; a
+    // cached month is served WITHOUT touching Chess.com — the big win, since an
+    // immutable closed month never has to be re-fetched across searches.
+    if (x?.persist) {
+      const pf = await x.persist.getFailure(uLower, y, m);
+      if (pf === "gone") {
+        x.gone.add(key);
+        return [];
+      }
+      if (pf === "structural") {
+        x.structural.add(key);
+        cache.delete(key);
+        return [];
+      }
+      const cached = await x.persist.getMonth(uLower, y, m);
+      if (cached) {
+        failedMonths?.delete(key);
+        return cached;
+      }
+    }
     // Rung 0 — cheap verdict via the archives list.
     if (x) {
       const months = await chesscomArchiveMonths(uLower, x, signal);
@@ -789,6 +838,7 @@ function chesscomMonthGames(
         }
         const out = parseChesscomGamesFor(data.games, uLower);
         failedMonths?.delete(key);
+        x?.persist?.putMonth(uLower, y, m, out); // Phase I: persist the (immutable, if closed) month
         return out;
       }
       let cls = classifyChesscomStatus(res.status);
@@ -810,6 +860,7 @@ function chesscomMonthGames(
       }
       if (cls === "gone") {
         x?.gone.add(key);
+        x?.persist?.putFailure(uLower, y, m, "gone"); // Phase I: permanent
         failedMonths?.delete(key);
         return []; // permanent definitive empty
       }
@@ -817,6 +868,7 @@ function chesscomMonthGames(
         // 500 — do NOT retry (a repeat escalates to 429). Record for the search
         // and leave the month as a hole so callers fall through, not reject.
         x?.structural.add(key);
+        x?.persist?.putFailure(uLower, y, m, "structural"); // Phase I: 7-day TTL
         cache.delete(key);
         return [];
       }
@@ -827,6 +879,7 @@ function chesscomMonthGames(
         if (signal?.aborted) return giveUpTransient();
         continue;
       }
+      if (!signal?.aborted) x?.persist?.putFailure(uLower, y, m, "transient"); // Phase I: 15-min TTL
       return giveUpTransient();
     }
   })();
@@ -851,7 +904,7 @@ export function sharedChesscomMonthGames(
 
 /** Build the archive ladder's extra-cache bundle from the search-wide caches. */
 function archiveXCaches(shared: SharedCaches): ArchiveXCaches {
-  return { archiveLists: shared.ccArchiveLists, structural: shared.ccStructural, gone: shared.ccGone };
+  return { archiveLists: shared.ccArchiveLists, structural: shared.ccStructural, gone: shared.ccGone, persist: shared.persist };
 }
 
 /** Chess.com: pull the monthly archives spanning the window, keep in-window
@@ -1256,6 +1309,10 @@ export interface SharedCaches {
   games: Map<string, Promise<ArchiveGame[]>>;
   ccMonths: Map<string, Promise<ArchiveGame[]>>;
   google: Map<string, Promise<UsernameCandidate[]>>;
+  /** Phase I — optional server-side persistent archive cache, injected by the
+   *  Node/edge caller (service-role). Undefined in the browser, where it is a
+   *  pure no-op. Set once from TraversalOptions.persistentCache. */
+  persist?: PersistentArchiveCache;
   /** Chess.com months (`user:y:m`) whose archive fetch LAST failed (shard
    *  flake), keyed to the failure time — a window spanning one is a HOLE in
    *  the data, not proof the player was idle, and must never be cached or
@@ -1315,6 +1372,10 @@ export interface TraversalOptions {
   log: (message: string) => void;
   budgetMs?: number;
   hooks?: TraversalHooks;
+  /** Phase I — server-side persistent archive cache (Node CLI / edge function).
+   *  Injected here so the dependency-free engine can serve immutable closed
+   *  months from Postgres without importing the service-role store. */
+  persistentCache?: PersistentArchiveCache;
   /** Internal recursion depth (deep opponent expansion runs at depth 0 only). */
   depth?: number;
   /** Internal: fetch caches handed down to deep-phase sub-traversals. */
@@ -1367,8 +1428,18 @@ interface Appearance {
 }
 
 export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalOptions): Promise<TraversalResult> {
-  const { targetName, signal, hooks = {} } = opts;
+  const { targetName, hooks = {} } = opts;
   const depth = opts.depth ?? 0;
+  // Phase C — early termination. An internal controller, aborted the moment the
+  // target is confirmed with high confidence, combined with the caller's signal.
+  // The engine NEVER throws on abort — every abort check is a graceful
+  // outOfTime/stopNow return — so an internal abort simply cancels in-flight
+  // fetches and ends the loops, returning the crowned account (the same effect
+  // the `found` flag already has, but now WITHOUT waiting on in-flight requests).
+  const stopController = new AbortController();
+  const signal: AbortSignal | undefined = opts.signal
+    ? AbortSignal.any([opts.signal, stopController.signal])
+    : stopController.signal;
   // Track when we last narrated anything: verification pools legitimately go
   // quiet for minutes (dozens of gated/paced probes emit nothing until a
   // verdict), and upstream watchdogs read silence as a wedged engine — the
@@ -1380,6 +1451,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     opts.log(m);
   };
   const shared = opts.shared ?? makeSharedCaches();
+  // Phase I: attach the injected persistent cache to the shared caches so the
+  // archive fetcher (and deep-phase sub-traversals, which share these caches)
+  // consult it. Set once; a sub-traversal inherits it via opts.shared.
+  if (opts.persistentCache && !shared.persist) shared.persist = opts.persistentCache;
   const totalBudgetMs = opts.budgetMs ?? DEFAULT_BUDGET_MS;
   const deadline = Date.now() + totalBudgetMs;
   // The opponent-pivot fallback is the LAST discovery stage before callers
@@ -1770,6 +1845,13 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     links: Map<string, EventLink>;
     junkLinks: Set<string>;
     linkSources: Map<string, Set<string>>;
+    /** Phase A: links whose roster was FETCHED and passed the public-pool count
+     *  check — i.e. proven NOT to be a giant strangers-pool. A games-derived
+     *  link may only scope alignment / feed the tournament bracket once it is
+     *  here (flyer links are the event by construction and bypass this). This is
+     *  the positive counterpart to junkLinks: "proven not a pool", not merely
+     *  "not yet proven a pool", which is what a raw participant ratio can miss. */
+    validatedLinks: Set<string>;
   }
 
   /** The event's TRUSTED chess.com tournament link ids — the shard-proof game
@@ -1777,7 +1859,13 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   const trustedChesscomSlugs = (state: LinkState | undefined): string[] =>
     state
       ? Array.from(state.links.values())
-          .filter((l) => l.kind === "chesscom-tournament" && !state.junkLinks.has(linkKey(l)) && linkTrusted(state, l))
+          .filter(
+            (l) =>
+              l.kind === "chesscom-tournament" &&
+              !state.junkLinks.has(linkKey(l)) &&
+              linkTrusted(state, l) &&
+              (l.source === "flyer" || state.validatedLinks.has(linkKey(l))) // Phase A: bracket-first only on a proven non-pool link
+          )
           .map((l) => l.id)
       : [];
 
@@ -1829,6 +1917,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         if (link.platform !== platform) continue;
         if (state.junkLinks.has(linkKey(link))) continue; // a proven public pool, not this event
         if (!linkTrusted(state, link)) continue; // one source's tournament ≠ the event
+        // Phase A: a games-derived link may scope alignment ONLY after its roster
+        // was fetched and proven not a public pool. Trust (≥2 sources) alone is
+        // what let a big public arena two players each dipped into once crown a
+        // stranger — two coincidental ties are not a roster the event owns.
+        if (link.source !== "flyer" && !state.validatedLinks.has(linkKey(link))) continue;
         const inLink = games.filter((g) => gameInLink(g, link));
         if (inLink.length && (!best || inLink.length > best.inLink.length)) best = { link, inLink };
       }
@@ -2642,7 +2735,27 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     // seed scouts, sibling event agents, deep dives) stands down immediately
     // instead of finishing now-pointless work. A capped "google-lead" is not
     // an identification, so it keeps the search running.
-    if (via.method !== "google-lead") found = true;
+    if (via.method !== "google-lead") {
+      found = true;
+      // Phase C: when the crown is BOTH high-confidence (>0.85) AND backed by ≥2
+      // independent sources (two opponent pairings, an identity-ID match, or a
+      // full-roster elimination), abort every in-flight fetch NOW rather than
+      // letting the fleet drain to the next boundary. A single-board or roster-
+      // name crown still sets `found` (stops new work) but isn't hard-aborted —
+      // the extra corroboration bar keeps a lone loose alignment from cutting the
+      // search short before a second opinion could contest it.
+      const idMatch =
+        !!(targetFideId && profile.fideId && digits(profile.fideId) === targetFideId) || digits(profile.uscfId) === targetId;
+      const twoIndependent = (via.crossVotes ?? 0) >= 2 || idMatch || via.method === "elimination";
+      if (account.confidence > 0.85 && twoIndependent && !stopController.signal.aborted) {
+        log(
+          `Confirmed ${targetName} = @${profile.username} with high confidence via ${
+            (via.crossVotes ?? 0) >= 2 ? `${via.crossVotes} independent opponents` : idMatch ? "an identity-ID match" : "the full tournament roster"
+          } — standing down all remaining searches immediately.`
+        );
+        stopController.abort();
+      }
+    }
 
     // Was this account recorded while its profile shard was down? A re-record
     // WITH the profile is the enrichment upgrade — it must win even at equal
@@ -2821,8 +2934,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     // "linked" to a 22-player section by two casual games). Name-matching 250
     // strangers against 22 real names is a namesake factory, and scoping the
     // game pool to that link discards the real event games — mark it junk.
-    if (handles.length >= 100 && handles.length > 4 * roster.length) {
+    // Flyer links are usually the real event, so stay conservative (≥100 && >4×);
+    // a GAMES-derived link is merely a tournament id tagged on a game and far
+    // more often a public pool the player dipped into, so flag it at a lower
+    // ratio (a real event's roster is ~crosstable-sized, never 2.5×+). The floor
+    // protects small legit sections whose online roster ran a bit larger.
+    const poolFloor = link.source === "flyer" ? 100 : Math.max(40, roster.length + 15);
+    const poolRatio = link.source === "flyer" ? 4 : 2.5;
+    if (handles.length >= poolFloor && handles.length > poolRatio * roster.length) {
       state?.junkLinks.add(linkKey(link));
+      state?.validatedLinks.delete(linkKey(link)); // a pool can never be a scoping source
       log(
         `"${ev.name}": the linked ${platformLabel(link.platform)} ${
           link.kind === "chesscom-tournament" ? "tournament" : link.kind.replace("lichess-", "")
@@ -2830,6 +2951,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       );
       return false;
     }
+    // The roster loaded and is NOT an outsized pool — this link is a legitimate
+    // scoping source (Phase A): record it so scopeToEvent / the tournament
+    // bracket may use its games. (Flyer links are validated by construction, but
+    // recording them too keeps the check uniform.)
+    state?.validatedLinks.add(linkKey(link));
     log(
       `"${ev.name}" is linked to a ${platformLabel(link.platform)} ${
         link.kind === "chesscom-tournament" ? "tournament" : link.kind.replace("lichess-", "")
@@ -2939,6 +3065,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
      *  to this crosstable (e.g. a 250-player arena vs a 22-player section) —
      *  they must neither scope game pools nor feed roster name-matching. */
     junkLinks: Set<string>;
+    /** Phase A: links whose roster was fetched and passed the public-pool count
+     *  check — proven NOT a strangers-pool, so they may scope alignment / feed
+     *  the tournament bracket (see LinkState.validatedLinks). */
+    validatedLinks: Set<string>;
     /** Which DISTINCT crosstable members' window games carry each link. A
      *  games-derived link is only TRUSTED as "the event's tournament" once
      *  TWO independent section players tie to it — a single source can be a
@@ -2951,6 +3081,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     linkSources: Map<string, Set<string>>;
     frontier: { memberId: string; platform: OnlinePlatform; mapping: Mapping }[];
     visited: Set<string>;
+    /** Phase F: count of Chess.com archive fetches for this event that came back
+     *  a HOLE (5xx/timeout). Past a small threshold we try Lichess FIRST for the
+     *  event's remaining seeds — Lichess archives are more reliable, so switching
+     *  order reaches a working game source sooner than retrying Chess.com. */
+    ccArchiveFailures?: number;
     /** How many sources' event-scoped games each opponent handle appeared in —
      *  a handle seen from several section players is almost surely a section
      *  player itself, so it gets verified first. */
@@ -2991,22 +3126,39 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (!app) return false;
     const srcName = memberName.get(memberId) || "player";
     const handle = mapping.profile.username;
-    log(`Pulling @${handle}'s (${srcName}) ${platformLabel(platform)} games from the "${ev.name}" date window…`);
-    let games = await windowGames(platform, handle, app.startMs, app.endMs);
-    // Shard-proof fallback: a failing monthly-archive shard leaves a HOLE that
-    // breaks the pairing chain, but most of these events ran as a concrete
-    // Chess.com tournament whose games live on separate endpoints/infra. When
-    // the event has a TRUSTED chess.com tournament link, recover this handle's
-    // games straight from the bracket instead of surfacing the hole.
-    if (!games.length && platform === "chesscom" && archiveHole(platform, handle, app.startMs, app.endMs)) {
-      const slugs = trustedChesscomSlugs(state);
-      if (slugs.length) {
-        const recovered = await tournamentHoleGames(slugs, handle, app.startMs, app.endMs);
-        if (recovered.length) {
-          log(
-            `Recovered ${recovered.length} of @${handle}'s (${srcName}) "${ev.name}" game(s) from the Chess.com tournament bracket.`
-          );
-          games = recovered;
+    // Phase J — Tournament API FIRST. When this event has a TRUSTED (non-junk)
+    // Chess.com tournament link, the bracket is the PRIMARY game source: it
+    // returns ONLY this event's games, off separate infra than the monthly
+    // archive, so it scopes cleanly to the event (no casual-pool games for the
+    // alignment to lock onto — the very contamination behind the public-pool
+    // false positives) and skips the monthly archive entirely. The archive is
+    // the fallback when there is no trusted tournament link.
+    const ccSlugs = platform === "chesscom" ? trustedChesscomSlugs(state) : [];
+    let games: ArchiveGame[] = [];
+    if (ccSlugs.length) {
+      games = await tournamentHoleGames(ccSlugs, handle, app.startMs, app.endMs);
+      if (games.length)
+        log(`Pulled ${games.length} of @${handle}'s (${srcName}) "${ev.name}" game(s) straight from the Chess.com tournament bracket — event-scoped.`);
+    }
+    if (!games.length) {
+      log(`Pulling @${handle}'s (${srcName}) ${platformLabel(platform)} games from the "${ev.name}" date window…`);
+      games = await windowGames(platform, handle, app.startMs, app.endMs);
+      // Phase F: a Chess.com archive HOLE for this event nudges the platform
+      // order toward Lichess-first for the event's remaining seeds.
+      if (platform === "chesscom" && !games.length && archiveHole(platform, handle, app.startMs, app.endMs)) {
+        state.ccArchiveFailures = (state.ccArchiveFailures ?? 0) + 1;
+      }
+      // A failing monthly archive leaves a HOLE that breaks the pairing chain,
+      // but the event's Chess.com tournament bracket lives on separate infra —
+      // recover from it if a trusted link exists that we didn't already try above.
+      if (!games.length && platform === "chesscom" && !ccSlugs.length && archiveHole(platform, handle, app.startMs, app.endMs)) {
+        const slugs = trustedChesscomSlugs(state);
+        if (slugs.length) {
+          const recovered = await tournamentHoleGames(slugs, handle, app.startMs, app.endMs);
+          if (recovered.length) {
+            log(`Recovered ${recovered.length} of @${handle}'s (${srcName}) "${ev.name}" game(s) from the Chess.com tournament bracket.`);
+            games = recovered;
+          }
         }
       }
     }
@@ -3077,7 +3229,17 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       state.linkSources.set(lk, srcs);
       if (!state.links.has(lk)) state.links.set(lk, link);
       if (state.junkLinks.has(lk)) continue;
-      if (games.filter((g) => gameInLink(g, link)).length < 2) continue;
+      // The moment a games-derived link reaches TWO distinct crosstable sources
+      // it becomes `linkTrusted`, so `scopeToEvent` will start scoping alignment
+      // to it — so it MUST be participant-validated (public-pool count check in
+      // tryRoster) at that point, even if no single source played ≥2 games in it.
+      // A public arena that two section players each dipped into ONCE is exactly
+      // what crowned a stranger for John Abraham: two 1-game ties made the arena
+      // "trusted" while its hundreds-of-players roster was never counted. Validate
+      // on trust-eligibility, not only when one source played several in-link games.
+      const trustEligible = link.source === "flyer" || srcs.size >= 2;
+      const sourcePlayedSeveral = games.filter((g) => gameInLink(g, link)).length >= 2;
+      if (!trustEligible && !sourcePlayedSeveral) continue;
       if (await tryRoster(ev, link, localDeadline, state)) return true;
     }
 
@@ -3503,6 +3665,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         platforms: null,
         seedIdx: 0,
         exhausted: false,
+        ccArchiveFailures: 0,
+        validatedLinks: new Set(),
       };
       workStates.set(ev.eventId, ws);
     }
@@ -3608,7 +3772,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     // section players (Google-first) continuously while PAIRING TRACERS drain
     // the frontier — a fresh mapping is traced the moment it lands, and the
     // frontier never starves waiting on a single slow seed.
-    const order = [...platforms].sort((a, b) => (a === "chesscom" ? -1 : 0) - (b === "chesscom" ? -1 : 0));
+    // Phase F: Chess.com first by default (fast, parallel-friendly), but once
+    // this event has racked up ≥3 Chess.com archive HOLES, try Lichess first —
+    // its archives are more reliable, so a repeatedly-failing Chess.com order
+    // just burns time. Re-evaluated per seed so the switch takes effect live.
+    const platformOrder = (): OnlinePlatform[] => {
+      const leadLichess = (state.ccArchiveFailures ?? 0) >= 3 && platforms.includes("lichess");
+      const lead: OnlinePlatform = leadLichess ? "lichess" : "chesscom";
+      return [...platforms].sort((a, b) => (a === lead ? -1 : 0) - (b === lead ? -1 : 0));
+    };
     let eventFound = false;
     const stopEv = () => eventFound || stopNow(localDeadline);
 
@@ -3671,8 +3843,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             seeding++;
             launch(async () => {
               try {
-                // Chess.com first (fast, parallel-friendly); Lichess when it fails.
-                for (const platform of order) {
+                // Chess.com first (fast, parallel-friendly); Lichess-first once
+                // Chess.com archives have repeatedly failed for this event.
+                for (const platform of platformOrder()) {
                   if (stopEv()) return;
                   if (mapped.get(memberId)?.has(platform)) continue;
                   const prof = await resolveMemberOn(memberId, platform, ev, state, stopEv);
@@ -3958,9 +4131,17 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const deepStop = () => found || outOfTime() || deadline - Date.now() < 25_000;
     const RANK_WINDOW = 12; // graphs fetched per ranking window — a full EXPAND_AGENTS burst, so a window is ranked in one round-trip
 
+    // Phase D — dead-end opponents: a candidate we fully DIVED (resolved their
+    // own account and traced every shared event) that revealed NO new mapping
+    // toward the target is a proven dead end. Record it so it is never re-dived
+    // if it resurfaces in a later ring/window — an expensive full sub-traversal
+    // that already produced nothing must not be paid for twice.
+    const deadEndOpponents = new Set<string>();
+
     /** Resolve one pivot candidate's own username, then trace shared events. */
     const divePivot = async (oppId: string, sub: TournamentGraph, ownEvents: number): Promise<void> => {
       const oppName = memberName.get(oppId) || "opponent";
+      const beforeMapped = mappedTotal();
       log(`Pivot: resolving ${oppName}'s own account first (${ownEvents} online event(s) of their own)…`);
       const subResult = await runGraphTraversal(sub, {
         targetName: oppName,
@@ -4021,7 +4202,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           if (found || outOfTime()) break;
           if (!isTraceableEvent(app.event)) continue;
           if (!(appearances.get(targetId) || []).some((ta) => ta.event.eventId === app.event.eventId)) continue;
-          const state: EventState = { links: new Map(), junkLinks: new Set(), linkSources: new Map(), frontier: [], visited: new Set(), oppSeen: new Map() };
+          const state: EventState = { links: new Map(), junkLinks: new Set(), validatedLinks: new Set(), linkSources: new Map(), frontier: [], visited: new Set(), oppSeen: new Map() };
           if (await traceFromSource(app.event, state, oppId, platform, mapped.get(oppId)!.get(platform)!, deadline)) found = true;
           // Follow any frontier the trace opened up — drained by TRACE_AGENTS
           // parallel tracers exactly like the main loop (the old serial drain
@@ -4042,6 +4223,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             );
           }
         }
+      }
+      // Phase D: dived to completion, target not found, and no new mapping came
+      // out of it (at most the opponent mapped themselves) — a proven dead end.
+      if (!found && mappedTotal() - beforeMapped <= 1) {
+        deadEndOpponents.add(oppId);
+        log(`Pivot: ${oppName}'s games opened no new path toward ${targetName} — dead end; won't re-dive them.`);
       }
     };
 
@@ -4111,7 +4298,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           ranked,
           DEEP_AGENTS,
           async ({ id, g, events }) => {
-            if (deepStop()) return;
+            if (deepStop() || deadEndOpponents.has(id)) return; // Phase D: skip proven dead ends
             await divePivot(id, g, events);
           },
           deepStop
@@ -4154,7 +4341,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     // direct ring genuinely exhausted with time to spare.
     if (!found && !deepStop() && deadline - Date.now() > 60_000) {
       const ring2 = Array.from(memberName.keys())
-        .filter((id) => id !== targetId && !directOpponents.has(id) && !mapped.has(id) && sharesTraceableEvent(id))
+        .filter((id) => id !== targetId && !directOpponents.has(id) && !mapped.has(id) && !deadEndOpponents.has(id) && sharesTraceableEvent(id))
         .sort(bySimplestPivot)
         .slice(0, 24);
       if (ring2.length) {

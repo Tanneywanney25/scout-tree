@@ -26,8 +26,14 @@ import {
   discoverEventOnWeb,
 } from "../supabase/functions/resolve-identity/googleSearch";
 import { readEnv } from "../supabase/functions/_shared/ai";
-import { runGraphTraversal, type TraversalHooks } from "../src/lib/identity/uscfGraphEngine";
+import { runGraphTraversal, type TraversalHooks, type PersistentArchiveCache } from "../src/lib/identity/uscfGraphEngine";
 import type { TournamentGraph } from "../src/lib/identity/graphTypes";
+import {
+  getArchiveCache,
+  putArchiveCache,
+  getFailureCache,
+  putFailureCache,
+} from "../supabase/functions/_shared/identityStore";
 
 interface Args {
   id?: string;
@@ -236,11 +242,36 @@ async function main() {
   console.log(`\n=== Tracing (${unlimited ? "no time limit — runs until exhausted" : `budget ${args.budget}s`}) ===\n`);
   const t0 = Date.now();
   if (args.seeds.length) console.log(`Injecting ${args.seeds.length} test seed(s): ${args.seeds.map((s) => `#${s.memberId}=@${s.username}`).join(", ")}`);
+
+  // Phase I — inject the persistent archive cache when a service-role store is
+  // configured (SUPABASE_URL + a service key in env). Without it the accessors
+  // are instant no-ops and the run behaves exactly as before. This is the same
+  // cache the edge function would use; wiring it here makes it runnable from the
+  // CLI so a repeat search serves immutable closed months straight from Postgres.
+  const hasStore = !!(readEnv("SUPABASE_URL") || readEnv("VITE_SUPABASE_URL"));
+  const persistentCache: PersistentArchiveCache = {
+    async getMonth(u, y, m) {
+      const hit = await getArchiveCache(u, y, m, "json");
+      return hit ? (hit.payload as any) : null;
+    },
+    putMonth(u, y, m, games) {
+      void putArchiveCache({ username: u, year: y, month: m, payload: games, byteSize: JSON.stringify(games).length });
+    },
+    async getFailure(u, y, m) {
+      return await getFailureCache(u, y, m, "json");
+    },
+    putFailure(u, y, m, cls) {
+      void putFailureCache({ username: u, year: y, month: m, statusClass: cls });
+    },
+  };
+  console.log(hasStore ? "Persistent archive cache: ON (Supabase service-role store configured)." : "Persistent archive cache: OFF (no SUPABASE_URL + service key in env).");
+
   const result = await runGraphTraversal(graph, {
     targetName: member.name,
     targetRating,
     targetFideId: member.fideId,
     ...(unlimited ? {} : { budgetMs: args.budget * 1000 }),
+    ...(hasStore ? { persistentCache } : {}),
     hooks,
     seedMappings: args.seeds,
     log: (m) => console.log(`  [+${elapsed()}s] ${m}`),
