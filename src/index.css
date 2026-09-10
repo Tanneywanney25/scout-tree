@@ -2,6 +2,23 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Brand webfonts (self-hosted, licensed): Menco for body/UI, Fat Frank for display */
+@font-face {
+  font-family: "Menco";
+  src: url("/fonts/Menco-Black.woff2") format("woff2");
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Fat Frank";
+  src: url("/fonts/FatFrank-Regular.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* Definition of the design system. All colors, gradients, fonts, etc should be defined here.
 All colors MUST be HSL.
 
