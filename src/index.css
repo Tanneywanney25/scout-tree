@@ -2,112 +2,120 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here.
 All colors MUST be HSL.
+
+Visual language adapted from the Pudgy Penguins storefront:
+  - Bright light-blue backgrounds (#F3FBFF) with deep navy text (#00142D)
+  - Electric-blue brand accent (#477DFD)
+  - Very rounded "boxes", pill-shaped buttons + inputs
+  - Chunky rounded display headings, UPPERCASE with a touch of tracking
 */
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 220 13% 13%;
+    /* Surfaces */
+    --background: 200 100% 98%;
+    --foreground: 213 100% 9%;
 
     --card: 0 0% 100%;
-    --card-foreground: 220 13% 13%;
+    --card-foreground: 213 100% 9%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 220 13% 13%;
+    --popover-foreground: 213 100% 9%;
 
-    /* Chess green theme */
-    --primary: 142 76% 36%;
+    /* Electric-blue brand accent (Pudgy #477DFD, deepened slightly for legibility) */
+    --primary: 222 83% 53%;
     --primary-foreground: 0 0% 100%;
-    
-    --primary-light: 142 76% 46%;
-    --primary-dark: 142 76% 26%;
 
-    --secondary: 220 13% 95%;
-    --secondary-foreground: 220 13% 13%;
+    --primary-light: 222 90% 63%;
+    --primary-dark: 216 90% 40%;
 
-    --muted: 220 13% 95%;
-    --muted-foreground: 220 9% 46%;
+    --secondary: 205 60% 94%;
+    --secondary-foreground: 213 100% 9%;
 
-    --accent: 142 76% 36%;
-    --accent-foreground: 0 0% 100%;
+    --muted: 205 45% 94%;
+    --muted-foreground: 214 22% 40%;
 
-    --destructive: 0 84% 60%;
+    --accent: 208 90% 92%;
+    --accent-foreground: 213 100% 9%;
+
+    --destructive: 8 75% 45%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 220 13% 91%;
-    --input: 220 13% 91%;
-    --ring: 142 76% 36%;
+    --border: 214 38% 88%;
+    --input: 214 38% 88%;
+    --ring: 222 83% 53%;
 
-    --radius: 0.5rem;
+    --radius: 1rem;
 
-    /* Chess-specific colors */
-    --chess-board-light: 46 68% 84%;
-    --chess-board-dark: 142 25% 45%;
-    
-    /* Confidence badges */
-    --confidence-high: 142 76% 36%;
+    /* Chess board — blue-tinted to match the brand */
+    --chess-board-light: 205 60% 90%;
+    --chess-board-dark: 216 55% 42%;
+
+    /* Confidence badges (semantic status colors) */
+    --confidence-high: 156 84% 34%;
     --confidence-medium: 45 93% 47%;
-    --confidence-low: 0 84% 60%;
+    --confidence-low: 8 75% 45%;
 
-    --sidebar-background: 0 0% 98%;
-    --sidebar-foreground: 220 13% 13%;
-    --sidebar-primary: 142 76% 36%;
+    --sidebar-background: 200 60% 97%;
+    --sidebar-foreground: 213 100% 9%;
+    --sidebar-primary: 222 83% 53%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 220 13% 95%;
-    --sidebar-accent-foreground: 220 13% 13%;
-    --sidebar-border: 220 13% 91%;
-    --sidebar-ring: 142 76% 36%;
+    --sidebar-accent: 208 65% 92%;
+    --sidebar-accent-foreground: 213 100% 9%;
+    --sidebar-border: 214 38% 88%;
+    --sidebar-ring: 222 83% 53%;
   }
 
   .dark {
-    --background: 220 13% 9%;
-    --foreground: 0 0% 98%;
+    /* Surfaces — deep Pudgy navy */
+    --background: 214 60% 8%;
+    --foreground: 200 100% 98%;
 
-    --card: 220 13% 12%;
-    --card-foreground: 0 0% 98%;
+    --card: 214 45% 12%;
+    --card-foreground: 200 100% 98%;
 
-    --popover: 220 13% 12%;
-    --popover-foreground: 0 0% 98%;
+    --popover: 214 45% 12%;
+    --popover-foreground: 200 100% 98%;
 
-    --primary: 142 76% 46%;
-    --primary-foreground: 220 13% 9%;
-    
-    --primary-light: 142 76% 56%;
-    --primary-dark: 142 76% 36%;
+    --primary: 222 90% 63%;
+    --primary-foreground: 214 60% 8%;
 
-    --secondary: 220 13% 15%;
-    --secondary-foreground: 0 0% 98%;
+    --primary-light: 222 95% 72%;
+    --primary-dark: 222 80% 50%;
 
-    --muted: 220 13% 15%;
-    --muted-foreground: 220 9% 65%;
+    --secondary: 214 35% 18%;
+    --secondary-foreground: 200 100% 98%;
 
-    --accent: 142 76% 46%;
-    --accent-foreground: 220 13% 9%;
+    --muted: 214 35% 18%;
+    --muted-foreground: 210 25% 70%;
+
+    --accent: 214 40% 22%;
+    --accent-foreground: 200 100% 98%;
 
     --destructive: 0 62% 50%;
     --destructive-foreground: 0 0% 98%;
 
-    --border: 220 13% 20%;
-    --input: 220 13% 20%;
-    --ring: 142 76% 46%;
+    --border: 214 35% 22%;
+    --input: 214 35% 22%;
+    --ring: 222 90% 63%;
 
-    --chess-board-light: 46 68% 74%;
-    --chess-board-dark: 142 25% 35%;
-    
-    --confidence-high: 142 76% 46%;
+    --chess-board-light: 205 40% 78%;
+    --chess-board-dark: 216 50% 38%;
+
+    --confidence-high: 156 70% 45%;
     --confidence-medium: 45 93% 57%;
-    --confidence-low: 0 84% 60%;
+    --confidence-low: 6 80% 60%;
 
-    --sidebar-background: 220 13% 12%;
-    --sidebar-foreground: 0 0% 98%;
-    --sidebar-primary: 142 76% 46%;
-    --sidebar-primary-foreground: 220 13% 9%;
-    --sidebar-accent: 220 13% 15%;
-    --sidebar-accent-foreground: 0 0% 98%;
-    --sidebar-border: 220 13% 20%;
-    --sidebar-ring: 142 76% 46%;
+    --sidebar-background: 214 45% 12%;
+    --sidebar-foreground: 200 100% 98%;
+    --sidebar-primary: 222 90% 63%;
+    --sidebar-primary-foreground: 214 60% 8%;
+    --sidebar-accent: 214 40% 22%;
+    --sidebar-accent-foreground: 200 100% 98%;
+    --sidebar-border: 214 35% 22%;
+    --sidebar-ring: 222 90% 63%;
   }
 }
 
@@ -119,12 +127,32 @@ All colors MUST be HSL.
   body {
     @apply bg-background text-foreground font-sans antialiased;
   }
-  
+
+  /* Chunky rounded display headings — Pudgy "Fat Frank" feel via Fredoka */
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-display;
+    letter-spacing: 0.012em;
+  }
+
+  /* The larger display headings get the brand's UPPERCASE treatment */
+  h1,
+  h2,
+  h3,
+  h4 {
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+
   /* Chess notation styling */
   .chess-notation {
     @apply font-mono text-sm;
   }
-  
+
   /* Smooth transitions */
   * {
     @apply transition-colors duration-200;
