@@ -14,8 +14,8 @@ export default {
     },
     extend: {
       fontFamily: {
-        sans: ['"Bricolage Grotesque"', "ui-sans-serif", "system-ui", "sans-serif"],
-        display: ['"Fredoka"', '"Bricolage Grotesque"', "ui-sans-serif", "sans-serif"],
+        sans: ['"Menco"', '"Bricolage Grotesque"', "ui-sans-serif", "system-ui", "sans-serif"],
+        display: ['"Fat Frank"', '"Bricolage Grotesque"', "ui-sans-serif", "sans-serif"],
       },
       colors: {
         border: "hsl(var(--border))",
