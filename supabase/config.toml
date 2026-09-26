@@ -26,14 +26,20 @@ enable_confirmations = false
 double_confirm_changes = false
 secure_password_change = false
 
-# Google OAuth. The client id/secret are read from these env vars when pushing
-# config; set them with `supabase secrets`/env, or keep Google configured in the
-# dashboard (already done) and this block simply mirrors it.
-[auth.external.google]
-enabled = true
-client_id = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)"
-secret = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET)"
-skip_nonce_check = false
+# Google OAuth — deliberately NOT declared here.
+#
+# The Google client id/secret live only in the hosted auth config: paste them in
+# the dashboard (Authentication → Providers → Google) or set the repository
+# secrets SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID / _SECRET, which the deploy
+# workflow (.github/workflows/deploy-supabase-functions.yml) writes on every run
+# and then verifies against the live authorize endpoint.
+#
+# This block used to read `client_id = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)"`.
+# A config push from an environment without that variable sent the UNRESOLVED
+# placeholder text to the project as the client id, so every "Continue with
+# Google" ended at Google's "The OAuth client was not found" (401 invalid_client).
+# Providers absent from this file are left untouched by `supabase config push`
+# (the CLI only writes the providers it finds here), which is the safe state.
 
 [functions.explain-move]
 verify_jwt = false

@@ -600,24 +600,48 @@ serve(async (req) => {
     //     MUIR or AI work, so an uptime monitor can tell the function is booting
     //     and serving without spending discovery-grade time/quota. -------------
     if (body?.health === true || body?.ping === true) {
-      const aiConfigured =
-        !!((readEnv("AI_PROXY_BASE_URL") && readEnv("AI_PROXY_API_KEY")) ||
-          readEnv("GEMINI_API_KEY") ||
-          readEnv("GOOGLE_API_KEY") ||
-          readEnv("ANTHROPIC_API_KEY"));
+      const aiBackends = {
+        proxy: !!(readEnv("AI_PROXY_BASE_URL") && readEnv("AI_PROXY_API_KEY")),
+        gemini: !!(readEnv("GEMINI_API_KEY") || readEnv("GOOGLE_API_KEY")),
+        anthropic: !!readEnv("ANTHROPIC_API_KEY"),
+        // Google Programmable Search — the literal-index backend for username
+        // discovery (its own quota; used before any AI web search).
+        googleCse: !!(
+          (readEnv("GOOGLE_CSE_KEY") || readEnv("GOOGLE_SEARCH_KEY")) &&
+          (readEnv("GOOGLE_CSE_ID") || readEnv("GOOGLE_SEARCH_CX"))
+        ),
+      };
+      const aiConfigured = aiBackends.proxy || aiBackends.gemini || aiBackends.anthropic;
       const storeConfigured = !!(
         (readEnv("SUPABASE_URL") || readEnv("VITE_SUPABASE_URL")) &&
         (readEnv("SUPABASE_SERVICE_ROLE_KEY") || readEnv("SUPABASE_SERVICE_KEY") || readEnv("SUPABASE_SECRET_KEY"))
       );
-      return json({
+      const payload: Record<string, unknown> = {
         ok: true,
         service: "resolve-identity",
         time: new Date().toISOString(),
         resolveBudgetMs: RESOLVE_BUDGET_MS,
         expandBudgetMs: EXPAND_BUDGET_MS,
         aiConfigured,
+        aiBackends,
+        geminiModel: readEnv("GEMINI_MODEL") || undefined,
         muirCacheConfigured: storeConfigured,
-      });
+      };
+      // `aiCheck: true` — "configured" is not "working": a revoked key or a
+      // retired model still reads as configured while every AI feature fails.
+      // One tiny real call answers the question the uptime monitor (and the
+      // deploy workflow) actually has, and reports Google's own reason
+      // (API_KEY_INVALID, …) — never the key.
+      if (body?.aiCheck === true) {
+        const r = await callAI("Reply with the single word OK.", "Say OK.", 16);
+        payload.ai = {
+          ok: r.ok,
+          status: r.status,
+          backend: r.backend,
+          ...(r.ok ? {} : { error: r.error }),
+        };
+      }
+      return json(payload);
     }
 
     // --- Anchor-phase modes (the FAST half of the anchor → discovery split) --
@@ -796,6 +820,10 @@ serve(async (req) => {
     } else {
       notes.push(`AI unavailable (${ai.status}). Direct platform search still applies.`);
       console.warn("[resolve-identity] AI error:", ai.status, ai.error);
+      // Debug callers get the provider's reason (e.g. "API_KEY_INVALID: …"),
+      // so a dead key is diagnosable from the response instead of only from
+      // the function logs.
+      debug.ai = { status: ai.status, backend: ai.backend, error: ai.error };
     }
 
     // Merge: prefer real USCF records first, then AI candidates the USCF pass

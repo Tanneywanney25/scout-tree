@@ -1,15 +1,42 @@
 name: Deploy Supabase Edge Functions
 
-# Deploys the edge functions (and, if provided, configures their AI secret) to
-# the ScoutTree Supabase project, then smoke-tests the Find Player AI detective.
-# Runs on pushes to main that touch the functions, or on demand via "Run workflow".
+# Deploys the edge functions to the ScoutTree Supabase project, keeps the hosted
+# auth config right (instant signup, Google OAuth, redirect allow-list), and then
+# VERIFIES the two things that broke silently in the past. The run goes red when
+# either is actually broken, instead of printing green over a dead feature:
+#
+#   • Gemini key — validated against Google BEFORE it is written to Supabase.
+#     Previously an invalid key was re-pushed on every deploy and every AI
+#     feature (Google-index username discovery, flyer search, AI reasoning)
+#     quietly died with "AI unavailable (400)".
+#   • Google sign-in — the live authorize endpoint is checked for a real client
+#     id. A config push once replaced it with the literal text
+#     "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)", so Google answered every
+#     login with "The OAuth client was not found" (401 invalid_client).
+#
+# Runs on pushes to main that touch the functions, or on demand ("Run workflow" —
+# any branch: `gh workflow run deploy-supabase-functions.yml --ref <branch>`).
 #
 # Required repository secret:
-#   SUPABASE_ACCESS_TOKEN  — a Supabase personal access token (sbp_...),
-#                            from https://supabase.com/dashboard/account/tokens
-# Optional repository secret (only needed if you did NOT already set it in the
-# Supabase dashboard — unlocks the AI detective):
-#   GEMINI_API_KEY         — Google Gemini API key (or ANTHROPIC_API_KEY)
+#   SUPABASE_ACCESS_TOKEN  — Supabase personal access token (sbp_...),
+#                            https://supabase.com/dashboard/account/tokens
+# Optional repository secrets:
+#   GEMINI_API_KEY         — Gemini API key (https://aistudio.google.com/apikey).
+#                            Validated, then set in Supabase. ANTHROPIC_API_KEY
+#                            is the alternative / fallback backend.
+#   GOOGLE_CSE_KEY + GOOGLE_CSE_ID
+#                          — Google Programmable Search: the preferred (literal
+#                            index) backend for username discovery.
+#   SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID + SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET
+#                          — the Google OAuth client (Google Cloud → APIs &
+#                            Services → Credentials; authorized redirect URI
+#                            https://<project>.supabase.co/auth/v1/callback).
+#                            Written to the hosted auth config on every run.
+#                            Alternatively paste them into the Supabase dashboard
+#                            (Authentication → Providers → Google) — the
+#                            verification step accepts either.
+# Optional repository variable:
+#   GEMINI_MODEL           — overrides the model (default: gemini-3.6-flash).
 
 on:
   push:
@@ -24,6 +51,8 @@ env:
   PROJECT_REF: xqyszdjczchlgyisvtvo
   # Publishable (anon) key — safe to expose; used only to invoke the function.
   ANON_KEY: sb_publishable_BH3AoBttItAuh4mpSvgFTw_oKmPpKBU
+  FN_URL: https://xqyszdjczchlgyisvtvo.supabase.co/functions/v1/resolve-identity
+  SITE_URL: https://chess-scout.vercel.app
 
 jobs:
   deploy:
@@ -37,36 +66,92 @@ jobs:
         with:
           version: latest
 
-      - name: Configure AI secret (optional — skip if already set in dashboard)
+      - name: Validate the Gemini key against Google
+        id: gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
         run: |
-          if [ -n "$GEMINI_API_KEY" ]; then
-            supabase secrets set GEMINI_API_KEY="$GEMINI_API_KEY" --project-ref "$PROJECT_REF"
-            echo "Set GEMINI_API_KEY."
-          elif [ -n "$ANTHROPIC_API_KEY" ]; then
-            supabase secrets set ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" --project-ref "$PROJECT_REF"
-            echo "Set ANTHROPIC_API_KEY."
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "result=absent" >> "$GITHUB_OUTPUT"
+            echo "No GEMINI_API_KEY in GitHub secrets — the Supabase secret is left as it is."
+            exit 0
+          fi
+          model="${GEMINI_MODEL:-gemini-3.6-flash}"
+          code=$(curl -sS -m 60 -o /tmp/gemini.json -w '%{http_code}' \
+            -X POST "https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent" \
+            -H "x-goog-api-key: ${GEMINI_API_KEY}" -H "content-type: application/json" \
+            -d '{"contents":[{"role":"user","parts":[{"text":"Reply with the single word OK."}]}],"generationConfig":{"maxOutputTokens":1024}}') || true
+          code="${code:-000}"
+          if [ "$code" = "200" ]; then
+            echo "result=valid" >> "$GITHUB_OUTPUT"
+            echo "Google accepted the key (model ${model})."
           else
-            echo "No AI key in GitHub secrets; assuming it is already set in the Supabase dashboard."
+            echo "result=invalid" >> "$GITHUB_OUTPUT"
+            msg=$(jq -r '.error.message // empty' /tmp/gemini.json 2>/dev/null | head -c 300)
+            reason=$(jq -r '[.error.details[]?.reason // empty] | first // empty' /tmp/gemini.json 2>/dev/null)
+            echo "::error::Google rejected GEMINI_API_KEY (HTTP ${code} ${reason}): ${msg:-no detail}. Create a fresh key at https://aistudio.google.com/apikey, update the GEMINI_API_KEY repository secret and re-run. The Supabase secret was NOT overwritten with this key."
           fi
 
-      - name: Configure hosted auth (instant email signup + OAuth redirects)
+      - name: Configure AI / search secrets in Supabase
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_CSE_KEY: ${{ secrets.GOOGLE_CSE_KEY }}
+          GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
+          GEMINI_RESULT: ${{ steps.gemini.outputs.result }}
         run: |
-          # Instant email/password signup (no confirmation email) and an allow-list
-          # that lets Google OAuth return to the real app instead of localhost.
+          if [ "$GEMINI_RESULT" = "valid" ]; then
+            supabase secrets set GEMINI_API_KEY="$GEMINI_API_KEY" --project-ref "$PROJECT_REF"
+            echo "Set GEMINI_API_KEY."
+          elif [ "$GEMINI_RESULT" = "invalid" ]; then
+            echo "Skipping GEMINI_API_KEY: Google rejected it (see the step above)."
+          fi
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            supabase secrets set ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" --project-ref "$PROJECT_REF"
+            echo "Set ANTHROPIC_API_KEY."
+          fi
+          if [ -n "$GEMINI_MODEL" ]; then
+            supabase secrets set GEMINI_MODEL="$GEMINI_MODEL" --project-ref "$PROJECT_REF"
+            echo "Set GEMINI_MODEL=${GEMINI_MODEL}."
+          fi
+          if [ -n "$GOOGLE_CSE_KEY" ] && [ -n "$GOOGLE_CSE_ID" ]; then
+            supabase secrets set GOOGLE_CSE_KEY="$GOOGLE_CSE_KEY" GOOGLE_CSE_ID="$GOOGLE_CSE_ID" --project-ref "$PROJECT_REF"
+            echo "Set GOOGLE_CSE_KEY / GOOGLE_CSE_ID."
+          fi
+          if [ "$GEMINI_RESULT" != "valid" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "No valid AI key in GitHub secrets; assuming one is already set in the Supabase dashboard (verified after deploy)."
+          fi
+
+      - name: Configure hosted auth (instant signup, Google OAuth, redirect allow-list)
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID }}
+          GOOGLE_SECRET: ${{ secrets.SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET }}
+        run: |
+          # Instant email/password signup (no confirmation email), an allow-list
+          # that lets Google OAuth return to the real app instead of localhost,
+          # and — when the repository holds them — the Google OAuth client itself.
+          if [ -n "$GOOGLE_CLIENT_ID" ] && [ -n "$GOOGLE_SECRET" ]; then
+            echo "Writing the Google OAuth client from the repository secrets."
+          else
+            echo "No SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID / _SECRET secrets — leaving the Google client as configured in the Supabase dashboard."
+          fi
+          body=$(jq -n \
+            --arg site "$SITE_URL" \
+            --arg allow "https://*.vercel.app/**,${SITE_URL}/**,http://localhost:8080/**,http://localhost:5173/**" \
+            --arg cid "$GOOGLE_CLIENT_ID" --arg sec "$GOOGLE_SECRET" \
+            '{mailer_autoconfirm: true, external_email_enabled: true, external_google_enabled: true, site_url: $site, uri_allow_list: $allow}
+             + (if ($cid | length) > 0 and ($sec | length) > 0 then {external_google_client_id: $cid, external_google_secret: $sec} else {} end)')
           echo "Patching auth config…"
-          curl -sS -X PATCH "https://api.supabase.com/v1/projects/${PROJECT_REF}/config/auth" \
+          code=$(curl -sS -m 60 -o /tmp/auth.json -w '%{http_code}' -X PATCH "https://api.supabase.com/v1/projects/${PROJECT_REF}/config/auth" \
             -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
             -H "content-type: application/json" \
-            -d '{
-              "mailer_autoconfirm": true,
-              "external_email_enabled": true,
-              "external_google_enabled": true,
-              "site_url": "https://chess-scout.vercel.app",
-              "uri_allow_list": "https://*.vercel.app/**,https://chess-scout.vercel.app/**,http://localhost:8080/**,http://localhost:5173/**"
-            }' -w $'\nHTTP %{http_code}\n' | tail -3
+            -d "$body") || true
+          echo "HTTP ${code:-000}"
+          if [ "${code:-000}" != "200" ]; then
+            echo "::warning::Auth config PATCH returned HTTP ${code:-000}: $(jq -r '.message // .error // empty' /tmp/auth.json 2>/dev/null | head -c 300)"
+          fi
 
       - name: Deploy edge functions
         run: |
@@ -74,25 +159,100 @@ jobs:
           supabase functions deploy explain-move --project-ref "$PROJECT_REF" --no-verify-jwt
           supabase functions deploy training-hint --project-ref "$PROJECT_REF" --no-verify-jwt
 
-      - name: Smoke test the AI detective
+      - name: Verify the AI backend on the deployed function
+        id: ai
+        run: |
+          # "configured" is not "working" — aiCheck makes one real AI call and
+          # returns the provider's own reason on failure (never the key).
+          resp=$(curl -sS -m 120 -X POST "$FN_URL" \
+            -H "apikey: ${ANON_KEY}" -H "Authorization: Bearer ${ANON_KEY}" -H "content-type: application/json" \
+            -d '{"health":true,"aiCheck":true}')
+          echo "$resp" | jq . 2>/dev/null || echo "$resp"
+          if [ "$(echo "$resp" | jq -r '.ai.ok' 2>/dev/null)" = "true" ]; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+            echo "AI answered via $(echo "$resp" | jq -r '.ai.backend')."
+          else
+            echo "result=broken" >> "$GITHUB_OUTPUT"
+            echo "::error::The deployed function has no working AI backend: $(echo "$resp" | jq -r '.ai.error // .ai.status // "no detail"' 2>/dev/null). Google-index username discovery, flyer search and AI reasoning are OFF until a valid GEMINI_API_KEY (or ANTHROPIC_API_KEY) is set in Supabase secrets — fix the GEMINI_API_KEY repository secret and re-run, or set it in the Supabase dashboard."
+          fi
+
+      - name: Verify Google-index username discovery
+        id: discovery
+        run: |
+          resp=$(curl -sS -m 200 -X POST "$FN_URL" \
+            -H "apikey: ${ANON_KEY}" -H "Authorization: Bearer ${ANON_KEY}" -H "content-type: application/json" \
+            -d '{"findUsername":{"name":"Hikaru Nakamura","state":"NY","uscfRating":2846}}')
+          echo "$resp" | head -c 1000; echo
+          backend=$(echo "$resp" | jq -r '.backend // "none"' 2>/dev/null)
+          found=$(echo "$resp" | jq -r '.candidates | length' 2>/dev/null)
+          quota=$(echo "$resp" | jq -r '.quotaExhausted // false' 2>/dev/null)
+          if [ "$backend" != "none" ] && [ "$backend" != "null" ]; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+            echo "Discovery served by ${backend}: ${found:-0} lead(s)."
+          elif [ "$quota" = "true" ]; then
+            echo "result=quota" >> "$GITHUB_OUTPUT"
+            echo "::warning::Discovery backend is configured but its quota is exhausted right now (not a config problem)."
+          else
+            echo "result=broken" >> "$GITHUB_OUTPUT"
+            echo "::error::Google-index username discovery has no backend: no GOOGLE_CSE_KEY/GOOGLE_CSE_ID and the AI web-search call failed. Find Player will report 'Web search unavailable this run'."
+          fi
+
+      - name: Smoke test the USCF anchor (resolve + tournament graph)
         run: |
           echo "Invoking resolve-identity with a known player…"
-          resp=$(curl -sS -X POST "https://${PROJECT_REF}.supabase.co/functions/v1/resolve-identity" \
-            -H "apikey: ${ANON_KEY}" \
-            -H "Authorization: Bearer ${ANON_KEY}" \
-            -H "content-type: application/json" \
-            -d '{"query":{"name":"Hikaru Nakamura","federation":"USCF","country":"US"}}')
-          echo "Response:"; echo "$resp" | head -c 1200; echo
-          echo "$resp" | grep -q '"available":true' || { echo "::error::Function returned no candidates (available:false). Is GEMINI_API_KEY set in Supabase?"; exit 1; }
-          echo "$resp" | grep -q 'suggestedUsernames' || echo "::warning::available:true but no AI suggestedUsernames — USCF lookup may have answered without Gemini."
-          echo "AI detective is responding."
-
-      - name: Smoke test USCF deep search (debug)
-        run: |
-          echo "Invoking resolve-identity USCF deep search with debug…"
-          resp=$(curl -sS -X POST "https://${PROJECT_REF}.supabase.co/functions/v1/resolve-identity" \
+          resp=$(curl -sS -m 200 -X POST "$FN_URL" \
             -H "apikey: ${ANON_KEY}" -H "Authorization: Bearer ${ANON_KEY}" -H "content-type: application/json" \
-            -d '{"query":{"name":"Hans Niemann","federation":"USCF"},"debug":true}')
-          echo "$resp" | python3 -m json.tool 2>/dev/null | head -80 || { echo "$resp" | head -c 2000; }
+            -d '{"query":{"name":"Hikaru Nakamura","federation":"USCF","country":"US"},"debug":true}')
+          echo "Response:"; echo "$resp" | head -c 1200; echo
+          echo "$resp" | grep -q '"available":true' || { echo "::error::Function returned no candidates (available:false)."; exit 1; }
           echo "$resp" | grep -q '"uscf"' && echo "USCF member match OK" || echo "::warning::No USCF member matched (scraper may need tuning; check debug above)."
           echo "$resp" | grep -q 'tournamentGraph' && echo "tournamentGraph present" || true
+          ai_err=$(echo "$resp" | jq -r '.debug.ai.error // empty' 2>/dev/null)
+          [ -z "$ai_err" ] || echo "::warning::AI reasoning pass failed: ${ai_err}"
+
+      - name: Verify Google sign-in (live authorize redirect)
+        id: oauth
+        run: |
+          # Supabase's authorize endpoint 302s to Google with the configured
+          # client_id in the URL — the one thing that must be a real OAuth client.
+          loc=$(curl -sS -m 30 -o /dev/null -D - \
+            "https://${PROJECT_REF}.supabase.co/auth/v1/authorize?provider=google&redirect_to=${SITE_URL}%2Fauth%2Fcallback" \
+            -H "apikey: ${ANON_KEY}" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}')
+          cid=$(printf '%s' "$loc" | sed -n 's/.*[?&]client_id=\([^&]*\).*/\1/p' \
+            | python3 -c 'import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))')
+          echo "Google client id in use: ${cid:-<none>}"
+          case "$cid" in
+            *.apps.googleusercontent.com)
+              echo "result=ok" >> "$GITHUB_OUTPUT"
+              echo "Google sign-in is wired to a real OAuth client." ;;
+            *)
+              echo "result=broken" >> "$GITHUB_OUTPUT"
+              echo "::error::Google sign-in is broken: Supabase sends client_id='${cid:-<empty>}' to Google (expected *.apps.googleusercontent.com), so Google answers 'The OAuth client was not found' (401 invalid_client). Fix: add SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID + SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET as repository secrets and re-run this workflow, or paste them in Supabase → Authentication → Providers → Google. The Google Cloud OAuth client must list https://${PROJECT_REF}.supabase.co/auth/v1/callback as an authorized redirect URI." ;;
+          esac
+
+      - name: Report
+        env:
+          GEMINI: ${{ steps.gemini.outputs.result }}
+          AI: ${{ steps.ai.outputs.result }}
+          DISCOVERY: ${{ steps.discovery.outputs.result }}
+          OAUTH: ${{ steps.oauth.outputs.result }}
+        run: |
+          {
+            echo "## resolve-identity deploy — live checks"
+            echo
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Gemini key in GitHub secrets | ${GEMINI:-n/a} |"
+            echo "| AI backend on the deployed function | ${AI:-n/a} |"
+            echo "| Google-index username discovery | ${DISCOVERY:-n/a} |"
+            echo "| Google sign-in OAuth client | ${OAUTH:-n/a} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          bad=0
+          [ "$AI" = "ok" ] || bad=1
+          [ "$DISCOVERY" = "ok" ] || [ "$DISCOVERY" = "quota" ] || bad=1
+          [ "$OAUTH" = "ok" ] || bad=1
+          if [ "$bad" = "1" ]; then
+            echo "::error::One or more live checks failed — see the errors above. The functions WERE deployed; the failing feature is genuinely broken until its secret is fixed."
+            exit 1
+          fi
+          echo "All live checks passed."

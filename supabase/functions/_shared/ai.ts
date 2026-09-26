@@ -18,9 +18,9 @@
 // Configure any of:
 //   • AI_PROXY_BASE_URL + AI_PROXY_API_KEY
 //     (+ optional AI_PROXY_MODEL, default "auto" — plain calls;
-//      + optional AI_PROXY_SEARCH_MODEL, default "gemini-2.5-flash" — grounded
+//      + optional AI_PROXY_SEARCH_MODEL, default "gemini-3.6-flash" — grounded
 //        calls; MUST be a model the proxy routes to Google for grounding)
-//   • GEMINI_API_KEY  (+ optional GEMINI_MODEL, default gemini-2.5-flash)
+//   • GEMINI_API_KEY  (+ optional GEMINI_MODEL, default gemini-3.6-flash)
 //   • ANTHROPIC_API_KEY (+ optional AI_MODEL, default claude-haiku-4-5-20251001)
 //
 // NOTE: a localhost AI_PROXY_BASE_URL only works where that proxy runs (the
@@ -57,7 +57,50 @@ const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
-const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash";
+// Google's current Flash line (its named replacement for the 2.5 Flash family).
+// The old default, gemini-2.5-flash, is now served only to projects that were
+// already using it (Gemini API changelog, 2026-09-18) and answers other keys
+// with a 4xx — which silently took down every AI feature here (username
+// discovery, flyer search, AI reasoning) as "AI unavailable (400)".
+// Override with GEMINI_MODEL.
+const GEMINI_DEFAULT_MODEL = "gemini-3.6-flash";
+
+/**
+ * Thinking is pure cost for our strict-JSON extraction prompts, so turn it as
+ * far down as each model generation allows: Gemini 2.5 takes a token budget
+ * (0 = off), Gemini 3 takes a level ("minimal" is its floor). Anything else
+ * gets no thinking config at all — and a 400 that blames the thinking config
+ * retries once without it (see callGemini) rather than losing the whole call.
+ */
+function geminiThinkingConfig(model: string): Record<string, unknown> | undefined {
+  if (/^gemini-2\.5/.test(model)) return { thinkingBudget: 0 };
+  if (/^gemini-3/.test(model)) return { thinkingLevel: "minimal" };
+  return undefined;
+}
+
+/**
+ * Google's error envelope is {error:{code,message,status,details:[{reason}]}}.
+ * Surface the machine reason (API_KEY_INVALID, …) next to the message so a
+ * dead key reads as exactly that in the logs / health check, never as a
+ * generic "400".
+ */
+function geminiErrorSummary(body: string): string {
+  try {
+    const parsed = JSON.parse(body);
+    const err = parsed?.error;
+    if (err && typeof err === "object") {
+      const reason = Array.isArray(err.details)
+        ? err.details.map((d: { reason?: unknown }) => (typeof d?.reason === "string" ? d.reason : "")).find(Boolean)
+        : undefined;
+      const message = typeof err.message === "string" ? err.message : "";
+      const s = `${reason ? `${reason}: ` : ""}${message || err.status || ""}`.trim();
+      if (s) return s.slice(0, 200);
+    }
+  } catch {
+    /* not JSON — fall through */
+  }
+  return body.slice(0, 200);
+}
 
 // ---------------------------------------------------------------------------
 // Gemini rate-limit discipline (shared by EVERY Gemini call in the process)
@@ -223,9 +266,16 @@ export async function callAI(system: string, prompt: string, maxTokens = 250): P
   }
 
   const geminiKey = readEnv("GEMINI_API_KEY") || readEnv("GOOGLE_API_KEY");
-  if (geminiKey) return callGemini(geminiKey, system, prompt, maxTokens);
-
   const anthropicKey = readEnv("ANTHROPIC_API_KEY");
+  if (geminiKey) {
+    const res = await callGemini(geminiKey, system, prompt, maxTokens);
+    // ok, quota (429) or a Google outage (5xx): that IS the answer. A config
+    // failure (dead key, unknown model → other 4xx) must not block a working
+    // Anthropic key behind it — before this, one revoked Gemini key silenced
+    // every AI feature even with a valid fallback configured.
+    if (res.ok || res.status === 429 || res.status >= 500 || !anthropicKey) return res;
+  }
+
   if (anthropicKey) return callAnthropic(anthropicKey, system, prompt, maxTokens);
 
   if (proxy) return { ok: false, text: "", status: 502, error: "AI proxy failed and no direct key configured" };
@@ -257,6 +307,7 @@ export async function callAIWithSearch(
   }
 
   const geminiKey = readEnv("GEMINI_API_KEY") || readEnv("GOOGLE_API_KEY");
+  const anthropicKey = readEnv("ANTHROPIC_API_KEY");
   if (geminiKey && proxyErr?.status !== 429) {
     const res = await callGemini(geminiKey, system, prompt, maxTokens, true);
     // ok / server error / quota (429): return as-is. A 429 is the QUOTA, not a
@@ -264,10 +315,12 @@ export async function callAIWithSearch(
     // would just burn a second quota unit for nothing (and hasten exhaustion).
     if (res.ok || res.status >= 500 || res.status === 429) return res;
     // Other 4xx (e.g. the configured model doesn't expose google_search): the
-    // one meaningful fallback is a plain, un-grounded call.
-    return callGemini(geminiKey, system, prompt, maxTokens);
+    // one meaningful fallback is a plain, un-grounded call. If THAT fails too
+    // the key/model itself is rejected — let a configured Anthropic key (its
+    // own web_search pool) take over instead of reporting a dead backend.
+    const plain = await callGemini(geminiKey, system, prompt, maxTokens);
+    if (plain.ok || !anthropicKey) return plain;
   }
-  const anthropicKey = readEnv("ANTHROPIC_API_KEY");
   if (anthropicKey) {
     const res = await callAnthropic(anthropicKey, system, prompt, maxTokens, true, opts.maxSearchUses);
     if (res.ok || res.status >= 500) return res;
@@ -287,7 +340,7 @@ export async function callAIWithSearch(
 // ---------------------------------------------------------------------------
 
 const PROXY_DEFAULT_MODEL = "auto"; // plain calls: let the router pick / fail over
-const PROXY_DEFAULT_SEARCH_MODEL = "gemini-2.5-flash"; // grounded calls: must route to Google
+const PROXY_DEFAULT_SEARCH_MODEL = GEMINI_DEFAULT_MODEL; // grounded calls: must route to Google
 
 interface ProxyChatResponse {
   choices?: { message?: { content?: string; tool_calls?: unknown[] } }[];
@@ -372,7 +425,26 @@ async function callProxy(
 
 async function callGemini(apiKey: string, system: string, prompt: string, maxTokens: number, withSearch = false): Promise<AIResult> {
   const model = readEnv("GEMINI_MODEL") || GEMINI_DEFAULT_MODEL;
+  const thinking = geminiThinkingConfig(model);
+  const res = await geminiRequest(apiKey, model, system, prompt, maxTokens, withSearch, thinking);
+  // A 400 that blames the thinking config (a model that can't turn thinking
+  // off, or a renamed field on a newer generation) is not worth losing the
+  // call over: retry once with no thinking config at all.
+  if (!res.ok && res.status === 400 && thinking && /thinking/i.test(res.error || "")) {
+    return geminiRequest(apiKey, model, system, prompt, maxTokens, withSearch, undefined);
+  }
+  return res;
+}
 
+async function geminiRequest(
+  apiKey: string,
+  model: string,
+  system: string,
+  prompt: string,
+  maxTokens: number,
+  withSearch: boolean,
+  thinkingConfig: Record<string, unknown> | undefined
+): Promise<AIResult> {
   let response: Response;
   try {
     response = await geminiFetch(`${GEMINI_BASE}/${model}:generateContent`, {
@@ -387,10 +459,10 @@ async function callGemini(apiKey: string, system: string, prompt: string, maxTok
         ...(withSearch ? { tools: [{ google_search: {} }] } : {}),
         generationConfig: {
           // Give the answer room; Flash spends some budget on hidden "thinking",
-          // which we disable so tokens go to the actual response.
+          // which we turn down so tokens go to the actual response.
           maxOutputTokens: Math.max(maxTokens, 1024),
           temperature: 0.4,
-          thinkingConfig: { thinkingBudget: 0 },
+          ...(thinkingConfig ? { thinkingConfig } : {}),
         },
       }),
     });
@@ -401,7 +473,13 @@ async function callGemini(apiKey: string, system: string, prompt: string, maxTok
   if (!response.ok) {
     const status = response.status;
     const body = await response.text().catch(() => "");
-    return { ok: false, text: "", status, error: `Gemini error ${status}: ${body.slice(0, 200)}`, backend: "gemini-direct" };
+    return {
+      ok: false,
+      text: "",
+      status,
+      error: `Gemini error ${status} (${model}): ${geminiErrorSummary(body)}`,
+      backend: "gemini-direct",
+    };
   }
 
   const data = await response.json().catch(() => null);

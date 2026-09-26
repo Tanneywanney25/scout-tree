@@ -49,6 +49,30 @@ SQL editor. It creates `profiles`, `scout_usage`, `anonymous_scout_usage`,
 can only access their own rows, plus a trigger that creates a profile row on
 signup.
 
+## Google sign-in
+
+"Continue with Google" is Supabase Auth's Google provider. The OAuth client
+(client ID + secret, from Google Cloud → APIs & Services → Credentials) lives
+**only** in the hosted Supabase auth config. Set it one of two ways:
+
+- Supabase dashboard → Authentication → Providers → Google, or
+- repository secrets `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` and
+  `SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET` — the deploy workflow writes them to the
+  project on every run.
+
+The Google Cloud OAuth client must list
+`https://xqyszdjczchlgyisvtvo.supabase.co/auth/v1/callback` as an authorized
+redirect URI. `supabase/config.toml` deliberately has **no** Google block: a
+config push once replaced the hosted client ID with the unresolved text
+`env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)`, and Google answered every login
+with "The OAuth client was not found" (401 `invalid_client`). The deploy
+workflow now checks the live authorize redirect and fails when the client ID
+isn't a real `*.apps.googleusercontent.com` value. Check it yourself:
+
+```sh
+curl -sI "https://xqyszdjczchlgyisvtvo.supabase.co/auth/v1/authorize?provider=google&redirect_to=https://chess-scout.vercel.app/auth/callback" | grep -i location
+```
+
 ## Optional: AI explanations
 
 The `explain-move` and `training-hint` edge functions add natural-language move
@@ -121,18 +145,40 @@ The engine **degrades gracefully**: with no edge function or AI key, Find Player
 still works from the direct Lichess/Chess.com providers. Deploy the function and
 set an AI key to unlock the AI detective. The shared AI helper supports **Google
 Gemini** (preferred when `GEMINI_API_KEY` is set, default model
-`gemini-2.5-flash`) or Anthropic (`ANTHROPIC_API_KEY`):
+`gemini-3.6-flash`) or Anthropic (`ANTHROPIC_API_KEY`):
 
 ```sh
 supabase functions deploy resolve-identity
 # Gemini (recommended):
-supabase secrets set GEMINI_API_KEY=...        # optional: GEMINI_MODEL=gemini-2.5-flash
+supabase secrets set GEMINI_API_KEY=...        # optional: GEMINI_MODEL=gemini-3.6-flash
 # …or Anthropic instead:
 # supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
+# Optional, preferred username-discovery backend (the literal Google index):
+# supabase secrets set GOOGLE_CSE_KEY=... GOOGLE_CSE_ID=...
 ```
 
 `explain-move` and `training-hint` use the same helper, so the same key powers
 every AI feature.
+
+### If Find Player says "Web search unavailable this run"
+
+The Google-index username discovery (`findUsername`) has no working backend:
+no Programmable Search key **and** the AI web-search call is failing. Ask the
+deployed function why — `aiCheck` makes one real AI call and reports the
+provider's own reason (for example `API_KEY_INVALID`), never the key:
+
+```sh
+curl -s -X POST https://xqyszdjczchlgyisvtvo.supabase.co/functions/v1/resolve-identity \
+  -H "apikey: sb_publishable_BH3AoBttItAuh4mpSvgFTw_oKmPpKBU" \
+  -H "Authorization: Bearer sb_publishable_BH3AoBttItAuh4mpSvgFTw_oKmPpKBU" \
+  -H "content-type: application/json" -d '{"health":true,"aiCheck":true}'
+```
+
+Then fix the named secret (`supabase secrets set GEMINI_API_KEY=...`, or update
+the `GEMINI_API_KEY` repository secret and re-run the deploy workflow). The
+workflow validates the key against Google before writing it and runs this same
+check after deploying, so a dead key fails the run instead of shipping quietly.
+A `resolve` call with `"debug": true` also returns the reason under `debug.ai`.
 
 Confirming an identity hands off into the existing scout pipeline and generates a
 report whose header shows the identity confidence, evidence sources and verified

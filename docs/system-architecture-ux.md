@@ -172,7 +172,13 @@ Developer / GitHub
 
 **Auth configuration** (`supabase/config.toml`) is tuned for zero‑friction signup:
 email confirmations are **off** (instant accounts), Google OAuth is enabled, JWT
-expiry 1 h with refresh‑token rotation.
+expiry 1 h with refresh‑token rotation. The Google OAuth client id/secret are
+*not* in `config.toml` — they live only in the hosted auth config (dashboard, or
+the `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` / `_SECRET` repository secrets the
+deploy workflow writes). A config push once sent the unresolved placeholder
+`env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)` as the client id and broke every
+Google login (401 `invalid_client`); the deploy workflow now verifies the live
+authorize redirect carries a real `*.apps.googleusercontent.com` client id.
 
 ---
 
