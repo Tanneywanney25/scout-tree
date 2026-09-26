@@ -72,6 +72,8 @@ export interface SectionAlignment {
 // ---------------------------------------------------------------------------
 
 const gamesMemo = new Map<string, Promise<TournamentGameRow[]>>();
+/** Why the last export for a tournament came back empty (HTTP status or error). */
+export const lastExportFailure = new Map<string, string>();
 
 const lichessOutcome = (winner: unknown, status: unknown): Outcome | undefined => {
   const st = String(status || "");
@@ -100,10 +102,17 @@ export function fetchLichessTournamentGames(kind: "lichess-swiss" | "lichess-are
           "lichess",
           45_000
         );
-        if (!res.ok) return "";
+        if (!res.ok) {
+          lastExportFailure.set(key, `HTTP ${res.status}`);
+          return "";
+        }
         return res.text();
       });
-      if (!text) return [];
+      if (!text) {
+        if (!lastExportFailure.has(key)) lastExportFailure.set(key, "empty body");
+        return [];
+      }
+      lastExportFailure.delete(key);
       const out: TournamentGameRow[] = [];
       for (const line of text.split("\n")) {
         if (!line.trim()) continue;
@@ -121,7 +130,8 @@ export function fetchLichessTournamentGames(kind: "lichess-swiss" | "lichess-are
         }
       }
       return out;
-    } catch {
+    } catch (e) {
+      lastExportFailure.set(key, e instanceof Error ? e.message : String(e));
       return [];
     }
   })();

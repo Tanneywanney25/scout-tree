@@ -185,15 +185,24 @@ export const lichessGate = semaphore(LICHESS_MAX_INFLIGHT);
  *  instead of bursting into a 429 (observed live: four simultaneous swiss
  *  exports → 429 → 20s pause). */
 export const lichessExportLane = semaphore(1);
+/** Long-lived team-history streams get their own single-file lane so one
+ *  short games export can run alongside the ONE open stream (two streams side
+ *  by side is what earned the 429), and sections can align while the history
+ *  is still downloading. */
+export const lichessStreamLane = semaphore(1);
 let lichessNextSlot = 0;
 let lichessPauseUntil = 0;
 let lichessLast429 = 0;
-export async function lichessSlot(gapMs = 120): Promise<void> {
+/** Wait out an active Lichess 429 pause. Taken OUTSIDE the gate so a paused
+ *  caller never holds the single slot hostage for the whole pause. */
+async function awaitLichessPause(signal?: AbortSignal): Promise<void> {
   for (;;) {
     const pause = lichessPauseUntil - Date.now();
-    if (pause <= 0) break;
+    if (pause <= 0 || signal?.aborted) return;
     await new Promise((r) => setTimeout(r, Math.min(pause, 1000)));
   }
+}
+export async function lichessSlot(gapMs = 120): Promise<void> {
   const now = Date.now();
   const wait = Math.max(0, lichessNextSlot - now);
   lichessNextSlot = Math.max(now, lichessNextSlot) + gapMs;
@@ -352,6 +361,7 @@ export async function politeFetch(
     let res: Response;
     try {
       if (platform === "lichess") {
+        await awaitLichessPause(outer);
         res = await lichessGate.run(async () => {
           await lichessSlot();
           return attemptOnce();

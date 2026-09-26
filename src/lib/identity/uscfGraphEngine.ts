@@ -90,6 +90,7 @@ import {
   chesscomBracketRows,
   alignSectionBest,
   alignmentTrustworthy,
+  lastExportFailure,
   type TournamentGameRow,
 } from "./sectionAlign";
 import {
@@ -1508,6 +1509,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // Set when the target is structurally confirmed anywhere — every agent in
   // every event checks it so the whole fleet stands down together.
   let found = false;
+  // Stage-0 bookkeeping: while located tournaments are still being aligned, a
+  // confident crown defers the hard abort (see recordTarget) so the remaining
+  // sections can prove a second account.
+  let stage0Aligning = false;
+  let deferredAbort = false;
   const stopNow = (localDeadline?: number) => found || outOfTime(localDeadline);
 
   // --- Indices over the whole online mesh ------------------------------------
@@ -2838,7 +2844,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     // seed scouts, sibling event agents, deep dives) stands down immediately
     // instead of finishing now-pointless work. A capped "google-lead" is not
     // an identification, so it keeps the search running.
-    if (via.method !== "google-lead") {
+    const alreadyRecorded = foundKeys.has(key);
+    if (via.method !== "google-lead" && alreadyRecorded) {
+      // A further section proving the SAME handle: strengthen quietly.
+      log(`@${profile.username} also confirmed by "${ev.name}"${via.checkedRounds ? ` (${via.checkedRounds} round(s) aligned)` : ""}.`);
+    }
+    if (via.method !== "google-lead" && !alreadyRecorded) {
       found = true;
       // Phase C: when the crown is BOTH high-confidence (>0.85) AND backed by ≥2
       // independent sources (two opponent pairings, an identity-ID match, or a
@@ -2852,6 +2863,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       const sectionProof = via.method === "section-align" && (via.sectionOverlap ?? 0) >= 2 && (via.checkedRounds ?? 0) >= 2;
       const twoIndependent = (via.crossVotes ?? 0) >= 2 || idMatch || via.method === "elimination" || sectionProof;
       if (account.confidence > 0.85 && twoIndependent && !stopController.signal.aborted) {
+        // While stage 0 is still aligning the other LOCATED tournaments, the
+        // abort is deferred: those alignments are one cheap export each and
+        // can prove a second account. Everything else (seeds, pivots) already
+        // stands down through `found`.
+        const defer = stage0Aligning && via.method === "section-align";
         log(
           `Confirmed ${targetName} = @${profile.username} with high confidence via ${
             (via.crossVotes ?? 0) >= 2
@@ -2861,9 +2877,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
               : sectionProof
               ? "a round-by-round alignment of the whole section"
               : "the full tournament roster"
-          } — standing down all remaining searches immediately.`
+          } — ${defer ? "finishing the other located tournaments in case of a second account, then standing down" : "standing down all remaining searches immediately"}.`
         );
-        stopController.abort();
+        if (defer) deferredAbort = true;
+        else stopController.abort();
       }
     }
 
@@ -2875,9 +2892,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (via.profileUnavailable) pendingEnrichment.set(key, { platform, username: profile.username, via });
     else pendingEnrichment.delete(key);
 
-    if (foundKeys.has(key)) {
+    if (alreadyRecorded) {
       // Already recorded — keep whichever evidence trail is stronger (a
       // google-lead upgraded by a later structural proof, or vice versa).
+      if (via.method !== "google-lead") found = true;
       const idx = accounts.findIndex((a) => a.platform === platform && a.username.toLowerCase() === profile.username.toLowerCase());
       if (idx >= 0 && (account.confidence > accounts[idx].confidence || (upgradesGhost && account.confidence >= accounts[idx].confidence)))
         accounts[idx] = account;
@@ -3173,10 +3191,31 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // (see sectionAlign.ts) — the target included, with no name ever searched.
   // ---------------------------------------------------------------------------
   const sectionAligned = new Set<string>();
-  const trySectionAlign = async (ev: GraphEvent, link: EventLink, state: EventState, localDeadline: number): Promise<boolean> => {
+  const sectionAligning = new Set<string>();
+  /** `evenIfFound`: stage 0 keeps aligning the OTHER located tournaments after
+   *  a first crown — each is one cheap export, and players change accounts
+   *  (observed: a 2022 account and a 2024 account for the same junior), so the
+   *  remaining sections can surface a second, equally proven handle. */
+  const trySectionAlign = async (ev: GraphEvent, link: EventLink, state: EventState, localDeadline: number, evenIfFound = false): Promise<boolean> => {
     const key = `${ev.eventId}|${linkKey(link)}`;
-    if (sectionAligned.has(key) || stopNow(localDeadline)) return false;
-    sectionAligned.add(key);
+    const halt = evenIfFound ? outOfTime(localDeadline) : stopNow(localDeadline);
+    if (sectionAligned.has(key) || sectionAligning.has(key) || halt) return false;
+    sectionAligning.add(key);
+    try {
+      return await sectionAlignOnce(ev, link, state, localDeadline, key, evenIfFound);
+    } finally {
+      sectionAligning.delete(key);
+    }
+  };
+  const sectionAlignOnce = async (
+    ev: GraphEvent,
+    link: EventLink,
+    state: EventState,
+    localDeadline: number,
+    key: string,
+    evenIfFound: boolean
+  ): Promise<boolean> => {
+    const halted = () => (evenIfFound ? outOfTime(localDeadline) : stopNow(localDeadline));
     const kindLabel = link.kind === "chesscom-tournament" ? "tournament" : link.kind.replace("lichess-", "");
     const linkUrl =
       link.kind === "chesscom-tournament"
@@ -3191,12 +3230,18 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     } else {
       rows = await fetchLichessTournamentGames(link.kind, link.id, signal);
     }
-    if (stopNow(localDeadline)) return false;
+    if (halted()) return false;
     const n = ev.players.filter((p) => p.games.some((g) => normOutcome(g.outcome))).length;
     if (!rows.length) {
-      log(`"${ev.name}": the ${platformLabel(link.platform)} ${kindLabel} at ${linkUrl} returned no games — falling back to its participant roster.`);
+      // A failed export (rate-limit pause, network blip) is NOT a verdict on
+      // the link — leave it retryable for the event's next visit.
+      const why = lastExportFailure.get(`${link.kind}:${link.id}`);
+      log(
+        `"${ev.name}": the ${platformLabel(link.platform)} ${kindLabel} at ${linkUrl} returned no games${why ? ` (${why})` : ""} — will retry later; falling back to its participant roster for now.`
+      );
       return false;
     }
+    sectionAligned.add(key); // a real games list = a real verdict either way
     const a = alignSectionBest(ev, rows);
     if (!alignmentTrustworthy(ev, a)) {
       log(
@@ -3460,9 +3505,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       // what crowned a stranger for John Abraham: two 1-game ties made the arena
       // "trusted" while its hundreds-of-players roster was never counted. Validate
       // on trust-eligibility, not only when one source played several in-link games.
-      const trustEligible = link.source === "flyer" || srcs.size >= 2;
+      const trustEligible = linkIsAuthoritative(link) || srcs.size >= 2;
       const sourcePlayedSeveral = games.filter((g) => gameInLink(g, link)).length >= 2;
       if (!trustEligible && !sourcePlayedSeveral) continue;
+      // A tournament id read off ONE mapped player's games is enough to try the
+      // whole-section alignment: the alignment is its own proof (a public pool
+      // the player dipped into cannot explain half the crosstable round-by-round),
+      // and a hit maps every section player — the target included — at once.
+      if (await trySectionAlign(ev, link, state, localDeadline)) return true;
       if (await tryRoster(ev, link, localDeadline, state)) return true;
     }
 
@@ -4074,10 +4124,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const runAgents = async (seedScouts: boolean): Promise<boolean> => {
       let tracing = 0;
       let seeding = 0;
+      let reserveNoted = false;
       const running = new Set<Promise<void>>();
       const launch = (task: () => Promise<void>) => {
         const p = task()
-          .catch(() => {})
+          .catch((e: unknown) => {
+            // An agent must never take the fleet down — but a silent failure
+            // is how a whole pass once "finished" 16 events in 0.1s. Say so.
+            if (!signal?.aborted) log(`⚠ An agent hit an error and was skipped: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+          })
           .finally(() => void running.delete(p));
         running.add(p);
       };
@@ -4107,7 +4162,12 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         // Seed scouts: keep resolutions in flight (Google-first, sharpest
         // names first). When a finite deadline is set, keep a reserve for
         // TRACING the seeds we already have.
-        if (seedScouts && !(isFinite(localDeadline) && localDeadline - Date.now() < 20_000)) {
+        const seedReserveHit = seedScouts && isFinite(localDeadline) && localDeadline - Date.now() < 20_000;
+        if (seedReserveHit && !seeding && !tracing && !reserveNoted) {
+          reserveNoted = true;
+          log(`"${ev.name}": this event's time slice is nearly over (${Math.max(0, Math.round((localDeadline - Date.now()) / 1000))}s) — not starting new seed scouts; it will be revisited.`);
+        }
+        if (seedScouts && !seedReserveHit) {
           while (seeding < seedLimit && !stopEv()) {
             const memberId = nextSeedId();
             if (!memberId) break;
@@ -4292,21 +4352,26 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       // organizer's history is still streaming in — so the first crown does not
       // wait for the whole history (a big club's list can take a minute+).
       const earlyAligns: Promise<void>[] = [];
+      stage0Aligning = true;
       const onMatch = (ev: GraphEvent, ms: { tournament: { kind: EventLink["kind"]; id: string } }[]) => {
         ev.platformGuess = "lichess";
         const links = ms.map((m) => ({ platform: "lichess" as const, kind: m.tournament.kind, id: m.tournament.id, source: "organizer" as const }));
         organizerLinks.set(ev.eventId, links);
-        if (found || outOfTime()) return;
+        if (outOfTime()) return;
         const { ws } = ensureWorkState(ev);
         for (const l of links) ws.links.set(linkKey(l), l);
         if (!ws.platforms) ws.platforms = ["lichess"];
+        // Aligned even after a first crown: another located section may prove
+        // a SECOND account (players switch handles between seasons).
         earlyAligns.push(
           (async () => {
             for (const l of links) {
-              if (found || outOfTime()) return;
-              if (await trySectionAlign(ev, l, ws, deadline)) return;
+              if (outOfTime()) return;
+              if (await trySectionAlign(ev, l, ws, deadline, true)) return;
             }
-          })().catch(() => {})
+          })().catch((e: unknown) => {
+            if (!signal?.aborted) log(`⚠ Early alignment of "${ev.name}" hit an error: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+          })
         );
       };
       try {
@@ -4326,6 +4391,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         log("Organizer research hit an error — continuing with the web/flyer search.");
       }
       await Promise.all(earlyAligns);
+      stage0Aligning = false;
+      if (found) {
+        const handles = accounts.map((a) => `@${a.username}`).join(", ");
+        log(
+          accounts.length > 1
+            ? `${targetName} has ${accounts.length} proven ${platformLabel("lichess")} accounts across their tournaments (${handles}) — standing down all remaining searches.`
+            : `Every located tournament has been aligned — standing down all remaining searches.`
+        );
+        if (deferredAbort && !stopController.signal.aborted) stopController.abort();
+      }
     }
   }
   if (hooks.discoverPlatform && depth === 0) {
@@ -4410,7 +4485,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   }
 
   const totalOpp = directOpponents.size;
-  log(
+  if (!found) log(
     `Tournament-first search for ${targetName}: ${events.length} online event${events.length === 1 ? "" : "s"}, ${totalOpp} direct opponent${
       totalOpp === 1 ? "" : "s"
     } to work with — ${Math.min(opts.conductor?.tuning.eventAgents() ?? EVENT_AGENTS, Math.max(1, events.length))} event agent(s), each running seed scouts and pairing tracers in parallel${opts.conductor ? " (the conductor adjusts the fleet live)" : ""}. Located tournaments are aligned whole-section first; names otherwise resolve through the Google index and get date-verified; platform name search stays OFF unless the index has nothing.`
@@ -4478,7 +4553,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       while (eventWorkersLaunched < want && !found && !outOfTime(mainDeadline)) {
         eventWorkersLaunched++;
         const p = eventAgent()
-          .catch(() => {})
+          .catch((e: unknown) => {
+            if (!signal?.aborted) log(`⚠ An event agent hit an error and stopped: ${String(e instanceof Error ? e.message : e).slice(0, 200)}`);
+          })
           .finally(() => void eventWorkers.delete(p));
         eventWorkers.add(p);
       }

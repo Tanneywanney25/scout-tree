@@ -376,11 +376,36 @@ with a full crosstable), it works every event until a username falls out. There 
 **no request‑count caps and no meaningful time budget** — it runs until exhausted or
 the user aborts; politeness pacing is the only rate control.
 
+**Stage 0 — research every event's host BEFORE any name work** (top level only;
+`organizerDiscovery.ts` + `sectionAlign.ts`, added 2026‑09):
+
+- The edge's title regex only treats a *standalone* "chess.com" as a platform hint —
+  an organizer domain such as "DMVCHESS.COM" is the organizer, not the host (those
+  events run on Lichess). The engine also sanitizes stale hints on ingest.
+- **Organizer research:** read the organizer off the event names (domain, leading
+  phrase, or a prefix shared by ≥2 events) → `GET /api/team/search` → stream the
+  team's swiss and arena history newest‑first (`/api/team/{id}/swiss|arena`, ~20
+  rows/s, stopped at the target's oldest event, cached in `localStorage`) → match
+  each USCF section to the exact tournament by **date (US‑tz tolerant), rounds,
+  clock, roster size and section/name tokens**. Matching is incremental: the newest
+  events are handed over while the older history is still downloading.
+- **Whole‑section alignment:** a located tournament's full game list (one
+  `/api/swiss/{id}/games` export, or the Chess.com bracket tagged per round) is
+  aligned to the crosstable by constraint propagation over round‑by‑round results —
+  every player of the section, target included, maps in one pass with no name ever
+  searched. The same alignment validates a games‑derived link, so a single seed
+  found by any route unlocks its whole section.
+- Then the flyer/web search runs only for events still unknown, an organizer proven
+  on one platform lends that platform to its sibling events, and events are ranked by
+  resolvability: located tournament → Chess.com → Lichess → unknown → ICC/ChessKid.
+
 For each online‑rated event, in order:
 
-1. **Pin the host platform** — from the event name, from a web/flyer search (the
+1. **Pin the host platform** — from stage 0, else from a web/flyer search (the
    `discoverPlatform` hook → edge AI/Google looks up the TLA / club announcement /
-   exact tournament slug), or by trying both platforms.
+   exact tournament slug), or by trying both platforms. A late web answer that
+   places the event elsewhere *replaces* the platform list and re‑runs the seed hunt.
+1b. **Whole‑section alignment** of any located tournament (see stage 0).
 2. **Roster shortcut (elimination)** — most USCF online events ran as a Chess.com
    tournament or Lichess swiss/arena whose public API returns the **exact
    participant handles**. Match them to the crosstable by real name; if every player

@@ -371,7 +371,7 @@ export function createConductor(options: ConductorOptions = {}): Conductor {
     eventAgents = nextEvent;
     log(
       `Conductor: ${
-        stats ? `the chess.com gate has free slots (≈${Math.round(occupancyEma)}/${stats.limit} busy)` : `the fleet is under-parallelised`
+        stats ? `the platform request queue is quiet (≈${Math.round(occupancyEma)}/${stats.limit} in flight)` : `the fleet is under-parallelised`
       } with ${pending} unit(s) of work queued (${running} agent(s) running) — spawning ${bits.join(", ")}.`
     );
     notifyChange();

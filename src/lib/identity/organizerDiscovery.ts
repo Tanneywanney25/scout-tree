@@ -22,7 +22,7 @@
 // ============================================================================
 
 import type { GraphEvent } from "./graphTypes";
-import { politeFetch } from "./net";
+import { politeFetch, lichessStreamLane } from "./net";
 import { parseEventTc, gameMatchesTc } from "./uscfGraphEngine";
 
 const DAY = 86_400_000;
@@ -400,6 +400,12 @@ export async function loadTeamHistory(
   const rows: OrganizerTournament[] = [];
   let reachedMs = Date.now();
   let complete = false;
+  // One team stream at a time: two streams side by side earned a 429 that
+  // paused every Lichess call for a minute. Games exports use their own lane
+  // so a section can align while this stream is still running.
+  const release = await new Promise<() => void>((resolve) => {
+    void lichessStreamLane.run(() => new Promise<void>((done) => resolve(done)));
+  });
   try {
     const path = kind === "swiss" ? `swiss` : `arena`;
     const res = await politeFetch(
@@ -464,7 +470,12 @@ export async function loadTeamHistory(
       /* stream already closed */
     }
   } catch {
-    if (!rows.length && prior) return prior.rows.filter((r) => r.startsAtMs >= need);
+    if (!rows.length && prior) {
+      release();
+      return prior.rows.filter((r) => r.startsAtMs >= need);
+    }
+  } finally {
+    release();
   }
   for (const r of rows) known.set(r.id, r);
   const merged = Array.from(known.values()).sort((a, b) => b.startsAtMs - a.startsAtMs);
@@ -732,18 +743,20 @@ export async function researchOrganizers(events: GraphEvent[], opts: OrganizerRe
     };
     for (const team of teams) {
       if (outOfTime()) break;
-      const [sw, ar] = await Promise.all([
-        loadTeamHistory(
-          team.id,
-          "swiss",
-          oldest,
-          signal,
-          (n, reached) => log?.(`…${n.toLocaleString()} "${team.name}" tournaments read so far (back to ${new Date(reached).toISOString().slice(0, 10)}).`),
-          tryIncremental
-        ),
-        loadTeamHistory(team.id, "arena", oldest, signal),
-      ]);
-      history.push(...sw, ...ar);
+      // Swiss first (USCF-rated online events are almost always swisses), then
+      // arenas — sequentially, so only one heavy Lichess stream is open.
+      const sw = await loadTeamHistory(
+        team.id,
+        "swiss",
+        oldest,
+        signal,
+        (n, reached) => log?.(`…${n.toLocaleString()} "${team.name}" tournaments read so far (back to ${new Date(reached).toISOString().slice(0, 10)}).`),
+        tryIncremental
+      );
+      history.push(...sw);
+      if (outOfTime()) break;
+      const ar = await loadTeamHistory(team.id, "arena", oldest, signal);
+      history.push(...ar);
     }
     if (!history.length) {
       log?.(`The "${key}" team history came back empty — falling back to the flyer/web search for its events.`);
