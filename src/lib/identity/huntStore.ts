@@ -142,6 +142,11 @@ export function clearHunt(): void {
 function makeCallbacks(seq: number) {
   const onEvent = (event: SearchEvent) => {
     if (seq !== runSeq) return;
+    // Collapse an exact repeat of the previous line (parallel event agents
+    // narrate the same per-person fact once each) — the log stays readable and
+    // the tail isn't eaten by duplicates. Status/provider changes still show.
+    const prev = fullLog[fullLog.length - 1];
+    if (prev && prev.message === event.message && prev.provider === event.provider && prev.status === event.status) return;
     fullLog.push(event);
     const events =
       state.events.length >= EVENT_TAIL_TRIM_AT

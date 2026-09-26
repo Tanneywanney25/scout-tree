@@ -727,7 +727,7 @@ async function resolveIdentityCore(
     let googleVerified = 0;
     const googleT0 = performance.now();
     try {
-      const leads = await findUsernameCandidates(
+      const leadsOrNull = await findUsernameCandidates(
         {
           name: query.name,
           state: query.state,
@@ -738,6 +738,10 @@ async function resolveIdentityCore(
         },
         signal
       );
+      if (leadsOrNull === null) {
+        emit("The Google index couldn't be consulted right now (search backend unavailable or its quota is exhausted) — this is not a miss.", "info");
+      }
+      const leads = leadsOrNull ?? [];
       if (leads.length) {
         emit(`Google index returned ${leads.length} candidate handle(s) — verifying against the live platforms…`, "running");
         // Verify every lead concurrently, then add them in the index's own

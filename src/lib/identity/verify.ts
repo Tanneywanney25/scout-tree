@@ -144,6 +144,94 @@ export async function lichessExistingSubset(usernames: string[], signal?: AbortS
   }
 }
 
+/** Build a VerifiedProfile from a Lichess `User` JSON object (shared by the
+ *  single-user GET and the bulk POST /api/users, which return the same shape
+ *  minus `count` on the bulk path). */
+function lichessProfileFrom(data: Record<string, unknown>, fallbackName: string): VerifiedProfile {
+  const perfs = (data.perfs || {}) as Record<string, { rating?: number; games?: number }>;
+  const ratings: Record<string, number> = {};
+  for (const fmt of LICHESS_FORMAT_PRIORITY) {
+    const p = perfs[fmt];
+    if (p && typeof p.rating === "number" && (p.games || 0) > 0) ratings[fmt] = p.rating;
+  }
+  let rating: number | undefined;
+  for (const fmt of LICHESS_FORMAT_PRIORITY) {
+    if (ratings[fmt] !== undefined) {
+      rating = ratings[fmt];
+      break;
+    }
+  }
+  const profile = (data.profile || {}) as Record<string, unknown>;
+  const realName = (
+    (typeof profile.realName === "string" && profile.realName) ||
+    [profile.firstName, profile.lastName].filter(Boolean).join(" ")
+  ).trim();
+  const freeText = [profile.bio, profile.links].filter((s: unknown) => typeof s === "string").join("\n");
+  const username = typeof data.username === "string" ? data.username : fallbackName;
+  const count = data.count as { all?: number } | undefined;
+  return {
+    platform: "lichess",
+    username,
+    displayName: realName || undefined,
+    title: typeof data.title === "string" ? data.title : undefined,
+    rating,
+    ratings: Object.keys(ratings).length ? ratings : undefined,
+    country: realCountry(profile.flag) || realCountry(profile.country),
+    location: typeof profile.location === "string" && profile.location.trim() ? profile.location.trim() : undefined,
+    fideId: plausibleFideId(profile.fideId),
+    uscfId: uscfIdFromText(freeText),
+    fideRating: typeof profile.fideRating === "number" ? profile.fideRating : undefined,
+    uscfRating: typeof profile.uscfRating === "number" ? profile.uscfRating : undefined,
+    lastActiveMs: typeof data.seenAt === "number" ? data.seenAt : undefined,
+    joinedMs: typeof data.createdAt === "number" ? data.createdAt : undefined,
+    gamesFound: typeof count?.all === "number" ? count.all : undefined,
+    profileUrl: typeof data.url === "string" ? data.url : `https://lichess.org/@/${username}`,
+  };
+}
+
+/**
+ * Bulk profile fetch — up to 300 Lichess accounts in ONE request (POST
+ * /api/users), returning full profiles keyed by lowercase username. Accounts
+ * absent from the response (nonexistent) map to null; a failed call returns
+ * null overall so callers fall back to single lookups. This is how a whole
+ * tournament roster's real names / flags are read for the cost of one
+ * Lichess slot instead of one slot per participant.
+ */
+export async function lichessBulkVerify(
+  usernames: string[],
+  signal?: AbortSignal
+): Promise<Map<string, VerifiedProfile | null> | null> {
+  const ids = Array.from(new Set(usernames.map((u) => u.trim().replace(/^@/, "").toLowerCase()).filter(Boolean))).slice(0, 300);
+  const out = new Map<string, VerifiedProfile | null>();
+  if (!ids.length) return out;
+  try {
+    const res = await politeFetch(
+      "https://lichess.org/api/users",
+      { method: "POST", headers: { "Content-Type": "text/plain", Accept: "application/json" }, body: ids.join(","), signal },
+      "lichess",
+      20_000
+    );
+    if (!res.ok) return null;
+    const arr = await res.json();
+    if (!Array.isArray(arr)) return null;
+    for (const id of ids) out.set(id, null);
+    for (const u of arr) {
+      if (!u || typeof u !== "object") continue;
+      const uname = typeof u.username === "string" ? u.username : typeof u.id === "string" ? u.id : "";
+      if (!uname) continue;
+      if (u.disabled || u.closed) {
+        out.set(uname.toLowerCase(), null);
+        continue;
+      }
+      notifyVerify("lichess", uname);
+      out.set(uname.toLowerCase(), lichessProfileFrom(u as Record<string, unknown>, uname));
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 /** Verify and enrich a Lichess account. Null = no such account; undefined =
  *  the fetch failed (a data hole, not a verdict). */
 export async function verifyLichess(
@@ -223,9 +311,61 @@ export async function verifyLichess(
  *  a 5xx "internal error" for accounts that exist — so a 404 is only a
  *  verdict when its body doesn't carry that signature, and transient
  *  failures get the same bounded in-place retry the month fetcher uses. */
+export interface ChesscomVerifyOptions {
+  /** Also fetch /stats (ratings, game counts). Default true. Speculative scans
+   *  (guessed handles, roster sweeps) pass false: they only need the profile's
+   *  name/country/location to gate on, and the stats call doubled Chess.com
+   *  traffic for every account that merely EXISTS. `enrichChesscomStats`
+   *  fetches the stats later for the few candidates that survive the gate. */
+  stats?: boolean;
+}
+
+/** Fill in `rating` / `ratings` / `gamesFound` on a Chess.com profile that was
+ *  verified without stats (see ChesscomVerifyOptions). Idempotent: a profile
+ *  that already carries ratings is returned as-is without a request. */
+export async function enrichChesscomStats(profile: VerifiedProfile, signal?: AbortSignal): Promise<VerifiedProfile> {
+  if (profile.platform !== "chesscom" || profile.ratings || (profile as { statsChecked?: boolean }).statsChecked) return profile;
+  (profile as { statsChecked?: boolean }).statsChecked = true;
+  const statsRes = await politeFetch(
+    `https://api.chess.com/pub/player/${encodeURIComponent(profile.username.toLowerCase())}/stats`,
+    { headers: { Accept: "application/json" }, signal },
+    "chesscom"
+  ).catch(() => null);
+  try {
+    if (statsRes?.ok) {
+      const stats = await statsRes.json();
+      const ratings: Record<string, number> = {};
+      let totalGames = 0;
+      for (const [key, fmt] of [
+        ["chess_rapid", "rapid"],
+        ["chess_blitz", "blitz"],
+        ["chess_bullet", "bullet"],
+        ["chess_daily", "daily"],
+      ] as const) {
+        const block = stats[key];
+        if (block?.last?.rating) ratings[fmt] = block.last.rating;
+        const rec = block?.record;
+        if (rec) totalGames += (rec.win || 0) + (rec.loss || 0) + (rec.draw || 0);
+      }
+      for (const fmt of ["rapid", "blitz", "bullet", "daily"]) {
+        if (ratings[fmt] !== undefined) {
+          profile.rating = ratings[fmt];
+          break;
+        }
+      }
+      if (Object.keys(ratings).length) profile.ratings = ratings;
+      if (totalGames > 0) profile.gamesFound = totalGames;
+    }
+  } catch {
+    /* stats are best-effort */
+  }
+  return profile;
+}
+
 export async function verifyChesscom(
   username: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  opts: ChesscomVerifyOptions = {}
 ): Promise<VerifiedProfile | null | undefined> {
   const clean = username.trim().replace(/^@/, "").toLowerCase();
   if (!clean) return null;
@@ -269,16 +409,18 @@ export async function verifyChesscom(
     const data = await res.json();
     if (!data) return undefined;
     if (data.status === "closed:abuse") return null;
-    // Stats are fetched only for accounts that EXIST: speculative scans
-    // (guessed handles, roster sweeps) are overwhelmingly misses, and the old
-    // fire-both-upfront pattern doubled Chess.com volume through the shared
-    // gate for every one of them. One extra RTT on the rare hit is far
-    // cheaper than a wasted gate slot on every miss.
-    const statsRes = await politeFetch(
-      `https://api.chess.com/pub/player/${encodeURIComponent(clean)}/stats`,
-      { headers: { Accept: "application/json", "Accept-Encoding": "gzip" }, signal },
-      "chesscom"
-    ).catch(() => null);
+    // Stats are fetched only for accounts that EXIST — and only when the
+    // caller wants them (a speculative scan passes stats:false and enriches
+    // the survivors later via enrichChesscomStats). One extra RTT on the rare
+    // hit is far cheaper than a wasted gate slot on every miss.
+    const statsRes =
+      opts.stats === false
+        ? null
+        : await politeFetch(
+            `https://api.chess.com/pub/player/${encodeURIComponent(clean)}/stats`,
+            { headers: { Accept: "application/json" }, signal },
+            "chesscom"
+          ).catch(() => null);
 
     // ISO-2 country code lives at the end of the country URL.
     let country: string | undefined;

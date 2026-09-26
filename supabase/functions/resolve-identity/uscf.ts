@@ -300,9 +300,16 @@ const ONLINE_RATING_SYSTEMS = new Set(["OR", "OQ", "OB"]);
 export const isOnlineRatingSystem = (rs?: string): boolean =>
   !!rs && ONLINE_RATING_SYSTEMS.has(rs.trim().toUpperCase());
 
+/** A platform HINT read off the event/section title. Only a STANDALONE
+ *  "chess.com" counts — an organizer's own domain that merely ends in
+ *  "chess.com" ("DMVCHESS.COM JUNE PREMIER SCHOLASTIC") is the organizer, not
+ *  the host, and those events routinely run on Lichess. Mis-tagging them
+ *  pinned every such event to Chess.com and skipped platform discovery
+ *  entirely (observed live: 16 Lichess-hosted events searched on Chess.com for
+ *  19 minutes with zero results). */
 function platformGuess(text: string): string | undefined {
   if (/lichess/i.test(text)) return "lichess";
-  if (/chess\.?com/i.test(text)) return "chesscom";
+  if (/(^|[^a-z0-9])chess\.?com(?![a-z0-9])/i.test(text)) return "chesscom";
   if (/chesskid/i.test(text)) return "chesskid";
   if (/\bicc\b/i.test(text)) return "icc";
   return undefined;

@@ -263,7 +263,7 @@ export function discoverEventPlatform(ev: GraphEvent, signal?: AbortSignal): Pro
 
 // Memoize per person+context — the traversal asks about the same member from
 // several events. Kept for the whole session; the answer doesn't change.
-const usernameCache = new Map<string, Promise<UsernameCandidate[]>>();
+const usernameCache = new Map<string, Promise<UsernameCandidate[] | null>>();
 
 // Space the Google-search calls out (they fan out to Google/an AI web search).
 // This is pacing to avoid being blocked, NOT a cap — every request still runs.
@@ -281,7 +281,7 @@ async function usernameThrottle(): Promise<void> {
  * Returns LEADS — the caller must verify each against real platform data
  * (account exists, games in the tournament window, rating/country sanity).
  */
-export function findUsernameCandidates(req: UsernameSearchRequest, signal?: AbortSignal): Promise<UsernameCandidate[]> {
+export function findUsernameCandidates(req: UsernameSearchRequest, signal?: AbortSignal): Promise<UsernameCandidate[] | null> {
   const name = (req.name || "").trim();
   if (!name) return Promise.resolve([]);
   const key = JSON.stringify([name.toLowerCase(), req.state, req.uscfRating, req.eventName, [...(req.platforms || [])].sort()]);
@@ -290,18 +290,26 @@ export function findUsernameCandidates(req: UsernameSearchRequest, signal?: Abor
 
   // A timed-out/failed call must not poison the session cache: "[] because
   // the request died" and "[] because the index has nothing" are different
-  // answers, and the old code remembered both forever.
+  // answers, and the old code remembered both forever. The same goes for the
+  // edge saying the index is UNAVAILABLE (no search backend, or its quota is
+  // exhausted): that is `null` — "no answer" — never an empty answer. The
+  // engine treats null as "the index couldn't be consulted" and does not
+  // memoize it as a definitive miss.
   let requestFailed = false;
-  const promise = (async (): Promise<UsernameCandidate[]> => {
-    if (signal?.aborted) return [];
+  const promise = (async (): Promise<UsernameCandidate[] | null> => {
+    if (signal?.aborted) return null;
     await usernameThrottle();
-    if (signal?.aborted) return [];
+    if (signal?.aborted) return null;
     const data = await invokeEdge({ findUsername: req }, 180_000);
     if (!data) {
       requestFailed = true;
-      return [];
+      return null;
     }
-    if (data.available === false || !Array.isArray(data.candidates)) return [];
+    if (data.available === false || data.quotaExhausted === true) {
+      requestFailed = true;
+      return null;
+    }
+    if (!Array.isArray(data.candidates)) return [];
     return (data.candidates as UsernameCandidate[])
       .filter((c) => c && (c.platform === "chesscom" || c.platform === "lichess") && typeof c.username === "string")
       .slice(0, 40);

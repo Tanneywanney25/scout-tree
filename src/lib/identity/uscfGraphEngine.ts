@@ -81,9 +81,17 @@ import type {
   UsernameSearchRequest,
   UsernameCandidate,
 } from "./graphTypes";
-import { verifyChesscom, verifyLichess, lichessExistingSubset, type VerifiedProfile } from "./verify";
+import { verifyChesscom, verifyLichess, lichessExistingSubset, lichessBulkVerify, enrichChesscomStats, type VerifiedProfile } from "./verify";
 import { pool, politeFetch, lichessSlot, classifyChesscomStatus } from "./net";
 import type { Conductor } from "./conductor";
+import { researchOrganizers, sanitizePlatformGuess } from "./organizerDiscovery";
+import {
+  fetchLichessTournamentGames,
+  chesscomBracketRows,
+  alignSectionBest,
+  alignmentTrustworthy,
+  type TournamentGameRow,
+} from "./sectionAlign";
 import {
   nameSimilarity,
   nameMatchWeight,
@@ -640,20 +648,26 @@ function fetchChesscomTournamentGames(slugOrUrl: string, signal?: AbortSignal): 
         return null;
       }
     };
+    // Each game is tagged with its 1-based round (`_round`) so the whole-section
+    // alignment can line the bracket up with the crosstable round-by-round.
+    const tag = (list: unknown[], round: number) => {
+      for (const g of list) if (g && typeof g === "object") (g as { _round?: number })._round = round;
+      games.push(...list);
+    };
     try {
       const root = await getJson(`https://api.chess.com/pub/tournament/${encodeURIComponent(slug)}`);
       const rounds = Array.isArray(root?.rounds) ? (root!.rounds as string[]) : [];
-      for (const roundUrl of rounds) {
+      for (const [ri, roundUrl] of rounds.entries()) {
         if (budget <= 0 || signal?.aborted) break;
         const round = await getJson(typeof roundUrl === "string" ? roundUrl : "");
         if (!round) continue;
         // A round holds either group URLs (larger tournaments) or games directly.
-        if (Array.isArray(round.games)) games.push(...(round.games as unknown[]));
+        if (Array.isArray(round.games)) tag(round.games as unknown[], ri + 1);
         const groups = Array.isArray(round.groups) ? (round.groups as string[]) : [];
         for (const groupUrl of groups) {
           if (budget <= 0 || signal?.aborted) break;
           const group = await getJson(typeof groupUrl === "string" ? groupUrl : "");
-          if (Array.isArray(group?.games)) games.push(...(group!.games as unknown[]));
+          if (Array.isArray(group?.games)) tag(group!.games as unknown[], ri + 1);
         }
       }
     } catch {
@@ -1013,8 +1027,15 @@ export interface EventLink {
   kind: "chesscom-tournament" | "lichess-swiss" | "lichess-arena";
   /** Chess.com api url or slug; Lichess swiss/arena id. */
   id: string;
-  source: "flyer" | "games";
+  /** flyer = web/flyer search named it; organizer = matched from the
+   *  organizer's own Lichess team history by date/rounds/clock/roster size
+   *  (deterministic, as trusted as a flyer); games = a tournament id seen on
+   *  one player's archive games (untrusted until corroborated). */
+  source: "flyer" | "organizer" | "games";
 }
+
+/** A link the event owns by construction (not merely observed on someone's games). */
+const linkIsAuthoritative = (l: EventLink) => l.source === "flyer" || l.source === "organizer";
 
 /** Chess.com tournament ids appear both as full API urls (from games) and as
  *  bare slugs (from flyers) — normalise to the slug for comparison. */
@@ -1430,6 +1451,10 @@ interface Appearance {
 export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalOptions): Promise<TraversalResult> {
   const { targetName, hooks = {} } = opts;
   const depth = opts.depth ?? 0;
+  // The edge's title regex tags an organizer DOMAIN like "DMVCHESS.COM" as a
+  // Chess.com hint. Drop such false hints before anything trusts them — those
+  // events are "unknown" until the organizer research / flyer search says.
+  for (const ev of graph.onlineEvents) sanitizePlatformGuess(ev);
   // Phase C — early termination. An internal controller, aborted the moment the
   // target is confirmed with high confidence, combined with the caller's signal.
   // The engine NEVER throws on abort — every abort check is a graceful
@@ -1521,10 +1546,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
   // --- Shared caches (search-wide, incl. deep-phase sub-traversals) -----------
   const verifyCache = shared.verify;
-  const verifyOn = (platform: OnlinePlatform, handle: string): Promise<VerifiedProfile | null | undefined> => {
+  /** Verify a handle (memoized search-wide). Chess.com profiles are fetched
+   *  LITE by default (no /stats round-trip — speculative scans only gate on
+   *  name/country/location); pass `full` for a candidate that survived the
+   *  gate so its ratings/game counts get filled in (in place, so every cached
+   *  reader sees them). */
+  const verifyOn = (platform: OnlinePlatform, handle: string, full = false): Promise<VerifiedProfile | null | undefined> => {
     const key = `${platform}:${handle.toLowerCase()}`;
     const hit = verifyCache.get(key);
-    if (hit) return hit;
+    if (hit) return full && platform === "chesscom" ? hit.then((prof) => (prof ? enrichChesscomStats(prof, signal) : prof)) : hit;
     // A profile whose fetch failed moments ago fast-fails (same cooldown as
     // the archive shards — it is usually the same outage) instead of
     // re-hammering a down shard from every chain that reads the handle.
@@ -1534,7 +1564,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
     // verifyLichess paces itself through the global Lichess slot machine;
     // verifyChesscom runs behind the global Chess.com gate.
-    const p = platform === "chesscom" ? verifyChesscom(handle, signal) : verifyLichess(handle, signal);
+    const p = platform === "chesscom" ? verifyChesscom(handle, signal, { stats: full }) : verifyLichess(handle, signal);
     verifyCache.set(key, p);
     // A transient failure (undefined) is a HOLE, not a "no such account"
     // verdict. Memoizing it is how one outage-era fetch poisoned every later
@@ -1639,11 +1669,31 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             clearInterval(heartbeat!);
             return;
           }
-          if (Date.now() - lastNarrated < 25_000) return;
+          if (Date.now() - lastNarrated < 40_000) return;
           const mappedCount = Array.from(mapped.values()).filter((per) => per.size > 0).length;
+          // Say WHAT is being worked, not just that work is happening.
+          let doing = "";
+          try {
+            const active: string[] = [];
+            for (const [eventId, st] of workStates) {
+              if (st.exhausted || !st.platforms) continue;
+              const e = eventById.get(eventId);
+              if (!e) continue;
+              active.push(
+                `"${e.name}"${e.sectionName ? ` ${e.sectionName}` : ""} on ${st.platforms.map(platformLabel).join("+")} (seeds ${Math.min(
+                  st.seedIdx,
+                  st.seedOrder.length
+                )}/${st.seedOrder.length}, ${st.frontier.length} trace(s) queued)`
+              );
+              if (active.length >= 3) break;
+            }
+            if (active.length) doing = ` Working: ${active.join("; ")}.`;
+          } catch {
+            /* bookkeeping not initialised yet */
+          }
           log(
-            `Still working (${Math.round((Date.now() - traversalStart) / 1000)}s in): ${mappedCount} player↔handle mapping(s) so far, ` +
-              `${verifyCache.size} profile lookup(s) memoized, ${gamesCache.size} game-archive window(s) pulled — the agents are grinding through candidates.`
+            `Still working (${Math.round((Date.now() - traversalStart) / 1000)}s in): ${mappedCount} player↔handle mapping(s), ` +
+              `${verifyCache.size} profile lookup(s), ${gamesCache.size} game-archive window(s) so far.${doing}`
           );
         }, 5_000)
       : undefined;
@@ -1674,6 +1724,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // lookups (state + FIDE-enriched queries) are keyed apart from seed-grade
   // ones so a deep dive's own target still gets its full sharpened ladder.
   const googleCandidatesCache = shared.google;
+  // Set when the index hook answered "couldn't ask" (null) at least once this
+  // run — the miss narration then says so instead of implying a clean miss.
+  let googleUnavailable = false;
+  const googleMissNoted = new Set<string>();
   const googleCandidatesFor = (memberId: string, ev: GraphEvent): Promise<UsernameCandidate[]> => {
     if (!hooks.findUsernames) return Promise.resolve([]);
     const cacheKey = `${memberId}:${memberId === targetId ? "t" : "s"}`;
@@ -1691,10 +1745,26 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       eventName: ev.name,
       eventDate: ev.startDate,
     };
-    const p = hooks
+    // "The index couldn't be consulted" (null / a thrown failure) is NOT "the
+    // index has nothing": it is never memoized, so a later asker retries once
+    // the backend is back instead of inheriting a fake definitive miss.
+    const evict = () => {
+      if (googleCandidatesCache.get(cacheKey) === p) googleCandidatesCache.delete(cacheKey);
+    };
+    const p: Promise<UsernameCandidate[]> = hooks
       .findUsernames(req)
-      .then((r) => r || [])
-      .catch(() => [] as UsernameCandidate[]);
+      .then((r) => {
+        if (r === null) {
+          googleUnavailable = true;
+          evict();
+          return [];
+        }
+        return r;
+      })
+      .catch(() => {
+        evict();
+        return [] as UsernameCandidate[];
+      });
     googleCandidatesCache.set(cacheKey, p);
     return p;
   };
@@ -1838,7 +1908,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
    *  live: one seed's 25-player tournament cascaded five wrong mappings into
    *  a 99% wrong crown of the target). */
   const linkTrusted = (state: LinkState | undefined, link: EventLink): boolean =>
-    link.source === "flyer" || (state?.linkSources.get(linkKey(link))?.size ?? 0) >= 2;
+    linkIsAuthoritative(link) || (state?.linkSources.get(linkKey(link))?.size ?? 0) >= 2;
 
   /** The link-related slice of EventState that scoping needs. */
   interface LinkState {
@@ -1864,7 +1934,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
               l.kind === "chesscom-tournament" &&
               !state.junkLinks.has(linkKey(l)) &&
               linkTrusted(state, l) &&
-              (l.source === "flyer" || state.validatedLinks.has(linkKey(l))) // Phase A: bracket-first only on a proven non-pool link
+              (linkIsAuthoritative(l) || state.validatedLinks.has(linkKey(l))) // Phase A: bracket-first only on a proven non-pool link
           )
           .map((l) => l.id)
       : [];
@@ -1921,11 +1991,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         // was fetched and proven not a public pool. Trust (≥2 sources) alone is
         // what let a big public arena two players each dipped into once crown a
         // stranger — two coincidental ties are not a roster the event owns.
-        if (link.source !== "flyer" && !state.validatedLinks.has(linkKey(link))) continue;
+        if (!linkIsAuthoritative(link) && !state.validatedLinks.has(linkKey(link))) continue;
         const inLink = games.filter((g) => gameInLink(g, link));
         if (inLink.length && (!best || inLink.length > best.inLink.length)) best = { link, inLink };
       }
-      if (best && (best.link.source === "flyer" || best.inLink.length >= 2)) {
+      if (best && (linkIsAuthoritative(best.link) || best.inLink.length >= 2)) {
         return { scoped: best.inLink, viaLink: best.link };
       }
     }
@@ -2072,7 +2142,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           async (cand) => {
             if (stopHere()) return;
             if (dudHandles.has(`${platform}:${cand.username.toLowerCase()}`)) return;
-            const prof = await verifyOn(platform, cand.username);
+            const prof = await verifyOn(platform, cand.username, true);
             if (!prof || dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) return;
             const attr = attributeMatch(
               name,
@@ -2196,6 +2266,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           VERIFY_POOL,
           async (prof, order) => {
             if (stopHere()) return;
+            // The name gate passed on a LITE profile; the rating-gap check and
+            // the archive judgment below want the full one (one /stats GET for
+            // the few survivors instead of one for every guess that exists).
+            if (platform === "chesscom") await enrichChesscomStats(prof, signal).catch(() => prof);
             // Early rejection: a name-match that is a clear same-name stranger
             // (foreign country AND a >1000pt rating gap) never justifies pulling
             // its archives — skip before the fetch. Name-gating already passed,
@@ -2376,7 +2450,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
   // --- Recording the target ---------------------------------------------------
   interface FoundVia {
-    method: "pairing" | "roster-name" | "elimination" | "opponent-archive" | "google" | "google-lead";
+    method: "pairing" | "roster-name" | "elimination" | "opponent-archive" | "google" | "google-lead" | "section-align";
     event: GraphEvent;
     link?: EventLink;
     chain?: string[];
@@ -2458,12 +2532,41 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       return false;
     }
     const key = `${platform}:${profile.username.toLowerCase()}`;
+    // A crown deserves the full profile (ratings/game counts) even when the
+    // candidate was verified lite during a speculative scan.
+    if (platform === "chesscom" && !via.profileUnavailable) await enrichChesscomStats(profile, signal).catch(() => profile);
 
     const ev = via.event;
     const evidence: Evidence[] = [];
     const dateStr = via.game ? new Date(via.game.endMs).toISOString().slice(0, 10) : (ev.startDate || "").slice(0, 10);
 
     switch (via.method) {
+      case "section-align":
+        evidence.push({
+          kind: "shared-opponent",
+          weight: graphDiscoveryWeight(true, Math.max(1, via.crossVotes || 1)),
+          label: `@${profile.username}'s round-by-round results in the ${platformLabel(platform)} tournament hosting "${ev.name}" match ${targetName}'s USCF crosstable line exactly${
+            via.crossVotes ? `, and ${via.crossVotes} of ${targetName}'s crosstable opponents align to the very accounts @${profile.username} played those rounds` : ""
+          }`,
+          source: "uscf-graph",
+        });
+        if (via.checkedRounds) {
+          evidence.push({
+            kind: "cross-reference",
+            weight: Math.min(1.8, 0.6 + 0.2 * via.checkedRounds),
+            label: `${via.checkedRounds}/${via.totalRounds ?? via.checkedRounds} round results match the USCF crosstable exactly`,
+            source: "uscf-graph",
+          });
+        }
+        if (via.sectionOverlap) {
+          evidence.push({
+            kind: "cross-reference",
+            weight: Math.min(1.2, 0.15 * via.sectionOverlap),
+            label: `${via.sectionOverlap} other crosstable player(s) of this section map to participants of the same tournament`,
+            source: "uscf-graph",
+          });
+        }
+        break;
       case "pairing":
         evidence.push({
           kind: "shared-opponent",
@@ -2600,7 +2703,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     // must not be sunk by a missing/whimsical display name). NOT for
     // google-lead: the lead exists BECAUSE of the name, so "the profile name
     // corroborates" is circular — it stacked a namesake to 99% once.
-    if (via.method === "pairing" || via.method === "elimination" || via.method === "google") {
+    if (via.method === "pairing" || via.method === "elimination" || via.method === "google" || via.method === "section-align") {
       const sim = nameSimilarity(targetName, profile.displayName || "");
       if (profile.displayName && sim >= 0.6) {
         evidence.push({
@@ -2746,11 +2849,18 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       // search short before a second opinion could contest it.
       const idMatch =
         !!(targetFideId && profile.fideId && digits(profile.fideId) === targetFideId) || digits(profile.uscfId) === targetId;
-      const twoIndependent = (via.crossVotes ?? 0) >= 2 || idMatch || via.method === "elimination";
+      const sectionProof = via.method === "section-align" && (via.sectionOverlap ?? 0) >= 2 && (via.checkedRounds ?? 0) >= 2;
+      const twoIndependent = (via.crossVotes ?? 0) >= 2 || idMatch || via.method === "elimination" || sectionProof;
       if (account.confidence > 0.85 && twoIndependent && !stopController.signal.aborted) {
         log(
           `Confirmed ${targetName} = @${profile.username} with high confidence via ${
-            (via.crossVotes ?? 0) >= 2 ? `${via.crossVotes} independent opponents` : idMatch ? "an identity-ID match" : "the full tournament roster"
+            (via.crossVotes ?? 0) >= 2
+              ? `${via.crossVotes} independent opponents`
+              : idMatch
+              ? "an identity-ID match"
+              : sectionProof
+              ? "a round-by-round alignment of the whole section"
+              : "the full tournament roster"
           } — standing down all remaining searches immediately.`
         );
         stopController.abort();
@@ -2779,6 +2889,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const how =
       via.method === "pairing"
         ? `pairing chain ${(via.chain || []).concat(via.viaName || "").filter(Boolean).join(" → ")} in "${ev.name}"`
+        : via.method === "section-align"
+        ? `aligning the ${platformLabel(platform)} tournament of "${ev.name}" round-by-round with its USCF crosstable (${via.checkedRounds ?? 0} round(s) matched, ${via.sectionOverlap ?? 0} other players mapped alongside)`
         : via.method === "elimination"
         ? `elimination over the tournament roster of "${ev.name}"`
         : via.method === "roster-name"
@@ -2939,8 +3051,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     // more often a public pool the player dipped into, so flag it at a lower
     // ratio (a real event's roster is ~crosstable-sized, never 2.5×+). The floor
     // protects small legit sections whose online roster ran a bit larger.
-    const poolFloor = link.source === "flyer" ? 100 : Math.max(40, roster.length + 15);
-    const poolRatio = link.source === "flyer" ? 4 : 2.5;
+    const poolFloor = linkIsAuthoritative(link) ? 100 : Math.max(40, roster.length + 15);
+    const poolRatio = linkIsAuthoritative(link) ? 4 : 2.5;
     if (handles.length >= poolFloor && handles.length > poolRatio * roster.length) {
       state?.junkLinks.add(linkKey(link));
       state?.validatedLinks.delete(linkKey(link)); // a pool can never be a scoping source
@@ -3053,6 +3165,117 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       );
     }
     return false;
+  };
+
+  // ---------------------------------------------------------------------------
+  // Whole-section alignment: the located tournament's own games vs the USCF
+  // crosstable. One games export maps every player of the section at once
+  // (see sectionAlign.ts) — the target included, with no name ever searched.
+  // ---------------------------------------------------------------------------
+  const sectionAligned = new Set<string>();
+  const trySectionAlign = async (ev: GraphEvent, link: EventLink, state: EventState, localDeadline: number): Promise<boolean> => {
+    const key = `${ev.eventId}|${linkKey(link)}`;
+    if (sectionAligned.has(key) || stopNow(localDeadline)) return false;
+    sectionAligned.add(key);
+    const kindLabel = link.kind === "chesscom-tournament" ? "tournament" : link.kind.replace("lichess-", "");
+    const linkUrl =
+      link.kind === "chesscom-tournament"
+        ? `chess.com/tournament/${chesscomSlug(link.id)}`
+        : link.kind === "lichess-swiss"
+        ? `lichess.org/swiss/${link.id}`
+        : `lichess.org/tournament/${link.id}`;
+    let rows: TournamentGameRow[];
+    if (link.kind === "chesscom-tournament") {
+      const raw = await fetchChesscomTournamentGames(link.id, signal);
+      rows = chesscomBracketRows(raw, (g) => (g as { _round?: number } | null)?._round);
+    } else {
+      rows = await fetchLichessTournamentGames(link.kind, link.id, signal);
+    }
+    if (stopNow(localDeadline)) return false;
+    const n = ev.players.filter((p) => p.games.some((g) => normOutcome(g.outcome))).length;
+    if (!rows.length) {
+      log(`"${ev.name}": the ${platformLabel(link.platform)} ${kindLabel} at ${linkUrl} returned no games — falling back to its participant roster.`);
+      return false;
+    }
+    const a = alignSectionBest(ev, rows);
+    if (!alignmentTrustworthy(ev, a)) {
+      log(
+        `"${ev.name}": the ${rows.length} games at ${linkUrl} don't line up with the crosstable (${a.assignments.length}/${n} players matched, ${a.contradicted.length} contradicted, ${a.inconsistentEdges} pairing conflict(s)) — ${
+          link.source === "organizer" ? "a sibling section from the same day, most likely" : "probably not this section"
+        }; not using it.`
+      );
+      if (link.source === "organizer") state.links.delete(linkKey(link));
+      return false;
+    }
+    state.validatedLinks.add(linkKey(link));
+    rosterTried.add(`${ev.eventId}|${linkKey(link)}|t`);
+    rosterTried.add(`${ev.eventId}|${linkKey(link)}|u`);
+    // Real profiles for the mapped handles: ONE bulk call on Lichess. On
+    // Chess.com the mapping stands on the pairing structure alone and the
+    // profile is fetched lazily by whoever needs it (a crown always is).
+    const handles = a.assignments.map((x) => x.handleLower);
+    const bulk = link.platform === "lichess" ? await lichessBulkVerify(handles, signal) : null;
+    const profileFor = (handleLower: string): VerifiedProfile => {
+      const cached = bulk?.get(handleLower);
+      if (cached) {
+        verifyCache.set(`${link.platform}:${handleLower}`, Promise.resolve(cached));
+        return cached;
+      }
+      return {
+        platform: link.platform,
+        username: handleLower,
+        profileUrl: link.platform === "lichess" ? `https://lichess.org/@/${handleLower}` : `https://www.chess.com/member/${handleLower}`,
+      };
+    };
+    let newlyMapped = 0;
+    for (const asg of a.assignments) {
+      if (asg.uscfId === targetId) continue;
+      if (mapped.get(asg.uscfId)?.has(link.platform)) continue;
+      if (handleDisqualified(link.platform, asg.handleLower)) continue;
+      const prof = profileFor(asg.handleLower);
+      setMapping(asg.uscfId, link.platform, { profile: prof, how: "roster", chain: [] });
+      enqueue(state, { memberId: asg.uscfId, platform: link.platform, mapping: mapped.get(asg.uscfId)!.get(link.platform)! });
+      const srcs = state.linkSources.get(linkKey(link)) || new Set<string>();
+      srcs.add(asg.uscfId);
+      state.linkSources.set(linkKey(link), srcs);
+      newlyMapped++;
+    }
+    const t = a.assignments.find((x) => x.uscfId === targetId);
+    log(
+      `"${ev.name}": aligned ${linkUrl} round-by-round with the crosstable — ${a.assignments.length}/${n} section players mapped to their ${platformLabel(
+        link.platform
+      )} handles in one pass (${newlyMapped} new)${t ? `, including ${targetName}` : ""}.`
+    );
+    if (!t) {
+      const why = a.unresolved.includes(targetId)
+        ? "several participants share the same result pattern in those rounds"
+        : a.contradicted.includes(targetId)
+        ? "their crosstable results don't match any participant (a bye/forfeit-heavy line, or a result correction)"
+        : "they have no played rounds to align";
+      log(`${targetName}'s own line didn't pin a unique handle here (${why}) — the mapped section players will be traced through their games next.`);
+      return false;
+    }
+    if (handleDisqualified(link.platform, t.handleLower)) {
+      log(`The aligned handle @${t.handleLower} is already mapped to another crosstable player — not crowning it.`);
+      return false;
+    }
+    let prof: VerifiedProfile | null | undefined = bulk?.get(t.handleLower) ?? (await verifyOn(link.platform, t.handleLower, true));
+    let profileUnavailable = false;
+    if (!prof) {
+      profileUnavailable = true;
+      prof = profileFor(t.handleLower);
+    }
+    const totalRounds = (appearances.get(targetId) || []).find((x) => x.event.eventId === ev.eventId)?.rounds.length ?? t.checkedRounds;
+    return recordTarget(link.platform, prof, {
+      method: "section-align",
+      event: ev,
+      link,
+      checkedRounds: t.checkedRounds,
+      totalRounds,
+      crossVotes: t.corroboratingOpponents,
+      sectionOverlap: a.assignments.length - 1,
+      profileUnavailable,
+    });
   };
 
   // ---------------------------------------------------------------------------
@@ -3491,7 +3714,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
     const cands = await googleCandidatesFor(targetId, ev);
     if (!cands.length) {
-      if (phase === "early") log(`The Google index has no username candidates for ${targetName} yet — proceeding with the tournament traversal.`);
+      // Narrated ONCE per run, not once per event (the answer is per person).
+      if (phase === "early" && !googleMissNoted.has(targetId)) {
+        googleMissNoted.add(targetId);
+        log(
+          googleUnavailable
+            ? `The Google index couldn't be consulted for ${targetName} (search backend unavailable or out of quota) — the tournament traversal proceeds on its own.`
+            : `The Google index has no username candidates for ${targetName} yet — proceeding with the tournament traversal.`
+        );
+      }
       return false;
     }
     if (phase === "early") {
@@ -3514,7 +3745,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             if (stopNow(localDeadline)) return;
             const rejectKey = `${platform}:${cand.username.toLowerCase()}`;
             if (googleTargetRejects.has(rejectKey)) return;
-            const prof = await verifyOn(platform, cand.username);
+            const prof = await verifyOn(platform, cand.username, true);
             if (!prof) return;
             if (targetFideId && prof.fideId && digits(prof.fideId) !== targetFideId) {
               googleTargetRejects.add(rejectKey);
@@ -3648,28 +3879,38 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // the table, we come back and resume exactly where each event stopped.
   const workStates = new Map<string, WorkState>();
 
+  /** The event's persistent work state (created on first touch). Shared by
+   *  workEvent and the stage-0 early alignment so links/mappings recorded
+   *  before the event's turn are still there when it comes up. */
+  const ensureWorkState = (ev: GraphEvent): { ws: WorkState; created: boolean } => {
+    let ws = workStates.get(ev.eventId);
+    if (ws) return { ws, created: false };
+    ws = {
+      links: new Map(),
+      junkLinks: new Set(),
+      linkSources: new Map(),
+      frontier: [],
+      visited: new Set(),
+      oppSeen: new Map(),
+      seedOrder: [],
+      platforms: null,
+      seedIdx: 0,
+      exhausted: false,
+      ccArchiveFailures: 0,
+      validatedLinks: new Set(),
+    };
+    workStates.set(ev.eventId, ws);
+    return { ws, created: true };
+  };
+
   const workEvent = async (ev: GraphEvent, localDeadline: number): Promise<boolean> => {
     const roster = ev.players;
-    let ws = workStates.get(ev.eventId);
-    if (ws?.exhausted) return false;
-    const resuming = !!ws;
-    if (!ws) {
-      ws = {
-        links: new Map(),
-        junkLinks: new Set(),
-        linkSources: new Map(),
-        frontier: [],
-        visited: new Set(),
-        oppSeen: new Map(),
-        seedOrder: [],
-        platforms: null,
-        seedIdx: 0,
-        exhausted: false,
-        ccArchiveFailures: 0,
-        validatedLinks: new Set(),
-      };
-      workStates.set(ev.eventId, ws);
-    }
+    const existing = workStates.get(ev.eventId);
+    if (existing?.exhausted) return false;
+    // "Resuming" = this event already had its seed order laid out by a previous
+    // pass (a state created only by the stage-0 early alignment doesn't count).
+    const resuming = !!existing && existing.seedOrder.length > 0;
+    const { ws } = ensureWorkState(ev);
     const state: EventState = ws;
 
     // 1. Which platform hosted it?
@@ -3683,11 +3924,9 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
     if (!platforms.length && (guess === "chesscom" || guess === "lichess")) platforms = [guess as OnlinePlatform];
 
-    /** Flyer/TLA web search → concrete links + platform hint for this event. */
-    const collectFlyerLinks = async (): Promise<OnlinePlatform[]> => {
-      if (!hooks.discoverPlatform) return [];
-      log(`Searching the web for the flyer/announcement of "${ev.name}" to learn where it was hosted…`);
-      const info = await discover(ev);
+    /** Record the tournament objects a discovery result names as this event's
+     *  links; returns the platform(s) it implies. */
+    const applyInfoLinks = (info: EventPlatformInfo | null): OnlinePlatform[] => {
       if (!info) return [];
       for (const slug of info.chesscomSlugs || []) {
         const l: EventLink = { platform: "chesscom", kind: "chesscom-tournament", id: slug, source: "flyer" };
@@ -3701,11 +3940,33 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         const l: EventLink = { platform: "lichess", kind: "lichess-arena", id, source: "flyer" };
         state.links.set(linkKey(l), l);
       }
+      if (info.platform === "chesscom" || info.platform === "lichess") return [info.platform];
+      return Array.from(new Set(Array.from(state.links.values()).map((l) => l.platform)));
+    };
+    // Stage-0 results: the organizer-located tournament(s) and any up-front
+    // flyer answer for this event.
+    for (const l of organizerLinks.get(ev.eventId) || []) state.links.set(linkKey(l), l);
+    if (discoveredInfo.has(ev.eventId)) {
+      const implied = applyInfoLinks(discoveredInfo.get(ev.eventId) ?? null);
+      if (!platforms.length && implied.length) platforms = implied;
+    }
+    if (!platforms.length) {
+      const fromLinks = Array.from(new Set(Array.from(state.links.values()).map((l) => l.platform)));
+      if (fromLinks.length) platforms = fromLinks;
+    }
+
+    /** Flyer/TLA web search → concrete links + platform hint for this event. */
+    const collectFlyerLinks = async (): Promise<OnlinePlatform[]> => {
+      if (!hooks.discoverPlatform) return [];
+      log(`Searching the web for the flyer/announcement of "${ev.name}" to learn where it was hosted…`);
+      const info = await discover(ev);
+      discoveredInfo.set(ev.eventId, info);
+      if (!info) return [];
+      const implied = applyInfoLinks(info);
       if (info.platform === "chesscom" || info.platform === "lichess") {
         log(`Web search says "${ev.name}" ran on ${platformLabel(info.platform)}${info.note ? ` (${info.note})` : ""}.`);
-        return [info.platform];
       }
-      return Array.from(new Set(Array.from(state.links.values()).map((l) => l.platform)));
+      return implied;
     };
 
     if (!platforms.length && !outOfTime(localDeadline)) {
@@ -3715,8 +3976,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (!platforms.length) platforms = ["chesscom", "lichess"];
     ws.platforms = platforms;
 
-    // 2. Flyer-derived rosters first — they can end the search outright.
-    {
+    /** Located tournaments: align the WHOLE section against the tournament's
+     *  games in one pass (every player at once), then the participant-roster
+     *  name match as the fallback. Either can end the search outright. */
+    const workLinks = async (): Promise<boolean> => {
+      for (const link of Array.from(state.links.values())) {
+        if (stopNow(localDeadline)) return false;
+        if (!linkIsAuthoritative(link)) continue;
+        if (await trySectionAlign(ev, link, state, localDeadline)) return true;
+      }
       let rosterHit = false;
       await pool(
         Array.from(state.links.values()),
@@ -3727,8 +3995,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         },
         () => rosterHit || stopNow(localDeadline)
       );
-      if (rosterHit) return true;
-    }
+      return rosterHit;
+    };
+
+    // 2. Located tournaments / flyer-derived rosters first.
+    if (await workLinks()) return true;
 
     // 2b. The target straight from the Google index — the cheapest possible
     // win. Every lead is verified against this event's date window before it
@@ -3889,22 +4160,35 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
     // Last chance for this event: if the flyer search never ran (the platform
     // was already guessed), run it now — a flyer can hand us the exact
-    // tournament page even when no seed could be resolved from names.
-    if (!stopNow(localDeadline) && hooks.discoverPlatform && !discoverCache.has(ev.eventId)) {
-      await collectFlyerLinks();
-      let rosterHit = false;
-      await pool(
-        Array.from(state.links.values()),
-        3,
-        async (link) => {
-          if (rosterHit || stopNow(localDeadline)) return;
-          if (await tryRoster(ev, link, localDeadline, state)) rosterHit = true;
-        },
-        () => rosterHit || stopNow(localDeadline)
-      );
-      if (rosterHit) return true;
-      // The roster may have mapped fresh sources — drain the pairing frontier.
-      if (state.frontier.length && (await runAgents(false))) return true;
+    // tournament page even when no seed could be resolved from names. Skipped
+    // when the organizer research already located the tournament.
+    if (!stopNow(localDeadline) && hooks.discoverPlatform && !discoverCache.has(ev.eventId) && !organizerLinks.has(ev.eventId)) {
+      const discovered = await collectFlyerLinks();
+      if (await workLinks()) return true;
+      // The web search may PLACE the event somewhere the title didn't suggest.
+      // That answer must redirect the seed hunt — discarding it is how a whole
+      // event used to be worked to exhaustion on the wrong platform.
+      const fresh = discovered.filter((p) => !platforms.includes(p));
+      if (fresh.length && !stopNow(localDeadline)) {
+        log(
+          `The web search places "${ev.name}" on ${fresh.map(platformLabel).join(" + ")}, not ${platforms
+            .map(platformLabel)
+            .join(" + ")} as its title suggested — re-running the seed hunt there.`
+        );
+        platforms = discovered;
+        ws.platforms = platforms;
+        ws.seedIdx = 0;
+        ws.exhausted = false;
+        for (const p of roster) {
+          const per = mapped.get(p.uscfId);
+          if (!per) continue;
+          for (const platform of platforms) {
+            const m = per.get(platform);
+            if (m && !state.visited.has(`${p.uscfId}:${platform}`)) enqueue(state, { memberId: p.uscfId, platform, mapping: m });
+          }
+        }
+        if (await runAgents(true)) return true;
+      } else if (state.frontier.length && (await runAgents(false))) return true;
     }
 
     // Re-test the target's Google leads now that this event's links, rosters
@@ -3917,13 +4201,30 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // Main loop: every online event, worked by a pool of EVENT AGENTS in the
   // most promising order — several events get the full treatment at once.
   // ---------------------------------------------------------------------------
-  // Traceable platform first (icc/chesskid have no public API), then small
-  // sections (rosters + elimination bite harder), then recency.
+  // Rank by RESOLVABILITY, most deterministic first:
+  //   0 — a LOCATED tournament object (the organizer's own Lichess swiss/arena
+  //       matched by date/rounds/clock/roster size, or a flyer naming the exact
+  //       tournament): the whole section aligns from one games export;
+  //   1 — known Chess.com host (indexable; public tournament API + archives);
+  //   2 — known Lichess host (public API; handles surface through games);
+  //   3 — unknown host (both platforms must be tried);
+  //   4 — ICC / ChessKid (no public API — untraceable).
+  // Within a tier: smaller sections first (rosters/elimination bite harder),
+  // then the most recent.
+  const organizerLinks = new Map<string, EventLink[]>();
+  const discoveredInfo = new Map<string, EventPlatformInfo | null>();
+  const hasLocatedTournament = (e: GraphEvent): boolean => {
+    if (organizerLinks.has(e.eventId)) return true;
+    const info = discoveredInfo.get(e.eventId);
+    return !!info && !!(info.chesscomSlugs?.length || info.lichessSwissIds?.length || info.lichessArenaIds?.length);
+  };
   const eventRank = (e: GraphEvent): number => {
     const g = (e.platformGuess || "").toLowerCase();
-    if (g === "chesscom" || g === "lichess") return 0;
-    if (g === "icc" || g === "chesskid") return 2;
-    return 1;
+    if (g === "icc" || g === "chesskid") return 4;
+    if (hasLocatedTournament(e)) return 0;
+    if (g === "chesscom") return 1;
+    if (g === "lichess") return 2;
+    return 3;
   };
   const sortEvents = (list: GraphEvent[]): GraphEvent[] =>
     list.sort((a, b) => {
@@ -3932,6 +4233,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       return (b.startDate || "").localeCompare(a.startDate || "");
     });
   const events = sortEvents([...graph.onlineEvents]);
+  const eventById = new Map(events.map((e) => [e.eventId, e] as const));
 
   // ---------------------------------------------------------------------------
   // Early platform discovery — pin the host platform of EVERY event whose
@@ -3969,22 +4271,117 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   // front-loading discovery for every one of their events would add latency,
   // and the dive already self-limits via its budget and the parent's stopWhen —
   // so a dive keeps the original lazy, per-event discovery and always runs.
+  // ---- STAGE 0 (top level): research EVERY event's host before any name work.
+  // (a) The organizer's own Lichess team history — deterministic: the exact
+  //     swiss/arena matched by date, rounds, clock, roster size and name.
+  // (b) The web/flyer search for whatever is still unknown.
+  // (c) Organizer-level inference: an organizer proven on one platform hosts
+  //     its sibling events there too.
+  // Only then are events ranked and worked.
+  let organizerOf = new Map<string, string>();
+  if (depth === 0 && events.length) {
+    const researchable = events.filter((e) => {
+      const g = (e.platformGuess || "").toLowerCase();
+      return g !== "icc" && g !== "chesskid";
+    });
+    if (researchable.length) {
+      log(
+        `Researching where each of ${targetName}'s ${events.length} online event(s) was hosted BEFORE any name work — organizer teams first, then the web — so the search starts on the right platform with the exact tournament in hand.`
+      );
+      // Sections are aligned the MOMENT their tournament is pinned — while the
+      // organizer's history is still streaming in — so the first crown does not
+      // wait for the whole history (a big club's list can take a minute+).
+      const earlyAligns: Promise<void>[] = [];
+      const onMatch = (ev: GraphEvent, ms: { tournament: { kind: EventLink["kind"]; id: string } }[]) => {
+        ev.platformGuess = "lichess";
+        const links = ms.map((m) => ({ platform: "lichess" as const, kind: m.tournament.kind, id: m.tournament.id, source: "organizer" as const }));
+        organizerLinks.set(ev.eventId, links);
+        if (found || outOfTime()) return;
+        const { ws } = ensureWorkState(ev);
+        for (const l of links) ws.links.set(linkKey(l), l);
+        if (!ws.platforms) ws.platforms = ["lichess"];
+        earlyAligns.push(
+          (async () => {
+            for (const l of links) {
+              if (found || outOfTime()) return;
+              if (await trySectionAlign(ev, l, ws, deadline)) return;
+            }
+          })().catch(() => {})
+        );
+      };
+      try {
+        const research = await researchOrganizers(researchable, {
+          signal,
+          log,
+          deadlineMs: Date.now() + Math.min(300_000, Math.max(60_000, Math.round(totalBudgetMs * 0.25))),
+          onMatch,
+        });
+        organizerOf = research.organizerOf;
+        for (const [eventId, ms] of research.matches) {
+          const ev = eventById.get(eventId);
+          if (!ev || organizerLinks.has(eventId)) continue;
+          onMatch(ev, ms);
+        }
+      } catch {
+        log("Organizer research hit an error — continuing with the web/flyer search.");
+      }
+      await Promise.all(earlyAligns);
+    }
+  }
   if (hooks.discoverPlatform && depth === 0) {
     const unknownEvents = events.filter((e) => !platformKnown(e));
     if (unknownEvents.length) {
-      log(`Discovering the host platform of ${unknownEvents.length} event(s) up front to see which are traceable before committing to a full trace…`);
+      log(`Web-searching the flyer/announcement of ${unknownEvents.length} event(s) whose host is still unknown…`);
       await pool(
         unknownEvents,
         3,
         async (ev) => {
           if (outOfTime()) return;
-          const p = platformFromInfo(await discover(ev));
+          const info = await discover(ev);
+          discoveredInfo.set(ev.eventId, info);
+          const p = platformFromInfo(info);
           if (p) ev.platformGuess = p;
         },
         outOfTime
       );
-      sortEvents(events); // re-rank now that more platforms are known
     }
+  }
+  if (depth === 0) {
+    // (c) Organizer-level inference.
+    const groups = new Map<string, GraphEvent[]>();
+    for (const e of events) {
+      const k = organizerOf.get(e.eventId) || "";
+      if (!k) continue;
+      const list = groups.get(k) || [];
+      list.push(e);
+      groups.set(k, list);
+    }
+    for (const [key, list] of groups) {
+      const unknown = list.filter((e) => !platformKnown(e));
+      if (!unknown.length) continue;
+      const votes = { chesscom: 0, lichess: 0 };
+      for (const e of list) {
+        const g = (e.platformGuess || "").toLowerCase();
+        if (g === "chesscom" || g === "lichess") votes[g] += organizerLinks.has(e.eventId) ? 2 : 1;
+      }
+      const winner: OnlinePlatform | null =
+        votes.chesscom >= 2 && votes.lichess === 0 ? "chesscom" : votes.lichess >= 2 && votes.chesscom === 0 ? "lichess" : null;
+      if (!winner) continue;
+      for (const e of unknown) e.platformGuess = winner;
+      log(
+        `"${key}" hosts its events on ${platformLabel(winner)} (${list.length - unknown.length} of its ${list.length} events confirmed there) — assuming the same for ${unknown.length} sibling event(s) whose host couldn't be read directly.`
+      );
+    }
+    sortEvents(events); // re-rank now that hosts are known
+    const tiers = [0, 0, 0, 0, 0];
+    for (const e of events) tiers[eventRank(e)]++;
+    const parts: string[] = [];
+    if (tiers[0]) parts.push(`${tiers[0]} with the exact hosting tournament located (whole-section alignment)`);
+    if (tiers[1]) parts.push(`${tiers[1]} on Chess.com`);
+    if (tiers[2]) parts.push(`${tiers[2]} on Lichess`);
+    if (tiers[3]) parts.push(`${tiers[3]} on an unknown host (both platforms will be tried)`);
+    if (tiers[4]) parts.push(`${tiers[4]} on ICC/ChessKid (untraceable)`);
+    log(`Event plan, most resolvable first: ${parts.join("; ")}.`);
   }
   const hasTraceableEvents = depth > 0 || events.some(isTraceableEvent);
   if (!hasTraceableEvents) {
@@ -4016,13 +4413,13 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   log(
     `Tournament-first search for ${targetName}: ${events.length} online event${events.length === 1 ? "" : "s"}, ${totalOpp} direct opponent${
       totalOpp === 1 ? "" : "s"
-    } to work with — ${Math.min(opts.conductor?.tuning.eventAgents() ?? EVENT_AGENTS, Math.max(1, events.length))} event agent(s), each running seed scouts and pairing tracers in parallel${opts.conductor ? " (the conductor adjusts the fleet live)" : ""}. Names resolve through the Google index and get date-verified; platform name search stays OFF unless the index has nothing.`
+    } to work with — ${Math.min(opts.conductor?.tuning.eventAgents() ?? EVENT_AGENTS, Math.max(1, events.length))} event agent(s), each running seed scouts and pairing tracers in parallel${opts.conductor ? " (the conductor adjusts the fleet live)" : ""}. Located tournaments are aligned whole-section first; names otherwise resolve through the Google index and get date-verified; platform name search stays OFF unless the index has nothing.`
   );
 
   // TEST/DEBUG: pre-seed injected member→handle mappings (no-op in production).
   for (const s of opts.seedMappings || []) {
     if (s.memberId === targetId) continue; // never seed the target itself
-    const prof = await verifyOn(s.platform, s.username);
+    const prof = await verifyOn(s.platform, s.username, true);
     if (prof) {
       setMapping(s.memberId, s.platform, { profile: prof, how: "seed", chain: [] });
       log(`Injected seed: ${memberName.get(s.memberId) || s.memberId} → @${prof.username} (${platformLabel(s.platform)}).`);

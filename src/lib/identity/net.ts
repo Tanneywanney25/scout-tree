@@ -106,19 +106,36 @@ export function semaphore(limit: number): Gate {
 const CC_MAX_INFLIGHT = 8;
 export const chesscomGate = semaphore(CC_MAX_INFLIGHT);
 
-// Chess.com pacer — a minimum gap between the START of consecutive Chess.com
-// requests, so even at the (low) concurrency cap the aggregate stays under the
-// ~3 req/s archive ceiling their staff cite. Serial-with-a-gap is the access
-// pattern they document as unlimited; bursts are what earn a 429.
-let chesscomNextSlot = 0;
-let chesscomGapMs = 350; // configurable (Phase 1); the real rate governor
+// Chess.com pacing — LANES. Chess.com's published rule is "serial access is
+// unlimited; parallel access may be refused with 429". One global 350ms gap
+// for every request class capped the whole engine at ~2.9 req/s — a 1 KB
+// profile probe waited behind a 4 MB monthly archive. Requests are now paced
+// per LANE, each lane serial-with-a-gap (the documented-safe pattern), so a
+// handful of tiny profile probes can proceed while an archive downloads:
+//   • light   — /pub/player/{u}, /stats, /games/archives, /clubs, /tournament/*
+//   • archive — /pub/player/{u}/games/{yyyy}/{mm} (multi-MB bodies)
+// The gate above still caps total in-flight requests, and a 429 anywhere
+// pauses EVERY lane (below) and doubles every gap for a minute — the engine
+// treats 429 as "we misbehaved", never as a fact about the data.
+type ChesscomLane = "light" | "archive";
+const LANE_GAP_MS: Record<ChesscomLane, number> = { light: 120, archive: 300 };
+const laneNextSlot: Record<ChesscomLane, number> = { light: 0, archive: 0 };
+let chesscomGapScale = 1; // ×2 after a 429, decays back after RATE_CALM_MS
+let chesscomGapScaleUntil = 0;
+const RATE_CALM_MS = 60_000;
+/** Manual override for the light lane's gap (tests / tuning). */
 export function setChesscomGapMs(ms: number): void {
-  chesscomGapMs = Math.max(0, Math.floor(ms));
+  LANE_GAP_MS.light = Math.max(0, Math.floor(ms));
 }
-async function chesscomSlot(): Promise<void> {
+function laneFor(url: string): ChesscomLane {
+  return /\/games\/\d{4}\/\d{2}(?:\/|$|\?)/.test(url) ? "archive" : "light";
+}
+async function chesscomSlot(lane: ChesscomLane): Promise<void> {
   const now = Date.now();
-  const wait = Math.max(0, chesscomNextSlot - now);
-  chesscomNextSlot = Math.max(now, chesscomNextSlot) + chesscomGapMs;
+  if (chesscomGapScale > 1 && now > chesscomGapScaleUntil) chesscomGapScale = 1;
+  const gap = Math.round(LANE_GAP_MS[lane] * chesscomGapScale);
+  const wait = Math.max(0, laneNextSlot[lane] - now);
+  laneNextSlot[lane] = Math.max(now, laneNextSlot[lane]) + gap;
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
 }
 
@@ -156,13 +173,40 @@ export function classifyChesscomStatus(status: number): ChesscomStatusClass {
 }
 
 // Lichess enforces per-IP rate limits and answers bursts with 429s (or a
-// temporary ban). One global pacer spaces every Lichess call in the process.
+// temporary ban). Its published rule: "only make one request at a time; after
+// a 429, wait a full minute". So Lichess gets a tiny GATE (headers of at most
+// two requests in flight — streamed bodies keep downloading outside the gate)
+// plus a short start gap, and a 429 pauses the whole Lichess queue.
+const LICHESS_MAX_INFLIGHT = 1;
+export const lichessGate = semaphore(LICHESS_MAX_INFLIGHT);
+/** Bulk exports (a tournament's games, a team's history) are heavier on
+ *  Lichess's side than a profile GET — they get their own single-file lane on
+ *  top of the gate so several sections aligning at once queue politely
+ *  instead of bursting into a 429 (observed live: four simultaneous swiss
+ *  exports → 429 → 20s pause). */
+export const lichessExportLane = semaphore(1);
 let lichessNextSlot = 0;
-export async function lichessSlot(gapMs = 250): Promise<void> {
+let lichessPauseUntil = 0;
+let lichessLast429 = 0;
+export async function lichessSlot(gapMs = 120): Promise<void> {
+  for (;;) {
+    const pause = lichessPauseUntil - Date.now();
+    if (pause <= 0) break;
+    await new Promise((r) => setTimeout(r, Math.min(pause, 1000)));
+  }
   const now = Date.now();
   const wait = Math.max(0, lichessNextSlot - now);
   lichessNextSlot = Math.max(now, lichessNextSlot) + gapMs;
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+function lichessRateLimited(): number {
+  // First 429 in a while: a 20s breather. A repeat inside two minutes means we
+  // are genuinely over the line — take the full minute Lichess asks for.
+  const now = Date.now();
+  const backoff = now - lichessLast429 < 120_000 ? 60_000 : 20_000;
+  lichessLast429 = now;
+  lichessPauseUntil = Math.max(lichessPauseUntil, now + backoff);
+  return backoff;
 }
 
 export type NetPlatform = "chesscom" | "lichess";
@@ -308,15 +352,19 @@ export async function politeFetch(
     let res: Response;
     try {
       if (platform === "lichess") {
-        await lichessSlot();
-        res = await attemptOnce();
+        res = await lichessGate.run(async () => {
+          await lichessSlot();
+          return attemptOnce();
+        });
       } else {
         // Chess.com: wait out any active global pause, then pace + gate. The
         // pace is taken INSIDE the gate slot so the min-gap governs real
-        // wire time, not queue-wait time.
+        // wire time, not queue-wait time; the lane is chosen by endpoint so
+        // small probes never queue behind multi-MB archive downloads.
         await awaitChesscomPause(outer);
+        const lane = laneFor(url);
         res = await chesscomGate.run(async () => {
-          await chesscomSlot();
+          await chesscomSlot(lane);
           return attemptOnce();
         });
       }
@@ -337,17 +385,23 @@ export async function politeFetch(
       continue;
     }
     if (res.status === 429 && attempt < maxRetries && !outer?.aborted) {
-      const backoff = (platform === "lichess" ? 2500 : 2000) * (attempt + 1);
+      let backoff: number;
       if (platform === "chesscom") {
-        // A 429 means we already misbehaved: pause the WHOLE queue, loudly.
-        // (The engine treats 429 as "slow down", never "absent".)
+        // A 429 means we already misbehaved: pause the WHOLE queue, loudly,
+        // and run every lane at half speed for a minute. (The engine treats
+        // 429 as "slow down", never "absent".)
+        backoff = 2000 * (attempt + 1);
         chesscomPauseUntil = Math.max(chesscomPauseUntil, Date.now() + backoff);
+        chesscomGapScale = 2;
+        chesscomGapScaleUntil = Date.now() + RATE_CALM_MS;
         console.warn(
-          `[net] Chess.com 429 (rate-limited) on ${url} — pausing the whole Chess.com queue ${backoff}ms. ` +
-            `This should not happen with the pacer; if it recurs, lower the concurrency or raise the gap.`
+          `[net] Chess.com 429 (rate-limited) on ${url} — pausing the whole Chess.com queue ${backoff}ms and halving lane speed for ${RATE_CALM_MS / 1000}s.`
         );
+      } else {
+        backoff = lichessRateLimited();
+        console.warn(`[net] Lichess 429 (rate-limited) on ${url} — pausing the whole Lichess queue ${backoff / 1000}s as Lichess asks.`);
       }
-      await sleep(backoff);
+      await sleep(Math.min(backoff, 60_000));
       continue;
     }
     return res;
