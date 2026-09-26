@@ -1,8 +1,6 @@
 # ScoutTree
 
-AI-powered chess opponent scouting. Enter a Lichess or Chess.com username and get
-an opening tree, opponent profile, weakness/structure/endgame analysis, a tailored
-game plan, and spaced-repetition training drills.
+ScoutTree is an AI-powered chess scouting tool that turns any Lichess or Chess.com username into a preparation dossier. It pulls a player's games through the public APIs — no keys required — and builds an interactive opening tree of what they actually play, alongside an opponent profile covering weaknesses, recurring pawn structures, and endgame tendencies. From there it assembles a tailored game plan and generates spaced-repetition training drills, with a bundled Stockfish engine running in a Web Worker for on-device analysis. Optional Supabase edge functions add natural-language move explanations and training hints via the Anthropic API, though the app works fully without them. The stack is Vite, React, and TypeScript with Tailwind and shadcn/ui, backed by Supabase auth and Postgres under row-level security, with usage tracking for both signed-in and anonymous scouting. Deploys as a static frontend; environment variables are publishable values with safe built-in fallbacks.
 
 ## Tech stack
 
