@@ -4320,11 +4320,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const g = (e.platformGuess || "").toLowerCase();
     return g === "chesscom" || g === "lichess" || g === "icc" || g === "chesskid";
   };
-  /** A traceable event ran on a platform with a public game API (Chess.com or
-   *  Lichess) — the only events whose games the pivot can pull and align. */
+  /** A traceable event ran (or may have run) on a platform with a public game
+   *  API. Only ICC / ChessKid are hopeless; an UNKNOWN host is still traceable —
+   *  both platforms get tried, exactly as the event loop always did. (Treating
+   *  unknown as untraceable skipped the whole traversal for any organizer whose
+   *  flyer search came up empty.) */
   const isTraceableEvent = (e: GraphEvent): boolean => {
     const g = (e.platformGuess || "").toLowerCase();
-    return g === "chesscom" || g === "lichess";
+    return g !== "icc" && g !== "chesskid";
   };
   // Bulk discovery + the traceability gate belong to the TOP-LEVEL target
   // search only. A pivot dive (depth 1) recurses on an opponent's whole graph;
@@ -4348,6 +4351,18 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       log(
         `Researching where each of ${targetName}'s ${events.length} online event(s) was hosted BEFORE any name work — organizer teams first, then the web — so the search starts on the right platform with the exact tournament in hand.`
       );
+      // The web/flyer search (edge, cached per event for a year) runs in the
+      // background WHILE the organizer history streams, so events the
+      // organizer research can't place have their answer ready the moment it
+      // finishes instead of adding a second serial wait. Newest first, three
+      // at a time; memoized in discoverCache.
+      if (hooks.discoverPlatform) {
+        const byRecency = [...researchable].sort((a, b) => (b.startDate || "").localeCompare(a.startDate || ""));
+        void pool(byRecency, 3, async (ev) => {
+          if (outOfTime() || found) return;
+          await discover(ev);
+        }, () => outOfTime() || found);
+      }
       // Sections are aligned the MOMENT their tournament is pinned — while the
       // organizer's history is still streaming in — so the first crown does not
       // wait for the whole history (a big club's list can take a minute+).
