@@ -1,14 +1,14 @@
 # ScoutTree
 
-ScoutTree is an AI-powered chess scouting tool that turns any Lichess or Chess.com username into a preparation dossier. It pulls a player's games through the public APIs — no keys required — and builds an interactive opening tree of what they actually play, alongside an opponent profile covering weaknesses, recurring pawn structures, and endgame tendencies. From there it assembles a tailored game plan and generates spaced-repetition training drills, with a bundled Stockfish engine running in a Web Worker for on-device analysis. Optional Supabase edge functions add natural-language move explanations and training hints via the Anthropic API, though the app works fully without them. The stack is Vite, React, and TypeScript with Tailwind and shadcn/ui, backed by Supabase auth and Postgres under row-level security, with usage tracking for both signed-in and anonymous scouting. Deploys as a static frontend; environment variables are publishable values with safe built-in fallbacks.
+ScoutTree is an AI-powered chess scouting tool that turns any Lichess or Chess.com username into a preparation dossier. It pulls a player's games through the public APIs, no keys required, and builds an interactive opening tree of what they actually play, alongside an opponent profile covering weaknesses, recurring pawn structures, and endgame tendencies. From there it assembles a tailored game plan and generates spaced-repetition training drills, with a bundled Stockfish engine running in a Web Worker for on-device analysis. Optional Supabase edge functions add natural-language move explanations and training hints via the Anthropic API, though the app works fully without them. The stack is Vite, React, and TypeScript with Tailwind and shadcn/ui, backed by Supabase auth and Postgres under row-level security, with usage tracking for both signed-in and anonymous scouting. Deploys as a static frontend; environment variables are publishable values with safe built-in fallbacks.
 
 ## Tech stack
 
-- Vite + React + TypeScript
-- Tailwind CSS + shadcn/ui
-- Supabase (auth + Postgres)
-- Stockfish (bundled in `public/stockfish.js`, runs in a Web Worker)
-- Lichess & Chess.com public APIs (no key required)
+* Vite + React + TypeScript
+* Tailwind CSS + shadcn/ui
+* Supabase (auth + Postgres)
+* Stockfish (bundled in `public/stockfish.js`, runs in a Web Worker)
+* Lichess & Chess.com public APIs (no key required)
 
 ## Local development
 
@@ -20,13 +20,13 @@ npm run dev
 ### Environment variables
 
 Create a `.env` (see `.env.example`). These are frontend, publishable values
-(safe to expose):
+and should be configured for your own Supabase project:
 
-| Variable | Value |
-| --- | --- |
-| `VITE_SUPABASE_URL` | `https://xqyszdjczchlgyisvtvo.supabase.co` |
-| `VITE_SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_BH3AoBttItAuh4mpSvgFTw_oKmPpKBU` |
-| `VITE_SUPABASE_PROJECT_ID` | `xqyszdjczchlgyisvtvo` |
+| Variable                        | Value                                    |
+| ------------------------------- | ---------------------------------------- |
+| `VITE_SUPABASE_URL`             | `https://<your-project-ref>.supabase.co` |
+| `VITE_SUPABASE_PUBLISHABLE_KEY` | `<your-publishable-key>`                 |
+| `VITE_SUPABASE_PROJECT_ID`      | `<your-project-ref>`                     |
 
 When deploying (e.g. Vercel), set the same variables in the host's environment.
 The Supabase client also has these as built-in fallbacks, so the app works even
@@ -39,7 +39,7 @@ Apply it to your Supabase project either by connecting the repo to Supabase
 (GitHub integration auto-applies migrations) or manually:
 
 ```sh
-supabase link --project-ref xqyszdjczchlgyisvtvo
+supabase link --project-ref <your-project-ref>
 supabase db push
 ```
 
@@ -55,22 +55,29 @@ signup.
 (client ID + secret, from Google Cloud → APIs & Services → Credentials) lives
 **only** in the hosted Supabase auth config. Set it one of two ways:
 
-- Supabase dashboard → Authentication → Providers → Google, or
-- repository secrets `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` and
+* Supabase dashboard → Authentication → Providers → Google, or
+* repository secrets `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID` and
   `SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET` — the deploy workflow writes them to the
   project on every run.
 
-The Google Cloud OAuth client must list
-`https://xqyszdjczchlgyisvtvo.supabase.co/auth/v1/callback` as an authorized
-redirect URI. `supabase/config.toml` deliberately has **no** Google block: a
-config push once replaced the hosted client ID with the unresolved text
+The Google Cloud OAuth client must list your Supabase project's auth callback
+URL as an authorized redirect URI:
+
+```text
+https://<your-project-ref>.supabase.co/auth/v1/callback
+```
+
+`supabase/config.toml` deliberately has **no** Google block: a config push once
+replaced the hosted client ID with the unresolved text
 `env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)`, and Google answered every login
 with "The OAuth client was not found" (401 `invalid_client`). The deploy
 workflow now checks the live authorize redirect and fails when the client ID
-isn't a real `*.apps.googleusercontent.com` value. Check it yourself:
+isn't a real `*.apps.googleusercontent.com` value.
+
+You can verify the redirect configuration with:
 
 ```sh
-curl -sI "https://xqyszdjczchlgyisvtvo.supabase.co/auth/v1/authorize?provider=google&redirect_to=https://chess-scout.vercel.app/auth/callback" | grep -i location
+curl -sI "https://<your-project-ref>.supabase.co/auth/v1/authorize?provider=google&redirect_to=https://<your-deployment-domain>/auth/callback" | grep -i location
 ```
 
 ## Optional: AI explanations
@@ -108,14 +115,14 @@ method. The resolver works in strict phases:
    hosting Chess.com tournament / Lichess swiss or arena **participant roster**
    and match it to the crosstable (if every player but the target is claimed,
    the leftover handle *is* the target); resolve *any* section player as a seed
-   (direct opponents first, then the whole roster); then run a **pairing-chain
-   BFS** — a seed's games from the event's date window are aligned 1:1 against
-   their crosstable rounds by result sequence, so each aligned game maps one
-   more crosstable player to their handle (player 22 reveals player 10, who
-   reveals player 16…) until a chain reaches the target. If all events fail, it
+   (direct opponents first, then the whole roster); then run a **pairing-chain BFS**
+   — a seed's games from the event's date window are aligned 1:1 against their
+   crosstable rounds by result sequence, so each aligned game maps one more
+   crosstable player to their handle (player 22 reveals player 10, who reveals
+   player 16…) until a chain reaches the target. If all events fail, it
    recurses into direct opponents' own online histories to pin *their* handles
    first. A FIDE ID linked on a candidate profile is checked against the USCF
-   record's — a match is near-decisive, a contradiction rejects.
+   record — a match is near-decisive, a contradiction rejects.
 3. **Name fallback (last resort)** — only when the traversal finds nothing do
    the Lichess/Chess.com name searches and AI username suggestions run, and
    their results are confidence-capped and explicitly flagged as possible
@@ -131,10 +138,10 @@ node scripts/trace-username.mjs --id 12345678 --list   # inspect the graph only
 
 Each data source is a `Provider`:
 
-- **Lichess** and **Chess.com** resolve directly in the browser against their
+* **Lichess** and **Chess.com** resolve directly in the browser against their
   public, key-less APIs (autocomplete + profile verification, real ratings and
   last-seen) — last-resort tier only.
-- **US Chess**, **FIDE**, **web/AI reasoning** and **tournament/chess-results**
+* **US Chess**, **FIDE**, **web/AI reasoning** and **tournament/chess-results**
   run server-side in the optional `resolve-identity` edge function, which does a
   best-effort USCF lookup, builds the online tournament graph, answers
   `discoverEvent` flyer searches (AI with live web search), and runs an AI
@@ -143,18 +150,24 @@ Each data source is a `Provider`:
 
 The engine **degrades gracefully**: with no edge function or AI key, Find Player
 still works from the direct Lichess/Chess.com providers. Deploy the function and
-set an AI key to unlock the AI detective. The shared AI helper supports **Google
-Gemini** (preferred when `GEMINI_API_KEY` is set, default model
+set an AI key to unlock the AI detective. The shared AI helper supports
+**Google Gemini** (preferred when `GEMINI_API_KEY` is set, default model
 `gemini-3.6-flash`) or Anthropic (`ANTHROPIC_API_KEY`):
 
 ```sh
 supabase functions deploy resolve-identity
+
 # Gemini (recommended):
-supabase secrets set GEMINI_API_KEY=...        # optional: GEMINI_MODEL=gemini-3.6-flash
-# …or Anthropic instead:
+supabase secrets set GEMINI_API_KEY=...
+# Optional:
+# supabase secrets set GEMINI_MODEL=gemini-3.6-flash
+
+# Or Anthropic instead:
 # supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
-# Optional, preferred username-discovery backend (the literal Google index):
-# supabase secrets set GOOGLE_CSE_KEY=... GOOGLE_CSE_ID=...
+
+# Optional, preferred username-discovery backend:
+# supabase secrets set GOOGLE_CSE_KEY=...
+# supabase secrets set GOOGLE_CSE_ID=...
 ```
 
 `explain-move` and `training-hint` use the same helper, so the same key powers
@@ -165,24 +178,26 @@ every AI feature.
 The Google-index username discovery (`findUsername`) has no working backend:
 no Programmable Search key **and** the AI web-search call is failing. Ask the
 deployed function why — `aiCheck` makes one real AI call and reports the
-provider's own reason (for example `API_KEY_INVALID`), never the key:
+provider's own reason (for example, `API_KEY_INVALID`), never the key:
 
 ```sh
-curl -s -X POST https://xqyszdjczchlgyisvtvo.supabase.co/functions/v1/resolve-identity \
-  -H "apikey: sb_publishable_BH3AoBttItAuh4mpSvgFTw_oKmPpKBU" \
-  -H "Authorization: Bearer sb_publishable_BH3AoBttItAuh4mpSvgFTw_oKmPpKBU" \
-  -H "content-type: application/json" -d '{"health":true,"aiCheck":true}'
+curl -s -X POST https://<your-project-ref>.supabase.co/functions/v1/resolve-identity \
+  -H "apikey: $VITE_SUPABASE_PUBLISHABLE_KEY" \
+  -H "Authorization: Bearer $VITE_SUPABASE_PUBLISHABLE_KEY" \
+  -H "content-type: application/json" \
+  -d '{"health":true,"aiCheck":true}'
 ```
 
 Then fix the named secret (`supabase secrets set GEMINI_API_KEY=...`, or update
 the `GEMINI_API_KEY` repository secret and re-run the deploy workflow). The
 workflow validates the key against Google before writing it and runs this same
 check after deploying, so a dead key fails the run instead of shipping quietly.
-A `resolve` call with `"debug": true` also returns the reason under `debug.ai`.
+A `resolve` call with `"debug": true` also returns the reason under
+`debug.ai`.
 
-Confirming an identity hands off into the existing scout pipeline and generates a
-report whose header shows the identity confidence, evidence sources and verified
-accounts.
+Confirming an identity hands off into the existing scout pipeline and generates
+a report whose header shows the identity confidence, evidence sources and
+verified accounts.
 
 ## Build
 
