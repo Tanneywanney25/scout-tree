@@ -85,6 +85,12 @@ const corsHeaders = {
 // a response and degrades gracefully instead of hanging. Override via env for a
 // project on a plan with a different wall-clock ceiling.
 const RESOLVE_BUDGET_MS = Math.max(10_000, Number(readEnv("RESOLVE_BUDGET_MS")) || 55_000);
+// The AI reasoning pass only suggests usernames for the fallback; the
+// tournament graph is what the search runs on. Measured 2026-10-02 on two
+// cached graphs: graph 0.2 s / 1.3 s, AI 14.7 s / 35.1 s (a hung proxy, then
+// direct Gemini answering 429 through its retry budget). So once the graph is
+// ready the response waits at most AI_GRACE_MS more for the AI pass.
+const AI_GRACE_MS = Math.max(0, Number(readEnv("AI_GRACE_MS")) || 3_000);
 const EXPAND_BUDGET_MS = Math.max(10_000, Number(readEnv("EXPAND_BUDGET_MS")) || 45_000);
 
 type Platform = "lichess" | "chesscom" | "chesskid" | "icc" | "other";
@@ -893,7 +899,19 @@ serve(async (req) => {
       );
     }
 
-    const ai = await aiPromise;
+    const ai = await Promise.race([
+      aiPromise,
+      new Promise<null>((r) => setTimeout(() => r(null), AI_GRACE_MS)),
+    ]).then(
+      (r) =>
+        r ?? {
+          ok: false,
+          text: "",
+          status: 504,
+          error: `AI reasoning still running ${AI_GRACE_MS} ms after the graph was ready — not waited for`,
+          backend: "skipped",
+        }
+    );
     let aiCandidates: EdgeIdentityCandidate[] = [];
     if (ai.ok) {
       aiCandidates = extractJsonArray(ai.text);
