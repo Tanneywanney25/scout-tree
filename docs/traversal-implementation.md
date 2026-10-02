@@ -8,7 +8,44 @@ public (same rule as `docs/traversal-investigation.md`).
 
 ## Summary
 
-_Pending — written last._
+Built on `traversal/section-bfs` (not merged, no pull request):
+
+- **A section-scoped, level-order search** (`src/lib/identity/sectionBfs.ts`).
+  The frontier is sections, not players. Pivots are ranked on US Chess data
+  before any platform request, and members with no Chess.com or Lichess
+  history are excluded. Each section is resolved by the existing engine with
+  stored handles as seeds. Backtracking collapses a deeper result to the
+  target, proven on a live two-hop chain (control: no result, 0 requests;
+  seeded: resolved in 34 s on 258 proven requests). It ends on evidence, an
+  empty frontier or an adaptive request budget, never on a clock.
+- **A request allocator** (`net.ts`): token buckets sized under measured
+  limits, proven work ahead of speculative work, AIMD, speculative work shed
+  under rate pressure, a Lichess saturation breaker, and per-request
+  accounting.
+- **An identity graph** that keeps everything an alignment proves. The edge
+  re-runs every alignment it records, so a browser never supplies a handle.
+  It includes conflict rules, 30/90-day revalidation, negative caching, and a
+  store read before any discovery.
+- **The measured bugs**: an answer in 0.34 s for members with no online
+  footprint (was 338 s); the 2020 cutoff removed; stored tournament links
+  applied to platform-titled events; Lichess backoff without a fixed pause; and
+  "search disabled" reported as such instead of as a failure.
+
+Measurements that changed the design: **MUIR allows about 100 requests a
+minute per address, not 3–5 a second**; MUIR has **no platform field**; the
+edge function has a **hard 150 s ceiling**, which streaming does not extend;
+Lichess sends **no Retry-After**; the edge's egress is a **rotating AWS pool**;
+and **today's search budget is zero** (no Programmable Search key).
+
+Acceptance on the 35-player sample, read with the caveats in that section:
+online-rated resolution was **21 of 23 against 6 of 23** before, 16 of 23 at
+verdict grade; the median search took **126 s against 286 s**; the Chess.com
+404 share fell from **63.5% to 43.9%**; **27 identities** were stored per
+aligned section (none before); half the repeat searches were answered from the
+store in 0.3 s. **Not improved:** speculative requests are still 70% of
+platform traffic. **Two Lichess-heavy searches wedged** on a defect that is
+now fixed but not re-measured. At this n the resolution rate is reported, not
+concluded from.
 
 ## Production changes made by this session
 
@@ -24,6 +61,12 @@ Running log, in order. "Production" means the Supabase project
 | P5 | 20:48 | Deployed `resolve-identity` from this branch (commit `48f29d5`), replacing version 98 from `main`. All existing modes keep their request and response shapes. | `gh workflow run deploy-supabase-functions.yml --ref main` |
 | P6 | ~20:55 | Redeployed `resolve-identity` with the 10 s optional-proxy bound (`ai.ts`). | as P5 |
 | P7 | ~21:00 | Redeployed with the Chess.com slug fix, then ran one production harvest (`recordAlignment`) on the prior investigation's seed section: 36 identities written to `identity_edge`, 23 verdicts mirrored into `resolved_handles`, one `section_link`, one `event_platform_cache` row, one `series_platform` row. | Delete rows with `source = 'alignment'`. |
+| P8 | 21:00–21:20 | Five further `resolve-identity` redeploys from this branch as fixes landed (sectionNumber on graph events; AI grace in query mode; 2-page footprints). Final version **105**. | as P5 |
+| P9 | 21:14–23:16 | The acceptance run and smoke runs wrote to production through the harvest: 979 `identity_edge` rows, 824 `resolved_handles` rows with `source = alignment` (one of the 11 legacy engine rows was replaced by an alignment verdict), 46 `section_link`, 46 `event_platform_cache` (source `alignment`), 17 `series_platform`, 12 `section_negative`. All are re-run alignments of public games; none is a browser assertion. | Delete rows with `source = alignment` and the four new tables' rows. |
+| P10 | ~23:25 | Deployed `explain-move` and `training-hint` from this branch (version 62 each). Their own code is unchanged; they import `_shared/ai.ts`, so this gives them the optional-proxy fail-fast. Without it, a dead tunnel would cost each call 25 s. Both boot (OPTIONS 200). | `gh workflow run deploy-supabase-functions.yml --ref main` |
+| P11 | end of session | **`AI_PROXY_BASE_URL` left set** to the quick tunnel (cloudflared pid 44944, alive at 23:25: `/v1/models` 401 in 0.8 s). It dies with this laptop. Every function that reads it now fails fast (one ≤ 10 s attempt, then a 60 s skip), and query mode waits at most 3 s for AI. Direct Gemini was answering 429 (quota) at 20:5x. | `supabase secrets unset AI_PROXY_BASE_URL` |
+
+Nothing else in production was changed: no other secret, no auth setting, no function other than the three above, no data outside the tables listed.
 
 ## Phase 0 — Environment
 
@@ -674,7 +717,97 @@ client stops asking for 10 minutes after `disabled`. Measured after deploy:
 
 ## Acceptance
 
-_Pending._
+**Method.** The previous session's 35-player sample (23 online-rated, 12
+OTB-only, six rating bands), run through the same production entry point
+(`discoverAccounts`) under Node against the deployed edge function and the
+live platforms, one fresh process per player, strictly one at a time, every
+HTTP request counted. Harness rebuilt from the surviving
+`baseline-entry.ts` (scratch `acc/`). No wall-clock stop: a 25-minute
+runaway guard only. Then every player whose first run resolved was searched
+again. "Before" is the previous session's measurement on the same players
+(240 s soft stop, 2026-10-01). Run 2026-10-02 21:14–23:16 UTC.
+
+**Read these caveats before the table.**
+
+- **Not one code version** (errors 4): #0/#1 are smoke runs, #2–#4 ran
+  `4ee0204`, #5–#9 `b851275`, #10 onward `a709727`. The Lichess saturation
+  breaker (`f771786`) and the pivot-rank fix (`5459748`) landed after the run
+  and are not in these numbers.
+- **The store changes as the sample runs.** Every search harvests. #23's first
+  search was answered from the store because an earlier player's search had
+  aligned a section containing #23. That is the intended behaviour, and it
+  also means later players are not independent of earlier ones. #0's section
+  had been harvested by my own test (P7).
+- **Before and after are different conditions**: the baseline had a 240 s
+  stop and a discovery backend that failed in 25 s per call; the latency
+  "before" column is truncated by that stop.
+- **Correctness is not independently verified** for either column. Here every
+  resolution but one is an alignment, which is its own proof, but 5 of the 21
+  rest on a single weak section (see tiers below).
+- **Lichess**: this address was not blocked at the start (Phase 1.3), but
+  Lichess refused 95 requests during the run, concentrated in #6 and #22.
+  Numbers that involve Lichess-hosted sections are contaminated by that.
+
+| Metric | Before (baseline) | After (this branch) |
+|---|---|---|
+| Resolved, online-rated (≥ 0.85, tournament-proven) | 6 / 23 (26%; 95% CI 12–47%) | **21 / 23** (91%; Wilson 95% CI 73–98%) |
+| Resolved, OTB-only | 0 / 12 | 0 / 12 (by design: nothing to align) |
+| Latency, online-rated, median / p95 | 286 s / 316 s (240 s stop) | **126 s** / 1,500 s (two runs hit the 25-min guard) |
+| Latency, online-rated, runs that ended on evidence (n = 20) | — | median 126 s, max 540 s |
+| Latency, OTB-only (no-footprint cohort), median | 338 s | **0.34 s** (0 platform requests) |
+| Requests per search, online-rated, median | 649 API calls (all hosts) | 717 API calls; **649 platform requests: 80 proven, 518 speculative** |
+| Speculative share of online platform requests | ~2/3 were guessed handles | 70.0% (9,311 of 13,293) |
+| 404 share of Chess.com requests | 63.5% (8,673 / 13,669) | **43.9%** (5,433 / 12,378) |
+| Identities persisted per aligned section | 0 (target only) | **27.0** (1,295 over 48 aligned sections) |
+| Store hits before discovery on a repeated search | 0 | **10 of 20** answered in 0.3 s with 1 request; the other 10 (weak or pairing-chain results, which are leads, not verdicts) searched again, 9 of them faster and 1 slower |
+| Median queue wait for proven requests (per-search median) | not measured (one shared queue) | **0 ms** (worst search: 1.8 s) |
+| Time to first aligned section | not recorded (first event work began at a 108 s median; first seed 171–230 s) | **83.6 s** median (n = 20; min 16.6 s) |
+| Search queries spent per resolution | 1,143 failed grounded calls | **0** (no Programmable Search key; `quota_ledger` has no `google_cse` row) |
+| Traversal depth reached | 1 (pivot hop) | level 0 for 8 searches, level 1 for 14; none needed level 2 |
+| Sections walked per search, median / max | — | 16 / 50 |
+| Backtracks | — | 45 across the sample |
+| Chess.com rate-limit events | 0 in 14,272 | 0 in 12,378 |
+
+**How the 21 resolved.** 18 by whole-section alignment, 1 by a pairing chain,
+1 by a single aligned board, 1 from the store. 17 on Chess.com, 4 on Lichess.
+By the confidence model (4.6): **10 strong server-verified verdicts (0.99)**,
+6 engine-proven (0.98, alignment or chain the server did not re-score), and
+**5 weak single-section results (0.93) that the model calls leads**. Counting
+only verdict-grade results, online resolution is 16 / 23.
+
+**The two failures (#6, #22)** are the Lichess wedge described in Phase 1.5:
+sustained Lichess 429s, retries through 60 s pauses, no progress for 13–20
+minutes, stopped by the guard. In #6 the search had already aligned a
+73-player Lichess section; in #22, six sections. `a709727` and `f771786` fix
+the mechanism; neither was in place for #6, and the breaker was not in place
+for #22. The baseline also failed both.
+
+**Pivot ranking (2.4).** The run's "first resolved pivot rank" values all read
+1 (17 of 17), which is a bug in my metric, not a result: the member's rank was
+read after it had been marked known. Fixed in `5459748`; the number this run
+was meant to produce is not available.
+
+**2020 cutoff (5.2).** From the games pages the sample's graph builds cached:
+the 23 online players have 482 online-rated sections, of which **14 (2.9%)
+predate 2020-03-01** and were invisible before; for **1 of the 23** players
+that was their entire online history (the 2017–18 "US Chess Blitz on
+Chess.com" player the investigation found). The investigation's 900-member
+sample put this at 4.7%.
+
+**The stored graph after the run** (production): 979 identity edges for 960
+members (650 Chess.com, 329 Lichess; 815 strong, 164 weak); 186 identities
+confirmed in two or more sections, 57 in three or more; 46 verified section ↔
+tournament links; 17 learned series; 12 negative-cached sections. **No handle
+is assigned to two members.** Seven members hold two active handles on one
+platform; five of those are strong on both (second accounts, kept by design),
+two involve a weak assignment.
+
+**What would change the reading.** At n = 23 online players, 21 vs 6 is
+large, but the conditions differ (stop, discovery backend, code versions, a
+store that grows during the run). The resolution rate is reported, not
+concluded from. A fair comparison needs never-searched players: 63 online-rated
+per arm to detect 26% → 50%, 176 per arm for 26% → 40% (two-sided α = 0.05,
+power 0.8).
 
 ## Decisions and assumptions
 
@@ -744,8 +877,53 @@ _Pending._
 
 ## Errors I made this session
 
-_Pending._
+1. **Two numbered items share commits.** The Lichess backoff (5.4) went in
+   with the allocator (`8f5dd6d`) and the 5.3 fix went in with the engine
+   hooks (`cfc41a9`), so neither can be reverted alone as the brief asked.
+   `identityStore.ts` changes for 3.1, 3.2 and 3.4 also landed in one commit
+   (`6b00d36`, plus a small precedence edit inside it).
+2. **A slug validator rejected real data.** My first `recordAlignment`
+   validator required slugs to start with a letter or digit; real Chess.com
+   slugs start with `-`. Caught by the first production smoke test, fixed in `42332b8`,
+   redeployed.
+3. **Latency regressions I introduced, then fixed, during the smoke runs:**
+   ranking every level-0 section-mate before starting (59 s), and waiting for
+   the background ranking after the target was already found (25.7 s). Both
+   were mine, both measured and fixed before the sample started (`18b49e7`,
+   `4ee0204`).
+4. **Design flaws found by the acceptance run itself, fixed mid-sample.**
+   (a) A level could be filled by one member's sections, and the guess cap
+   compounded per section (`b851275`). (b) Speculative Lichess lookups were
+   queued rather than shed under 429s, which wedged player #6 for ~20 minutes
+   until the runaway guard stopped it (`a709727`). The harness spawns a fresh
+   process per player, so each fix took effect at the next player. Code per
+   player: #0 and #1 are the smoke runs (before `f846c29`/`18b49e7` and
+   before `4ee0204` respectively); #2–#4 ran `4ee0204`; #5–#9 ran
+   `b851275`; #10 onward ran `a709727`. **The sample is not one code
+   version**, and #6's failure belongs to a defect that is now fixed.
+5. **Production writes from tests.** The P7 harvest test and both smoke runs
+   wrote real identities (36 + 36 + 10) to production. They are correct
+   alignments, but they also contaminated player #0's "first search" (its
+   section was already harvested by my test).
+6. **Real names reached my terminal output** during the backtracking worked
+   case (the engine logs name players; my redaction regex missed some). They
+   are not in any committed file or in this report, but they are in the
+   session transcript.
+7. **Mis-read elapsed time once** and checked on a run that had only been going
+   two minutes.
+8. **Heredoc edits failed silently three times** in this shell (content with
+   apostrophes and `$` sequences); one of them half-applied nothing and I
+   caught it before committing. I moved to writing edit files with the editor.
 
 ## What remains undetermined
 
-_Pending._
+| Question | Why it is open | What would settle it |
+|---|---|---|
+| Whether the resolution rate really moved | n = 35 (23 online). A rate near the baseline's 26% has a 95% interval of roughly 12–47%; telling 26% from 50% (two-sided α = 0.05, 80% power, two independent proportions) needs 63 online-rated players per arm, and from 40% needs 176. A paired before/after design on the same players needs fewer, but only on players never searched before (the store makes a second search of anyone trivial). | A fresh, never-searched sample of ≥ 63 online-rated players per arm (≥ 176 to resolve a 14-point change), run through `main` and this branch alternately on the same day. |
+| Whether the pivot weights are right | Reasoned, not fitted; the first-resolved-pivot ranks below are a handful of numbers. | Log rank-of-first-resolution across a few hundred searches and fit the weights to it. |
+| Whether Chess.com's block covers every endpoint at once | Today's blocks lifted in < 1 s, before a second class could be probed. | A deliberate hard burst followed by sub-second probes on several endpoint classes in parallel. |
+| Real cost of the edge's rotating egress for MUIR | Each invocation drew a new AWS address; whether a warm isolate keeps one, and whether other Supabase tenants share them, is unknown. | Log the egress address per call from `resolve-identity` for a day. |
+| Whether the 30/90-day revalidation catches renames | Assumes a renamed Chess.com account's old name answers 404. Not tested on a known rename. | Find one renamed account (a user correction would surface it) and check the old name's API response. |
+| FreeLLMAPI reliability | 3 of 8 calls served after deploy; the cause of the hangs is inside the proxy. | Its own logs, or a host that is not a laptop tunnel. |
+| Anonymous section-mate seeds | Not built: a server-side "align from stored seeds, return only the target" mode would give anonymous searches the benefit without a bulk read. | Build and measure it. |
+| Ranking with a search budget | The budget is zero, so 2.4's "how far down the list before a resolvable pivot" is measured only on guessing and stored paths. | Set `GOOGLE_CSE_KEY`/`GOOGLE_CSE_ID` (free tier) and re-run. |
