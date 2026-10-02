@@ -664,7 +664,9 @@ serve(async (req) => {
       return json(await handleFideSearch(body.fideSearch as Record<string, unknown>));
     }
     if (body?.resolvedHandles && typeof body.resolvedHandles === "object") {
-      return json(await handleResolvedHandles(body.resolvedHandles as Record<string, unknown>));
+      return json(
+        await handleResolvedHandles(body.resolvedHandles as Record<string, unknown>, req.headers.get("authorization"))
+      );
     }
     if (body?.claimHandle && typeof body.claimHandle === "object") {
       return json(await handleClaimHandle(body.claimHandle as Record<string, unknown>));

@@ -173,13 +173,54 @@ export interface ResolvedHandleRow {
   verified_at?: string;
 }
 
-/** Every non-superseded resolved handle for the given member IDs. */
+/**
+ * Which of these members have opted out. Returns null when the answer could
+ * not be determined.
+ *
+ * Deliberately separate from isOptedOut(): that one decides whether to OFFER
+ * discovery and fails open, because an outage must not brick the product. This
+ * one gates DISCLOSURE of an already-stored identity, where the safe answer to
+ * "we cannot tell" is to withhold. Same table, opposite default, on purpose.
+ */
+async function optedOutAmong(
+  rest: { url: string; key: string },
+  cleanIds: string[]
+): Promise<Set<string> | null> {
+  try {
+    const inList = cleanIds.map((s) => `"${s}"`).join(",");
+    const res = await fetch(
+      `${rest.url}/rest/v1/handle_optouts?uscf_id=in.(${inList})&select=uscf_id`,
+      { headers: headers(rest.key) }
+    );
+    if (!res.ok) return null;
+    const rows = (await res.json()) as Array<{ uscf_id?: string }>;
+    if (!Array.isArray(rows)) return null;
+    return new Set(rows.map((r) => (r.uscf_id || "").replace(/\D/g, "")).filter(Boolean));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every non-superseded resolved handle for the given member IDs, excluding any
+ * member who has opted out.
+ *
+ * An opt-out MUST retract what is already stored, not merely stop future
+ * discovery — otherwise the opt-out is cosmetic. Before this filter existed a
+ * stored resolution remained readable forever after the member asked to be
+ * removed. Fails CLOSED: if handle_optouts cannot be read we return nothing
+ * rather than risk disclosing a member who has opted out.
+ */
 export async function getResolvedHandles(uscfIds: string[]): Promise<ResolvedHandleRow[]> {
   const rest = supabaseRest();
   const clean = uscfIds.map((s) => s.replace(/\D/g, "")).filter(Boolean);
   if (!rest || !clean.length) return [];
   try {
-    const inList = clean.map((s) => `"${s}"`).join(",");
+    const optedOut = await optedOutAmong(rest, clean);
+    if (optedOut === null) return []; // cannot verify consent -> disclose nothing
+    const allowed = clean.filter((id) => !optedOut.has(id));
+    if (!allowed.length) return [];
+    const inList = allowed.map((s) => `"${s}"`).join(",");
     const res = await fetch(
       `${rest.url}/rest/v1/resolved_handles?uscf_id=in.(${inList})&superseded_by=is.null&select=uscf_id,platform,username,confidence,evidence,source,verified_at`,
       { headers: headers(rest.key) }

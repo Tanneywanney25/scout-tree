@@ -37,6 +37,7 @@ import {
   isOptedOut,
   putOptOut,
 } from "../_shared/identityStore.ts";
+import { authenticateCaller } from "../_shared/auth.ts";
 
 // ---------------------------------------------------------------------------
 // Cache TTLs. Member records change slowly (a rating updates after an event);
@@ -316,7 +317,27 @@ export async function handleFideSearch(req: { name?: unknown }): Promise<Record<
 // resolvedHandles / claimHandle / optOut — the moat and the privacy loop
 // ---------------------------------------------------------------------------
 
-export async function handleResolvedHandles(req: { uscfIds?: unknown }): Promise<Record<string, unknown>> {
+/**
+ * Bulk read of the moat. REQUIRES A SIGNED-IN CALLER.
+ *
+ * This route takes up to 50 arbitrary USCF ids and returns the stored
+ * handle for each. USCF ids are sequential, so an open version of this is a
+ * bulk de-anonymisation endpoint: anyone could walk the id space and dump
+ * every member -> handle mapping ScoutTree has ever resolved. The function
+ * runs with verify_jwt = false so anonymous scouting keeps working, which
+ * means this route has to check its own caller.
+ *
+ * `evidence` is deliberately NOT returned. Its labels quote crosstable
+ * pairings and therefore contain the real names and handles of OTHER players,
+ * who never asked to appear in an API response about someone else.
+ */
+export async function handleResolvedHandles(
+  req: { uscfIds?: unknown },
+  authorization: string | null
+): Promise<Record<string, unknown>> {
+  const caller = await authenticateCaller(authorization);
+  if (!caller) return { available: false, handles: [], unauthorized: true };
+
   const ids = Array.isArray(req.uscfIds)
     ? (req.uscfIds.filter((x) => typeof x === "string") as string[]).slice(0, 50)
     : [];
@@ -329,7 +350,6 @@ export async function handleResolvedHandles(req: { uscfIds?: unknown }): Promise
       platform: h.platform,
       username: h.username,
       confidence: h.confidence,
-      evidence: h.evidence,
       source: h.source,
       verifiedAt: h.verified_at,
     })),
