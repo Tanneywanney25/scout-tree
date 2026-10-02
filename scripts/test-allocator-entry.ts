@@ -11,7 +11,8 @@
 //   5. a 429 halves the rate and pauses; a clean stretch steps it back up;
 //   6. Lichess backoff: Retry-After honoured, else 6 s doubling, ±20%, ≤60 s;
 //   7. every request is accounted to its lane;
-//   8. under a 429, queued and new speculative work is shed, proven work is not.
+//   8. under a 429, queued and new speculative work is shed, proven work is not;
+//   9. four Lichess rate limits in two minutes make every Lichess request fail fast.
 // ============================================================================
 
 import {
@@ -23,6 +24,8 @@ import {
   resetNetStats,
   lichessBackoffMs,
   SpeculativeShed,
+  PlatformSaturated,
+  lichessSaturated,
 } from "../src/lib/identity/net";
 
 let failures = 0;
@@ -156,6 +159,23 @@ assert(late === "shed", `a new speculative request inside the shed window is rej
 const proven8 = await politeFetch(cc(6200), {}, "chesscom");
 assert(proven8.status === 200, "a proven request still goes through after the pause");
 assert(getNetStats().shed.chesscom >= 11, `shed counted (${getNetStats().shed.chesscom})`);
+
+console.log("Scenario 9: Lichess saturation breaker");
+_resetBreakers();
+for (const c of ["user", "games", "export", "other"] as const) configureAllocator(c, { capacity: 50, rate: 1000, minRate: 1, step: 1, recoverMs: 60_000, specShare: 1 });
+script = (u) => (u.includes("lichess.org") ? 429 : 200);
+const li = (i: number) => `https://lichess.org/api/user/u${i}`;
+const spec9 = speculativeSignal();
+// One speculative 429 per endpoint class (a second on the same class would be shed unsent).
+for (const u of ["https://lichess.org/api/user/a1", "https://lichess.org/api/games/user/a1", "https://lichess.org/api/swiss/abcdefgh/games", "https://lichess.org/api/fide/player?q=a"])
+  await politeFetch(u, { signal: spec9 }, "lichess").catch(() => undefined);
+assert(lichessSaturated(), "four Lichess 429s inside two minutes trip the breaker");
+const t9 = Date.now();
+const r9 = await politeFetch(li(99), {}, "lichess").then(() => "sent", (e) => (e instanceof PlatformSaturated ? "saturated" : String(e)));
+assert(r9 === "saturated" && Date.now() - t9 < 50, `a PROVEN Lichess request now fails in ${Date.now() - t9} ms instead of queueing (${r9})`);
+script = () => 200;
+const cc9 = await politeFetch(cc(9000), {}, "chesscom");
+assert(cc9.status === 200, "Chess.com is unaffected by Lichess saturation");
 
 console.log(failures ? `\n${failures} assertion(s) FAILED.` : "\nAll allocator scenarios passed.");
 process.exit(failures ? 1 : 0);

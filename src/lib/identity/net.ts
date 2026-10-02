@@ -233,6 +233,16 @@ class RateScheduler {
     });
   }
 
+  /** Reject every queued request (both lanes) with the given error. */
+  dropAll(err: () => Error): void {
+    for (const lane of ["proven", "speculative"] as Lane[]) {
+      for (const w of this.queues[lane].splice(0)) {
+        if (w.signal && w.onAbort) w.signal.removeEventListener("abort", w.onAbort);
+        w.reject(err());
+      }
+    }
+  }
+
   /** A rate-limit signal: halve the rate and pause the bucket. */
   onLimit(pauseMs: number): void {
     const now = Date.now();
@@ -439,6 +449,46 @@ function retryAfterMs(res: Response): number | undefined {
   return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
 }
 
+// Lichess saturation breaker. Acceptance players #6 and #22 each drew 30–46
+// Lichess 429s within minutes; every queued request retried through pauses of
+// up to 60 s, which kept the block alive (the previous session saw a block
+// last 40+ minutes the same way), and both searches made no progress for
+// 13–20 minutes. After LICHESS_SATURATION_EVENTS rate-limit events inside
+// LICHESS_SATURATION_WINDOW_MS, EVERY Lichess request (proven too) fails fast
+// for LICHESS_SATURATION_COOLOFF_MS. The engine reads that as a retryable
+// hole, the same as an outage, and moves on to work that does not need
+// Lichess instead of queueing behind it.
+const LICHESS_SATURATION_EVENTS = 4;
+const LICHESS_SATURATION_WINDOW_MS = 120_000;
+const LICHESS_SATURATION_COOLOFF_MS = 90_000;
+let lichessLimitTimes: number[] = [];
+let lichessSaturatedUntil = 0;
+
+/** Thrown to a Lichess request refused while Lichess is saturated. */
+export class PlatformSaturated extends Error {
+  constructor() {
+    super("lichess is rate-limiting this address — failing fast during the cool-off");
+    this.name = "PlatformSaturated";
+  }
+}
+
+/** Record a Lichess rate-limit event; returns true when it trips the breaker. */
+function noteLichessLimit(now = Date.now()): boolean {
+  lichessLimitTimes = lichessLimitTimes.filter((t) => now - t < LICHESS_SATURATION_WINDOW_MS);
+  lichessLimitTimes.push(now);
+  if (lichessLimitTimes.length >= LICHESS_SATURATION_EVENTS && now >= lichessSaturatedUntil) {
+    lichessSaturatedUntil = now + LICHESS_SATURATION_COOLOFF_MS;
+    lichessLimitTimes = [];
+    for (const s of Object.values(lichessSchedulers)) s.dropAll(() => new PlatformSaturated());
+    return true;
+  }
+  return false;
+}
+
+export function lichessSaturated(now = Date.now()): boolean {
+  return now < lichessSaturatedUntil;
+}
+
 /** Exported for tests: the pause a Lichess 429 earns. */
 export function lichessBackoffMs(cls: LichessClass, res: Response | null, now = Date.now(), rand = Math.random()): number {
   const st = lichessStreak[cls];
@@ -593,6 +643,8 @@ export function _resetBreakers(): void {
     st.n = 0;
     st.at = 0;
   }
+  lichessLimitTimes = [];
+  lichessSaturatedUntil = 0;
 }
 
 // In a browser a Cloudflare challenge carries no CORS header, so the page
@@ -655,6 +707,10 @@ export async function politeFetch(
       }
     };
     const isProbe = breakerAdmit(platform);
+    if (platform === "lichess" && lichessSaturated()) {
+      netStats.shed.lichess++;
+      throw new PlatformSaturated();
+    }
     const lcls = platform === "lichess" ? lichessClassOf(url) : null;
     const scheduler = platform === "chesscom" ? chesscomScheduler : lichessSchedulers[lcls!];
     let res: Response;
@@ -667,7 +723,7 @@ export async function politeFetch(
       record(platform, lane, url, res.status, waitMs);
       notifyNet(platform, res.status === 429 ? "429" : "ok");
     } catch (e) {
-      if (e instanceof SpeculativeShed) {
+      if (e instanceof SpeculativeShed || e instanceof PlatformSaturated) {
         netStats.shed[platform]++;
         throw e; // never sent; callers read it as a transient miss
       }
@@ -699,6 +755,7 @@ export async function politeFetch(
       } else {
         netStats.limitEvents.lichess++;
         scheduler.onLimit(lichessBackoffMs(lcls!, res));
+        noteLichessLimit();
       }
       return res;
     }
@@ -713,6 +770,10 @@ export async function politeFetch(
         netStats.limitEvents.lichess++;
         backoff = lichessBackoffMs(lcls!, res);
         scheduler.onLimit(backoff);
+        if (noteLichessLimit()) {
+          console.warn(`[net] Lichess is saturated (${LICHESS_SATURATION_EVENTS} rate limits in ${LICHESS_SATURATION_WINDOW_MS / 1000}s) — failing Lichess requests fast for ${LICHESS_SATURATION_COOLOFF_MS / 1000}s.`);
+          return res; // no retry into a saturated platform
+        }
         console.warn(`[net] Lichess 429 (${lcls}) on ${url} — pausing that endpoint class ${Math.round(backoff / 1000)}s.`);
       }
       try {
