@@ -1,25 +1,33 @@
 // Provider-agnostic AI helper for the edge functions.
 //
+// THIS MODULE KNOWS NOTHING ABOUT SEARCH. It sends a prompt to whichever
+// backend answers and returns the text. Provider TOOLS are supplied by the
+// caller as an AiToolSpec and are absent by default, so no call made through
+// here attaches a tool unless the caller deliberately passes one. That is a
+// deliberate boundary: search tools are quota-metered, this project exhausted
+// that quota once already, and a helper that enabled search "for convenience"
+// is how it happened. The only caller that passes a tool spec is the
+// quota-ledger-gated path in _shared/search/pipeline.ts. Everything else —
+// query expansion, result extraction, move explanations, training hints — is
+// tool-free and spends only the ordinary free-tier request allowance.
+//
+// Open-web retrieval now happens in _shared/search/searxng.ts (self-hosted,
+// unmetered) rather than by asking a model to search.
+//
 // Backends, tried in this order (all optional — the app degrades gracefully;
 // callers catch the error and fall back to non-AI text):
 //   1. AI PROXY — an OpenAI-compatible unified router (e.g. FreeLLMAPI) that
 //      pools many free-tier providers behind one key, so one provider's
-//      exhausted quota fails over to the next. Gemini google_search GROUNDING
-//      passes through it: an OpenAI `function` tool named `google_search` is
-//      translated by the proxy into Gemini's native grounding tool, so grounded
-//      calls must pin a Google-platform model (AI_PROXY_SEARCH_MODEL). A
-//      grounded reply is trusted ONLY when the proxy reports it was routed via
-//      the google platform — any other platform received `google_search` as a
-//      plain function tool and did NOT search, so we fall through instead of
-//      returning ungrounded guesses (the namesake bug).
+//      exhausted quota fails over to the next.
 //   2. Google Gemini direct (GEMINI_API_KEY).
 //   3. Anthropic Messages API (ANTHROPIC_API_KEY).
 //
 // Configure any of:
 //   • AI_PROXY_BASE_URL + AI_PROXY_API_KEY
-//     (+ optional AI_PROXY_MODEL, default "auto" — plain calls;
-//      + optional AI_PROXY_SEARCH_MODEL, default "gemini-3.6-flash" — grounded
-//        calls; MUST be a model the proxy routes to Google for grounding)
+//     (+ optional AI_PROXY_MODEL, default "auto" — tool-free calls;
+//      + optional AI_PROXY_SEARCH_MODEL, default "gemini-3.6-flash" — used only
+//        when a caller supplies a tool spec, which must route to a platform
+//        that can actually execute it; see AiToolSpec.requireProxyPlatform)
 //   • GEMINI_API_KEY  (+ optional GEMINI_MODEL, default gemini-3.6-flash)
 //   • ANTHROPIC_API_KEY (+ optional AI_MODEL, default claude-haiku-4-5-20251001)
 //
@@ -36,6 +44,38 @@ export interface AIResult {
    *  "gemini-direct", or "anthropic". Callers log this so quota triage can
    *  tell WHERE a discovery answer (or a 429) came from. */
   backend?: string;
+}
+
+/**
+ * A provider-tool bundle, supplied BY THE CALLER.
+ *
+ * This module deliberately does not know what a search tool is. Grounding is
+ * the scarce, quota-metered capability that this project exhausted once
+ * already, so the tool definitions live in the one gated call site that is
+ * allowed to use them (_shared/search/pipeline.ts) rather than here, where any
+ * caller could reach them. Passing no tools — the default everywhere — means
+ * no tool is attached to any provider, on any backend.
+ */
+export interface AiToolSpec {
+  /** Native Gemini `tools` entries, e.g. a grounding tool. */
+  gemini: unknown[];
+  /** OpenAI-style `tools` entries for the proxy. */
+  proxy: unknown[];
+  /** Anthropic `tools` entries. */
+  anthropic: unknown[];
+  /**
+   * When set, a proxy reply is trusted ONLY if the proxy reports it routed to
+   * this platform. Any other platform received the tool as a plain function
+   * tool and did NOT execute it, so the answer would be unfounded.
+   */
+  requireProxyPlatform?: string;
+}
+
+export interface CallOpts {
+  /** Omit for an ordinary, tool-free call. */
+  tools?: AiToolSpec;
+  /** Anthropic server-tool use cap, when the tool spec supports it. */
+  maxSearchUses?: number;
 }
 
 /** Environment lookup that works in Deno (edge functions) and Node (CLI harness). */
@@ -255,80 +295,76 @@ function proxyConfig(): { baseUrl: string; apiKey: string } | null {
   return { baseUrl: baseUrl.replace(/\/+$/, ""), apiKey };
 }
 
-export async function callAI(system: string, prompt: string, maxTokens = 250): Promise<AIResult> {
+/**
+ * The single entry point for every model call in the project.
+ *
+ * Tool-free by default. `opts.tools` is the ONLY way to attach a provider tool,
+ * and the only caller that passes one is the quota-gated emergency path in
+ * _shared/search/pipeline.ts. Ordinary reasoning (query expansion, extraction,
+ * move explanations, training hints) therefore spends no grounding quota at
+ * all, which is the entire point of the SearXNG split.
+ */
+export async function callAI(
+  system: string,
+  prompt: string,
+  maxTokens = 250,
+  opts: CallOpts = {}
+): Promise<AIResult> {
+  const tools = opts.tools;
+  const withTools = !!tools;
   const proxy = proxyConfig();
+  let proxyErr: AIResult | null = null;
+
   if (proxy) {
-    const res = await callProxy(proxy, system, prompt, maxTokens, false);
-    // ok, or the whole pool is rate-limited (429 = honest quota answer): done.
-    // Anything else (proxy unreachable, empty completion, 5xx) falls through to
-    // the direct backends so a bad proxy config can't take AI down entirely.
-    if (res.ok || res.status === 429) return res;
+    const res = await callProxy(proxy, system, prompt, maxTokens, tools);
+    if (res.ok) return res;
+    // Tool-free: a 429 is the pool's honest quota answer, so stop. Anything
+    // else (unreachable, empty completion, 5xx) falls through to the direct
+    // backends so a bad proxy config can't take AI down entirely.
+    if (!withTools && res.status === 429) return res;
+    proxyErr = res;
   }
 
   const geminiKey = readEnv("GEMINI_API_KEY") || readEnv("GOOGLE_API_KEY");
   const anthropicKey = readEnv("ANTHROPIC_API_KEY");
-  if (geminiKey) {
-    const res = await callGemini(geminiKey, system, prompt, maxTokens);
+
+  // With tools, a proxy 429 means the Google quota behind it is spent — and the
+  // direct Gemini key draws on that SAME quota, so retrying it would just burn
+  // a second unit for nothing. Anthropic is a genuinely separate pool.
+  const skipGemini = withTools && proxyErr?.status === 429;
+
+  if (geminiKey && !skipGemini) {
+    const res = await callGemini(geminiKey, system, prompt, maxTokens, tools);
     // ok, quota (429) or a Google outage (5xx): that IS the answer. A config
     // failure (dead key, unknown model → other 4xx) must not block a working
     // Anthropic key behind it — before this, one revoked Gemini key silenced
     // every AI feature even with a valid fallback configured.
     if (res.ok || res.status === 429 || res.status >= 500 || !anthropicKey) return res;
+    if (withTools) {
+      // Other 4xx with a tool attached usually means the model doesn't expose
+      // it. The one meaningful retry is the same call with no tool.
+      const plain = await callGemini(geminiKey, system, prompt, maxTokens, undefined);
+      if (plain.ok || !anthropicKey) return plain;
+    }
   }
 
-  if (anthropicKey) return callAnthropic(anthropicKey, system, prompt, maxTokens);
+  if (anthropicKey) {
+    const res = await callAnthropic(anthropicKey, system, prompt, maxTokens, tools, opts.maxSearchUses);
+    if (res.ok || res.status >= 500 || !withTools) return res;
+    return callAnthropic(anthropicKey, system, prompt, maxTokens, undefined);
+  }
 
+  if (proxyErr) return proxyErr;
   if (proxy) return { ok: false, text: "", status: 502, error: "AI proxy failed and no direct key configured" };
   return { ok: false, text: "", status: 503, error: "No AI key configured (set AI_PROXY_BASE_URL+AI_PROXY_API_KEY, GEMINI_API_KEY or ANTHROPIC_API_KEY)" };
 }
 
-/**
- * Like `callAI`, but with the provider's live web-search tool enabled (Gemini
- * google_search grounding / Anthropic web_search). Used to look up tournament
- * flyers, TLAs and announcements on the open web. Falls back to a plain call
- * if the search-enabled request is rejected (e.g. tool not available on the
- * configured model).
- */
-export async function callAIWithSearch(
-  system: string,
-  prompt: string,
-  maxTokens = 1024,
-  opts: { maxSearchUses?: number } = {}
-): Promise<AIResult> {
-  const proxy = proxyConfig();
-  let proxyErr: AIResult | null = null;
-  if (proxy) {
-    const res = await callProxy(proxy, system, prompt, maxTokens, true);
-    if (res.ok) return res;
-    proxyErr = res;
-    // A proxy 429 means the Google grounding quota behind it is spent. The
-    // direct Gemini key shares that same quota, so skip it — but Anthropic
-    // web_search is a genuinely separate pool, so let it take over below.
-  }
-
-  const geminiKey = readEnv("GEMINI_API_KEY") || readEnv("GOOGLE_API_KEY");
-  const anthropicKey = readEnv("ANTHROPIC_API_KEY");
-  if (geminiKey && proxyErr?.status !== 429) {
-    const res = await callGemini(geminiKey, system, prompt, maxTokens, true);
-    // ok / server error / quota (429): return as-is. A 429 is the QUOTA, not a
-    // "tool unavailable" signal — retrying the same key without google_search
-    // would just burn a second quota unit for nothing (and hasten exhaustion).
-    if (res.ok || res.status >= 500 || res.status === 429) return res;
-    // Other 4xx (e.g. the configured model doesn't expose google_search): the
-    // one meaningful fallback is a plain, un-grounded call. If THAT fails too
-    // the key/model itself is rejected — let a configured Anthropic key (its
-    // own web_search pool) take over instead of reporting a dead backend.
-    const plain = await callGemini(geminiKey, system, prompt, maxTokens);
-    if (plain.ok || !anthropicKey) return plain;
-  }
-  if (anthropicKey) {
-    const res = await callAnthropic(anthropicKey, system, prompt, maxTokens, true, opts.maxSearchUses);
-    if (res.ok || res.status >= 500) return res;
-    return callAnthropic(anthropicKey, system, prompt, maxTokens);
-  }
-  if (proxyErr) return proxyErr;
-  return { ok: false, text: "", status: 503, error: "No AI key configured (set AI_PROXY_BASE_URL+AI_PROXY_API_KEY, GEMINI_API_KEY or ANTHROPIC_API_KEY)" };
-}
+// NOTE: `callAIWithSearch` used to live here. It is gone on purpose. A
+// convenience wrapper that silently enabled a quota-metered search tool is how
+// grounding got spent from a dozen call sites without anyone counting. Callers
+// that genuinely need the open web now go through _shared/search/pipeline.ts,
+// which retrieves with SearXNG (unmetered) and reasons with a tool-free model,
+// and only reaches for a provider search tool through one ledger-gated path.
 
 // ---------------------------------------------------------------------------
 // AI proxy (OpenAI-compatible unified router, e.g. FreeLLMAPI)
@@ -352,9 +388,10 @@ async function callProxy(
   system: string,
   prompt: string,
   maxTokens: number,
-  withSearch: boolean
+  tools?: AiToolSpec
 ): Promise<AIResult> {
-  const model = withSearch
+  const withTools = !!tools?.proxy?.length;
+  const model = withTools
     ? readEnv("AI_PROXY_SEARCH_MODEL") || PROXY_DEFAULT_SEARCH_MODEL
     : readEnv("AI_PROXY_MODEL") || PROXY_DEFAULT_MODEL;
 
@@ -377,13 +414,12 @@ async function callProxy(
         // the proxy counts as a model failure and answers with a cooldown.
         max_tokens: Math.max(maxTokens, 1024),
         temperature: 0.4,
-        // The proxy translates an OpenAI function tool named `google_search`
-        // into Gemini's native grounding tool on its google platform. Other
-        // platforms would receive it as a REAL function tool — detected and
-        // rejected below, because answering without searching is guessing.
-        ...(withSearch
-          ? { tools: [{ type: "function", function: { name: "google_search", description: "Google Search grounding", parameters: { type: "object", properties: {} } } }] }
-          : {}),
+        // Tools come from the caller; this module does not define any. The
+        // proxy may translate a function tool into a provider-native one on
+        // the matching platform, which is why the caller can demand a specific
+        // routed platform below — a tool handed to the wrong platform is
+        // received as an ordinary function tool and never executes.
+        ...(withTools ? { tools: tools!.proxy } : {}),
       }),
     });
   } catch (e) {
@@ -404,15 +440,16 @@ async function callProxy(
   const msg = data?.choices?.[0]?.message;
   const text = typeof msg?.content === "string" ? msg.content : "";
 
-  if (withSearch) {
-    // Grounding only exists on the google platform. A reply routed anywhere
-    // else either tried to CALL google_search as a function (tool_calls) or
-    // answered from parametric memory — both are ungrounded, both rejected.
-    if (routedPlatform !== "google") {
-      return { ok: false, text: "", status: 502, error: `proxy routed grounded call to '${routedPlatform || "unknown"}' (not google — reply would be ungrounded)`, backend };
+  if (withTools) {
+    // The caller may require a specific routed platform. A reply routed
+    // elsewhere either tried to CALL the tool as a plain function (tool_calls)
+    // or answered from parametric memory — both unfounded, both rejected.
+    const need = tools!.requireProxyPlatform;
+    if (need && routedPlatform !== need) {
+      return { ok: false, text: "", status: 502, error: `proxy routed tool call to '${routedPlatform || "unknown"}' (not ${need} — reply would be unfounded)`, backend };
     }
     if (!text && Array.isArray(msg?.tool_calls) && msg.tool_calls.length) {
-      return { ok: false, text: "", status: 502, error: "provider returned a google_search tool_call instead of a grounded answer", backend };
+      return { ok: false, text: "", status: 502, error: "provider returned a tool_call instead of an executed-tool answer", backend };
     }
   }
   if (!text) return { ok: false, text: "", status: 502, error: "AI proxy returned an empty completion", backend };
@@ -423,15 +460,21 @@ async function callProxy(
 // Google Gemini (Generative Language API)
 // ---------------------------------------------------------------------------
 
-async function callGemini(apiKey: string, system: string, prompt: string, maxTokens: number, withSearch = false): Promise<AIResult> {
+async function callGemini(
+  apiKey: string,
+  system: string,
+  prompt: string,
+  maxTokens: number,
+  tools?: AiToolSpec
+): Promise<AIResult> {
   const model = readEnv("GEMINI_MODEL") || GEMINI_DEFAULT_MODEL;
   const thinking = geminiThinkingConfig(model);
-  const res = await geminiRequest(apiKey, model, system, prompt, maxTokens, withSearch, thinking);
+  const res = await geminiRequest(apiKey, model, system, prompt, maxTokens, tools, thinking);
   // A 400 that blames the thinking config (a model that can't turn thinking
   // off, or a renamed field on a newer generation) is not worth losing the
   // call over: retry once with no thinking config at all.
   if (!res.ok && res.status === 400 && thinking && /thinking/i.test(res.error || "")) {
-    return geminiRequest(apiKey, model, system, prompt, maxTokens, withSearch, undefined);
+    return geminiRequest(apiKey, model, system, prompt, maxTokens, tools, undefined);
   }
   return res;
 }
@@ -442,7 +485,7 @@ async function geminiRequest(
   system: string,
   prompt: string,
   maxTokens: number,
-  withSearch: boolean,
+  tools: AiToolSpec | undefined,
   thinkingConfig: Record<string, unknown> | undefined
 ): Promise<AIResult> {
   let response: Response;
@@ -456,7 +499,7 @@ async function geminiRequest(
       body: JSON.stringify({
         system_instruction: { parts: [{ text: system }] },
         contents: [{ role: "user", parts: [{ text: prompt }] }],
-        ...(withSearch ? { tools: [{ google_search: {} }] } : {}),
+        ...(tools?.gemini?.length ? { tools: tools.gemini } : {}),
         generationConfig: {
           // Give the answer room; Flash spends some budget on hidden "thinking",
           // which we turn down so tokens go to the actual response.
@@ -497,9 +540,10 @@ async function callAnthropic(
   system: string,
   prompt: string,
   maxTokens: number,
-  withSearch = false,
+  tools?: AiToolSpec,
   maxSearchUses = 3
 ): Promise<AIResult> {
+  const withTools = !!tools?.anthropic?.length;
   const model = readEnv("AI_MODEL") || ANTHROPIC_DEFAULT_MODEL;
 
   let response: Response;
@@ -513,10 +557,20 @@ async function callAnthropic(
       },
       body: JSON.stringify({
         model,
-        max_tokens: withSearch ? Math.max(maxTokens, 2048) : maxTokens,
+        max_tokens: withTools ? Math.max(maxTokens, 2048) : maxTokens,
         system,
         messages: [{ role: "user", content: prompt }],
-        ...(withSearch ? { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: maxSearchUses }] } : {}),
+        // Caller-supplied; a server-tool entry may carry a max_uses the caller
+        // left for us to fill in from opts.maxSearchUses.
+        ...(withTools
+          ? {
+              tools: tools!.anthropic.map((t) =>
+                t && typeof t === "object" && (t as Record<string, unknown>).max_uses === null
+                  ? { ...(t as Record<string, unknown>), max_uses: maxSearchUses }
+                  : t
+              ),
+            }
+          : {}),
       }),
     });
   } catch (e) {
