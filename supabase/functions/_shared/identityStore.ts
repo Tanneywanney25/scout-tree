@@ -44,7 +44,8 @@ export type MuirCacheKind =
   | "event"
   | "section"
   | "crosstable"
-  | "fide-search";
+  | "fide-search"
+  | "footprint";
 
 /** Read a cached payload no older than `maxAgeMs`. Null on miss/expiry/error. */
 export async function cacheGet<T>(kind: MuirCacheKind, key: string, maxAgeMs: number): Promise<T | null> {
@@ -253,6 +254,9 @@ export async function putResolvedHandle(row: {
     const existing = await getResolvedHandles([uscfId]);
     const prev = existing.find((r) => r.platform === row.platform);
     const isCorrection = row.source === "user-correction" || row.source === "claim";
+    // Precedence: a browser-asserted engine row never replaces a row the
+    // server proved itself (alignment harvest) or one a human asserted.
+    if (prev && row.source === "engine" && ["alignment", "user-correction", "claim"].includes(prev.source)) return false;
     if (prev && !isCorrection && prev.confidence > row.confidence) return false; // keep the stronger row
     const res = await fetch(`${rest.url}/rest/v1/resolved_handles?on_conflict=uscf_id,platform`, {
       method: "POST",
@@ -268,6 +272,10 @@ export async function putResolvedHandle(row: {
         evidence: row.evidence ?? null,
         source: row.source,
         verified_at: new Date().toISOString(),
+        // A fresh write revives a row an earlier revalidation had retired.
+        status: "active",
+        status_reason: null,
+        superseded_by: null,
       }),
     });
     return res.ok;
@@ -552,4 +560,363 @@ export async function putAccountWeight(username: string, weight: number, source 
   } catch {
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Identity graph (migrations/20261002000000_identity_graph.sql). Writes go
+// through record_identity_edges(), which applies the conflict rules and the
+// opt-out filter inside one transaction. Everything fails soft like the rest
+// of this module.
+// ---------------------------------------------------------------------------
+
+async function rpc<T>(fn: string, args: Record<string, unknown>): Promise<T | null> {
+  const rest = supabaseRest();
+  if (!rest) return null;
+  try {
+    const res = await fetch(`${rest.url}/rest/v1/rpc/${fn}`, {
+      method: "POST",
+      headers: headers(rest.key, { "Content-Type": "application/json" }),
+      body: JSON.stringify(args),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+const inList = (ids: string[]) => ids.map((s) => `"${s.replace(/"/g, "")}"`).join(",");
+
+export interface IdentityEdgeInput {
+  uscf_id: string;
+  platform: string;
+  handle: string;
+  tier: "strong" | "weak";
+  rounds: number;
+  corroborating: number;
+  section: Record<string, unknown>;
+}
+
+export interface RecordEdgesResult {
+  written: number;
+  skippedOptOut: number;
+  superseded: number;
+  conflicts: number;
+  verdictsMirrored: number;
+}
+
+export function recordIdentityEdges(rows: IdentityEdgeInput[]): Promise<RecordEdgesResult | null> {
+  if (!rows.length) return Promise.resolve({ written: 0, skippedOptOut: 0, superseded: 0, conflicts: 0, verdictsMirrored: 0 });
+  return rpc<RecordEdgesResult>("record_identity_edges", { p_rows: rows });
+}
+
+export async function putSectionLink(row: {
+  eventId: string;
+  sectionNo: number;
+  platform: string;
+  tournamentId: string;
+  status: "verified" | "rejected";
+  assigned?: number;
+  nPlayers?: number;
+  contradicted?: number;
+  inconsistentEdges?: number;
+  source?: string;
+}): Promise<boolean> {
+  const rest = supabaseRest();
+  if (!rest) return false;
+  try {
+    const res = await fetch(`${rest.url}/rest/v1/section_link?on_conflict=event_id,section_no,platform,tournament_id`, {
+      method: "POST",
+      headers: headers(rest.key, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }),
+      body: JSON.stringify({
+        event_id: row.eventId,
+        section_no: row.sectionNo,
+        platform: row.platform,
+        tournament_id: row.tournamentId,
+        status: row.status,
+        assigned: row.assigned ?? null,
+        n_players: row.nPlayers ?? null,
+        contradicted: row.contradicted ?? null,
+        inconsistent_edges: row.inconsistentEdges ?? null,
+        source: row.source ?? null,
+        checked_at: new Date().toISOString(),
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export interface SectionLinkRow {
+  event_id: string;
+  section_no: number;
+  platform: string;
+  tournament_id: string;
+  status: string;
+  assigned?: number;
+}
+
+/** Stored tournament verdicts (verified and rejected) for these sections. */
+export async function getSectionLinks(keys: { eventId: string; sectionNo: number }[]): Promise<SectionLinkRow[]> {
+  const rest = supabaseRest();
+  const ids = [...new Set(keys.map((k) => k.eventId.replace(/\D/g, "")).filter(Boolean))];
+  if (!rest || !ids.length) return [];
+  try {
+    const res = await fetch(
+      `${rest.url}/rest/v1/section_link?event_id=in.(${inList(ids)})&select=event_id,section_no,platform,tournament_id,status,assigned`,
+      { headers: headers(rest.key) }
+    );
+    if (!res.ok) return [];
+    const rows = (await res.json()) as SectionLinkRow[];
+    const want = new Set(keys.map((k) => `${k.eventId}#${k.sectionNo}`));
+    return Array.isArray(rows) ? rows.filter((r) => want.has(`${r.event_id}#${r.section_no}`)) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Platforms already known for these events (event_platform_cache, unexpired). */
+export async function getEventPlatforms(eventIds: string[]): Promise<Map<string, EventPlatformRow>> {
+  const rest = supabaseRest();
+  const ids = [...new Set(eventIds.map((s) => s.replace(/\D/g, "")).filter(Boolean))];
+  const out = new Map<string, EventPlatformRow>();
+  if (!rest || !ids.length) return out;
+  try {
+    for (let i = 0; i < ids.length; i += 150) {
+      const chunk = ids.slice(i, i + 150);
+      const res = await fetch(
+        `${rest.url}/rest/v1/event_platform_cache?event_id=in.(${inList(chunk)})&expires_at=gt.${encodeURIComponent(
+          new Date().toISOString()
+        )}&select=event_id,platform,info,source`,
+        { headers: headers(rest.key) }
+      );
+      if (!res.ok) continue;
+      for (const r of (await res.json()) as (EventPlatformRow & { event_id: string })[]) out.set(r.event_id, r);
+    }
+  } catch {
+    /* fail soft */
+  }
+  return out;
+}
+
+export async function getSeriesPlatforms(keys: string[]): Promise<Map<string, string>> {
+  const rest = supabaseRest();
+  const uniq = [...new Set(keys.filter(Boolean))];
+  const out = new Map<string, string>();
+  if (!rest || !uniq.length) return out;
+  try {
+    const res = await fetch(`${rest.url}/rest/v1/series_platform?series_key=in.(${inList(uniq)})&select=series_key,platform`, {
+      headers: headers(rest.key),
+    });
+    if (!res.ok) return out;
+    for (const r of (await res.json()) as { series_key: string; platform: string }[]) out.set(r.series_key, r.platform);
+  } catch {
+    /* fail soft */
+  }
+  return out;
+}
+
+export async function putSeriesPlatform(seriesKey: string, platform: string): Promise<boolean> {
+  const rest = supabaseRest();
+  if (!rest || !seriesKey) return false;
+  try {
+    const res = await fetch(`${rest.url}/rest/v1/series_platform?on_conflict=series_key`, {
+      method: "POST",
+      headers: headers(rest.key, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }),
+      body: JSON.stringify({ series_key: seriesKey, platform, updated_at: new Date().toISOString() }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export interface StoredEdge {
+  uscf_id: string;
+  platform: string;
+  handle: string;
+  tier: "strong" | "weak";
+  n_sections: number;
+  rounds_verified: number;
+  corroborating: number;
+  status: string;
+  last_verified: string;
+}
+
+/** Active identity edges for these members, opt-outs removed. Fails CLOSED
+ *  on an unreadable opt-out table, like getResolvedHandles. */
+export async function getActiveEdges(uscfIds: string[]): Promise<StoredEdge[]> {
+  const rest = supabaseRest();
+  const clean = [...new Set(uscfIds.map((s) => s.replace(/\D/g, "")).filter(Boolean))];
+  if (!rest || !clean.length) return [];
+  try {
+    const optedOut = await optedOutAmong(rest, clean);
+    if (optedOut === null) return [];
+    const allowed = clean.filter((id) => !optedOut.has(id));
+    if (!allowed.length) return [];
+    const out: StoredEdge[] = [];
+    for (let i = 0; i < allowed.length; i += 100) {
+      const chunk = allowed.slice(i, i + 100);
+      const res = await fetch(
+        `${rest.url}/rest/v1/identity_edge?uscf_id=in.(${inList(chunk)})&status=eq.active&select=uscf_id,platform,handle,tier,n_sections,rounds_verified,corroborating,status,last_verified`,
+        { headers: headers(rest.key) }
+      );
+      if (!res.ok) continue;
+      out.push(...((await res.json()) as StoredEdge[]));
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+export interface VerdictRow extends ResolvedHandleRow {
+  id: number;
+  status?: string;
+  tier?: string;
+  revalidated_at?: string;
+}
+
+/** Active resolved_handles rows for one member, with ids (for revalidation). */
+export async function getVerdictRows(uscfId: string): Promise<VerdictRow[]> {
+  const rest = supabaseRest();
+  const id = uscfId.replace(/\D/g, "");
+  if (!rest || !id) return [];
+  try {
+    const optedOut = await optedOutAmong(rest, [id]);
+    if (optedOut === null || optedOut.has(id)) return [];
+    const res = await fetch(
+      `${rest.url}/rest/v1/resolved_handles?uscf_id=eq.${id}&superseded_by=is.null&select=id,uscf_id,platform,username,confidence,source,verified_at,status,tier,revalidated_at`,
+      { headers: headers(rest.key) }
+    );
+    if (!res.ok) return [];
+    const rows = (await res.json()) as VerdictRow[];
+    return Array.isArray(rows) ? rows.filter((r) => (r.status || "active") === "active") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Retire a verdict row (gone / superseded / conflict). superseded_by = its
+ *  own id, so readers that only check superseded_by hide it as well. */
+export async function retireVerdict(id: number, status: "gone" | "superseded" | "conflict", reason: string): Promise<boolean> {
+  const rest = supabaseRest();
+  if (!rest) return false;
+  try {
+    const res = await fetch(`${rest.url}/rest/v1/resolved_handles?id=eq.${id}`, {
+      method: "PATCH",
+      headers: headers(rest.key, { "Content-Type": "application/json", Prefer: "return=minimal" }),
+      body: JSON.stringify({ status, status_reason: reason.slice(0, 300), superseded_by: id }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function markRevalidated(id: number): Promise<boolean> {
+  const rest = supabaseRest();
+  if (!rest) return false;
+  try {
+    const res = await fetch(`${rest.url}/rest/v1/resolved_handles?id=eq.${id}`, {
+      method: "PATCH",
+      headers: headers(rest.key, { "Content-Type": "application/json", Prefer: "return=minimal" }),
+      body: JSON.stringify({ revalidated_at: new Date().toISOString() }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Mark every active edge for a (platform, handle) gone — the account no
+ *  longer answers under that name. */
+export async function retireEdgesForHandle(platform: string, handle: string, reason: string): Promise<boolean> {
+  const rest = supabaseRest();
+  if (!rest) return false;
+  try {
+    const res = await fetch(
+      `${rest.url}/rest/v1/identity_edge?platform=eq.${encodeURIComponent(platform)}&handle=eq.${encodeURIComponent(
+        handle.toLowerCase()
+      )}&status=eq.active`,
+      {
+        method: "PATCH",
+        headers: headers(rest.key, { "Content-Type": "application/json", Prefer: "return=minimal" }),
+        body: JSON.stringify({ status: "gone", status_reason: reason.slice(0, 300) }),
+      }
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export interface SectionNegativeRow {
+  event_id: string;
+  section_no: number;
+  reason?: string;
+  walked_at?: string;
+  expires_at?: string;
+}
+
+export async function getSectionNegatives(keys: { eventId: string; sectionNo: number }[]): Promise<SectionNegativeRow[]> {
+  const rest = supabaseRest();
+  const ids = [...new Set(keys.map((k) => k.eventId.replace(/\D/g, "")).filter(Boolean))];
+  if (!rest || !ids.length) return [];
+  try {
+    const res = await fetch(
+      `${rest.url}/rest/v1/section_negative?event_id=in.(${inList(ids)})&expires_at=gt.${encodeURIComponent(
+        new Date().toISOString()
+      )}&select=event_id,section_no,reason,walked_at,expires_at`,
+      { headers: headers(rest.key) }
+    );
+    if (!res.ok) return [];
+    const want = new Set(keys.map((k) => `${k.eventId}#${k.sectionNo}`));
+    const rows = (await res.json()) as SectionNegativeRow[];
+    return Array.isArray(rows) ? rows.filter((r) => want.has(`${r.event_id}#${r.section_no}`)) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function putSectionNegative(row: {
+  eventId: string;
+  sectionNo: number;
+  members: string[];
+  reason: string;
+  requests?: number;
+  ttlMs: number;
+}): Promise<boolean> {
+  const rest = supabaseRest();
+  if (!rest) return false;
+  try {
+    const res = await fetch(`${rest.url}/rest/v1/section_negative?on_conflict=event_id,section_no`, {
+      method: "POST",
+      headers: headers(rest.key, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }),
+      body: JSON.stringify({
+        event_id: row.eventId,
+        section_no: row.sectionNo,
+        members: row.members.slice(0, 600),
+        reason: row.reason.slice(0, 200),
+        requests: row.requests ?? null,
+        walked_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + row.ttlMs).toISOString(),
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Remove expired search_cache rows and identity rows past `identityDays`. */
+export function sweepSearchCache(identityDays = 90): Promise<number | null> {
+  return rpc<number>("sweep_search_cache", { p_identity_days: identityDays });
+}
+
+/** Atomically add `n` to today's counter for `provider` (quota_ledger) and
+ *  return the new total, or null when the ledger is unreachable. */
+export function takeQuota(provider: string, n: number): Promise<number | null> {
+  return rpc<number>("increment_quota", { p_provider: provider, p_amount: n });
 }
