@@ -3972,6 +3972,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     seedOrder: string[];
     platforms: OnlinePlatform[] | null;
     seedIdx: number;
+    /** With a rank policy: members already handed to a seed scout. */
+    seedTaken?: Set<string>;
     /** No seeds left and nothing queued — revisiting is pointless. */
     exhausted: boolean;
   }
@@ -4136,10 +4138,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       const byUniqueness = (a: string, b: string) => uniquenessOf(b) - uniquenessOf(a);
       const rank = opts.seedPolicy?.rank;
       ws.seedOrder = rank
-        ? roster
-            .map((p) => p.uscfId)
-            .filter((id, i, arr) => id !== targetId && arr.indexOf(id) === i && rank(id) > -Infinity)
-            .sort((a, b) => rank(b) - rank(a))
+        ? roster.map((p) => p.uscfId).filter((id, i, arr) => id !== targetId && arr.indexOf(id) === i)
         : [
             ...roster.filter((p) => oppHere.has(p.uscfId)).map((p) => p.uscfId).sort(byUniqueness),
             ...roster.filter((p) => p.uscfId !== targetId && !oppHere.has(p.uscfId)).map((p) => p.uscfId).sort(byUniqueness),
@@ -4170,18 +4169,42 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     let eventFound = false;
     const stopEv = () => eventFound || stopNow(localDeadline);
 
+    // With a rank policy the order is re-read at every pick, because ranks
+    // arrive while the event is being worked (portal footprints stream in
+    // behind the first batch) — a fixed order would freeze the early guesses.
+    const live = opts.seedPolicy?.rank;
+    if (live) ws.seedTaken ??= new Set<string>();
+    const eligible = (id: string) => platforms.some((p) => !mapped.get(id)?.has(p));
     /** Next seed candidate still unmapped on some platform (consuming). */
     const nextSeedId = (): string | undefined => {
+      if (live) {
+        let best: string | undefined;
+        let bestRank = -Infinity;
+        for (const id of ws.seedOrder) {
+          if (ws.seedTaken!.has(id) || !eligible(id)) continue;
+          const r = live(id);
+          if (r > bestRank) {
+            best = id;
+            bestRank = r;
+          }
+        }
+        if (best !== undefined) {
+          ws.seedTaken!.add(best);
+          ws.seedIdx++;
+        }
+        return best;
+      }
       while (ws.seedIdx < ws.seedOrder.length) {
         const id = ws.seedOrder[ws.seedIdx++];
-        if (platforms.some((p) => !mapped.get(id)?.has(p))) return id;
+        if (eligible(id)) return id;
       }
       return undefined;
     };
     /** Non-consuming peek: is there any seed candidate left at all? */
     const seedsRemain = (): boolean => {
+      if (live) return ws.seedOrder.some((id) => !ws.seedTaken!.has(id) && eligible(id) && live(id) > -Infinity);
       for (let j = ws.seedIdx; j < ws.seedOrder.length; j++) {
-        if (platforms.some((p) => !mapped.get(ws.seedOrder[j])?.has(p))) return true;
+        if (eligible(ws.seedOrder[j])) return true;
       }
       return false;
     };
@@ -4303,6 +4326,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         platforms = discovered;
         ws.platforms = platforms;
         ws.seedIdx = 0;
+        ws.seedTaken?.clear();
         ws.exhausted = false;
         for (const p of roster) {
           const per = mapped.get(p.uscfId);

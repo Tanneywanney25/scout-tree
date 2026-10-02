@@ -64,7 +64,7 @@ export interface MemberFootprint {
 }
 
 const FOOTPRINT_TTL_MS = 3 * 24 * 60 * 60_000;
-const FOOTPRINT_PAGE_CAP = 5;
+const FOOTPRINT_PAGE_CAP = 2;
 const SECTIONS_RETURNED = 80;
 
 function classify(

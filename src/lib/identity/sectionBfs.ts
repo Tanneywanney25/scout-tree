@@ -352,19 +352,25 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
     guessCap: number,
     stopOnAlign: boolean
   ): Promise<TraversalResult> => {
-    const plat = (ev: GraphEvent) => sectionPlatform(ev);
-    const rankCtx = new Map<string, number>();
+    // Ranks are computed LIVE (footprints keep arriving while the run works):
+    // a member in several of these sections takes their best rank.
+    const platsOf = new Map<string, SectionNode["platform"][]>();
+    const nameOf = new Map<string, string>();
     for (const ev of events) {
       for (const p of ev.players) {
         if (p.uscfId === root) continue;
-        if (opts.excludeFromSeeding?.has(p.uscfId)) {
-          rankCtx.set(p.uscfId, -Infinity);
-          continue;
-        }
-        const r = pivotRank(footprints.get(p.uscfId), plat(ev), p.name, known.has(p.uscfId));
-        rankCtx.set(p.uscfId, Math.max(rankCtx.get(p.uscfId) ?? -Infinity, r));
+        platsOf.set(p.uscfId, [...(platsOf.get(p.uscfId) || []), sectionPlatform(ev)]);
+        nameOf.set(p.uscfId, p.name);
       }
     }
+    const liveRank = (id: string): number => {
+      if (id === root || opts.excludeFromSeeding?.has(id)) return -Infinity;
+      const plats = platsOf.get(id);
+      if (!plats) return -Infinity;
+      let best = -Infinity;
+      for (const pl of plats) best = Math.max(best, pivotRank(footprints.get(id), pl, nameOf.get(id) || "", known.has(id)));
+      return best;
+    };
     const seeds: { memberId: string; platform: OnlinePlatform; username: string }[] = [];
     for (const ev of events) {
       for (const p of ev.players) {
@@ -372,7 +378,6 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
         for (const [platform, username] of known.get(p.uscfId) || []) seeds.push({ memberId: p.uscfId, platform, username });
       }
     }
-    const rankedOrder = [...rankCtx.entries()].filter(([, r]) => r > -Infinity).sort((a, b) => b[1] - a[1]).map(([id]) => id);
     let alignedHere = false;
     let firstPivotRankNoted = false;
     const result = await runEngine(
@@ -387,7 +392,7 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
         conductor: opts.conductor,
         shared,
         seedMappings: seeds,
-        seedPolicy: { rank: (id) => rankCtx.get(id) ?? -Infinity, maxGuessMembers: guessCap },
+        seedPolicy: { rank: liveRank, maxGuessMembers: guessCap },
         hooks: {
           discoverPlatform: (ev) => hooks.discoverPlatform(ev, signal),
           findUsernames: (req) => hooks.findUsernames(req, signal),
@@ -396,8 +401,12 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
           const fresh = learnHandle(m.memberId, m.platform, m.username);
           if (fresh && m.how === "seed" && !firstPivotRankNoted) {
             firstPivotRankNoted = true;
-            const pos = rankedOrder.indexOf(m.memberId);
-            if (pos >= 0) firstResolvedPivotRanks.push(pos + 1);
+            const ranked = [...platsOf.keys()]
+              .map((id) => ({ id, r: liveRank(id) }))
+              .filter((x) => x.r > -Infinity && x.id !== m.memberId)
+              .sort((a, b) => b.r - a.r);
+            const mine = liveRank(m.memberId);
+            firstResolvedPivotRanks.push(ranked.filter((x) => x.r > mine).length + 1);
           }
         },
         onSectionAligned: (ev, link, a, trusted) => {
@@ -475,13 +484,22 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
   log(
     `Section-scoped search for ${opts.targetName}: ${level0.length} online section(s) on Chess.com/Lichess at level 0, ${level0Members.length} section-mate(s) to rank by their US Chess online history.`
   );
-  await ensureFootprints(level0Members.slice(0, opts.footprintsLevel0 ?? 160));
-  const excluded = level0Members.filter((id) => {
+  // Direct opponents first, then crosstable order. The first batch is awaited
+  // (it decides who gets guessed); the rest stream in behind it and feed the
+  // live ranking and the next level's expansion.
+  const direct = new Set(
+    level0.flatMap((ev) => ev.players.find((p) => p.uscfId === T)?.games.map((g) => g.opponentUscfId) ?? [])
+  );
+  const rankingOrder = [...level0Members.filter((id) => direct.has(id)), ...level0Members.filter((id) => !direct.has(id))];
+  const level0Cap = opts.footprintsLevel0 ?? 160;
+  await ensureFootprints(rankingOrder.slice(0, 30));
+  const restOfRanking = ensureFootprints(rankingOrder.slice(30, level0Cap)).catch(() => undefined);
+  const excluded = rankingOrder.filter((id) => {
     const fp = footprints.get(id);
     return fp && fp.chesscom + fp.lichess + fp.unknown === 0;
   }).length;
   log(
-    `Ranked ${footprints.size} section-mate(s) on US Chess data alone; ${excluded} have no Chess.com/Lichess history and will not cost a single request.`
+    `Ranked ${footprints.size} section-mate(s) on US Chess data alone (${Math.max(0, Math.min(level0Cap, rankingOrder.length) - footprints.size)} more on the way); ${excluded} have no Chess.com/Lichess history and will not cost a single request.`
   );
   progress();
 
@@ -493,6 +511,7 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
     sectionsWalked++;
   }
   await drainBacktracks();
+  await restOfRanking;
 
   // ---- Levels 1..maxLevel ---------------------------------------------------
   const maxLevel = opts.maxLevel ?? 4;
