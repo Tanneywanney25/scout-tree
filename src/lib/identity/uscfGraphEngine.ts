@@ -1437,6 +1437,8 @@ export interface TraversalResult {
   notes: string[];
   /** Whether at least one online account was traced back to the target. */
   found: boolean;
+  /** Distinct members whose handles were guessed in this run (speculative). */
+  guessedMembers?: number;
   /** How many of the target's tournament opponents we DID resolve to a handle,
    *  even when the target's own account never fell out. Lets the caller say
    *  "mapped N of your opponents but couldn't confirm you" instead of silently
@@ -4965,5 +4967,5 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     if (depth === 0) log("Exhausted every online event without a confident match.");
   }
 
-  return { accounts, notes, found: accounts.length > 0, mappedOpponents };
+  return { accounts, notes, found: accounts.length > 0, mappedOpponents, guessedMembers: guessedMembers.size };
 }

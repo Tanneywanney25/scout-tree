@@ -124,9 +124,13 @@ export interface SectionBfsOptions {
   requestBudget?: number;
   /** Ceiling the adaptive budget may grow to. Default 15,000. */
   maxRequestBudget?: number;
-  /** Members whose handles may be guessed per level-0 run / per deeper section. */
+  /** Members whose handles may be guessed: in the level-0 run, per deeper
+   *  section, and in the whole search (the speculative budget). */
   guessCapLevel0?: number;
   guessCapDeeper?: number;
+  guessBudget?: number;
+  /** Most sections one bridge member may contribute to a level. */
+  sectionsPerBridge?: number;
   /** Most sections admitted to one level of the frontier. */
   maxSectionsPerLevel?: number;
   /** Deepest level walked. Default 4. */
@@ -259,6 +263,9 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
   const firstResolvedPivotRanks: number[] = [];
   let progressedThisLevel = false;
   let level = 0;
+  // Speculative budget for the whole search. Smoke data: a per-section cap
+  // alone compounded to 628 guessed-profile probes over 38 level-1 sections.
+  let guessesLeft = opts.guessBudget ?? 24;
   const pendingBacktracks: { node: SectionKey; seed: string }[] = [];
   const harvestPromises: Promise<void>[] = [];
   /** Wait (briefly) for in-flight harvest writes so the result can report them. */
@@ -349,9 +356,10 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
   const runOn = async (
     root: string,
     events: GraphEvent[],
-    guessCap: number,
+    guessCapWanted: number,
     stopOnAlign: boolean
   ): Promise<TraversalResult> => {
+    const guessCap = Math.max(0, Math.min(guessCapWanted, guessesLeft));
     // Ranks are computed LIVE (footprints keep arriving while the run works):
     // a member in several of these sections takes their best rank.
     const platsOf = new Map<string, SectionNode["platform"][]>();
@@ -416,6 +424,7 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
         stopWhen: () => stopped() || budgetSpent() || found || (stopOnAlign && (alignedHere || known.has(root))),
       }
     );
+    guessesLeft = Math.max(0, guessesLeft - (result.guessedMembers ?? 0));
     // A bridge crowned by the engine is a mapping like any other (the engine
     // keeps its target out of its own mapping table).
     if (root !== T) {
@@ -529,30 +538,48 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
     // Expand: the other online sections of this level's members, best-ranked
     // members first, newest sections first, deduplicated against everything
     // already explored.
+    // Round-robin over bridges in rank order, at most sectionsPerBridge each,
+    // so a level spreads across members instead of being filled by the one
+    // hub with the most history (smoke data: 60 of 60 level-1 sections came
+    // from a single member, 2,368 held back).
     const current = [...nodes.values()].filter((n) => n.level === level && n.ev);
+    const perBridge = opts.sectionsPerBridge ?? 4;
+    const bridges: { id: string; r: number; parent: SectionKey; plat: SectionNode["platform"] }[] = [];
+    const bridgeSeen = new Set<string>();
+    for (const n of current) {
+      for (const p of n.ev!.players) {
+        if (p.uscfId === T || bridgeSeen.has(p.uscfId) || !footprints.has(p.uscfId)) continue;
+        const r = pivotRank(footprints.get(p.uscfId), n.platform, p.name, known.has(p.uscfId));
+        if (r === -Infinity) continue;
+        bridgeSeen.add(p.uscfId);
+        bridges.push({ id: p.uscfId, r, parent: n.key, plat: n.platform });
+      }
+    }
+    bridges.sort((a, b) => b.r - a.r);
     const candidates: SectionNode[] = [];
     const seen = new Set(nodes.keys());
-    for (const n of current) {
-      const ranked = n.ev!.players
-        .filter((p) => p.uscfId !== T)
-        .map((p) => ({ id: p.uscfId, r: pivotRank(footprints.get(p.uscfId), n.platform, p.name, known.has(p.uscfId)) }))
-        .filter((x) => x.r > -Infinity && footprints.has(x.id))
-        .sort((a, b) => b.r - a.r);
-      for (const { id } of ranked) {
-        for (const s of footprints.get(id)!.sections) {
+    const queues = bridges.map((b) => ({ b, secs: footprints.get(b.id)!.sections.slice(), taken: 0 }));
+    for (let progressed = true; progressed; ) {
+      progressed = false;
+      for (const q of queues) {
+        while (q.taken < perBridge && q.secs.length) {
+          const s = q.secs.shift()!;
           const k = keyOf(s.eventId, s.section);
           if (seen.has(k)) continue;
           seen.add(k);
+          q.taken++;
+          progressed = true;
           candidates.push({
             key: k,
             eventId: s.eventId,
             sectionNumber: s.section,
             level: level + 1,
-            bridge: id,
-            parent: n.key,
+            bridge: q.b.id,
+            parent: q.b.parent,
             platform: s.platform,
             status: "pending",
           });
+          break; // one section per bridge per round
         }
       }
     }
