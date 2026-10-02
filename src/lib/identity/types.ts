@@ -227,6 +227,12 @@ export interface ResolutionResult {
    *  never confirmed the target's OWN account: N. Signals the UI to warn that
    *  any accounts shown are same-name leads, not tournament-confirmed matches. */
   partialOpponents?: number;
+  /** Answered from stored, server-verified identities (no search ran). */
+  fromStore?: boolean;
+  /** The member has no online-rated US Chess games: nothing to align. */
+  noOnlineFootprint?: boolean;
+  /** Counters from the section-scoped search (sectionBfs.ts), when it ran. */
+  sectionSearch?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +255,10 @@ export interface ProgressSnapshot {
   /** Roster size of the school fallback, when known (the one denominator the
    *  UI shows, because the school readout already exists and reads as motion). */
   matesTotal: number;
+  /** Section search: deepest level reached, sections walked, platform requests spent. */
+  level?: number;
+  sectionsWalked?: number;
+  platformRequests?: number;
 }
 
 /** A single narrated step in the full-screen "AI detective" experience. */

@@ -48,9 +48,13 @@ import {
   getTournamentGraph,
   findUsernameCandidates,
   searchUscfMembers,
+  fetchStoredIdentity,
   type MemberSearchHit,
+  type StoredIdentity,
 } from "./providers/edgeClient";
-import { runGraphTraversal, type TraversalResult } from "./providers/uscfGraph";
+import { type TraversalResult } from "./providers/uscfGraph";
+import { runSectionBfs, type SectionBfsResult } from "./sectionBfs";
+import { getSharedTraversalCaches } from "./cache";
 import { runSchoolResolver } from "./providers/schoolResolver";
 import {
   scoreFromEvidence,
@@ -276,6 +280,52 @@ export interface DiscoverOptions extends ResolveOptions {
    *  free text…) merged into the discovery query. The anchor's own identity
    *  fields always win — the person is already pinned. */
   clues?: Partial<Omit<PlayerQuery, "name" | "uscfId">>;
+  /** Skip the stored-identity short circuit (forces a fresh search). */
+  skipStore?: boolean;
+}
+
+/** A finished result built from stored, server-verified identities alone. */
+function storedResult(query: PlayerQuery, anchor: ConfirmedAnchor, verdicts: StoredIdentity[], t0: number): ResolutionResult {
+  const accounts: DiscoveredAccount[] = verdicts.map((s) => ({
+    platform: s.platform,
+    username: s.username,
+    profileUrl: s.platform === "lichess" ? `https://lichess.org/@/${s.username}` : `https://www.chess.com/member/${s.username}`,
+    verified: true,
+    confidence: s.confidence,
+    evidence: [
+      {
+        kind: "tournament-overlap",
+        weight: 4,
+        label: `Stored ${s.tier || ""} whole-section alignment, re-run and recorded by the server${s.sections ? ` across ${s.sections} section(s)` : ""}${
+          s.checkedAt ? `; account last checked ${s.checkedAt.slice(0, 10)}` : ""
+        }`.replace(/\s+/g, " "),
+        source: "uscf-graph",
+      },
+    ],
+  }));
+  return {
+    query,
+    identities: [
+      {
+        id: `uscf-${anchor.uscfId}`,
+        name: anchor.name,
+        federation: "USCF",
+        state: anchor.state,
+        uscfId: anchor.uscfId,
+        fideId: anchor.fideId,
+        estimatedRating: anchor.approxRating,
+        accounts,
+        confidence: Math.max(...accounts.map((a) => a.confidence)),
+        evidence: [],
+        reasoning: "Answered from the identity graph: a previous search proved this member's account by aligning a whole tournament section with the US Chess crosstable.",
+        sources: ["uscf-graph"],
+      },
+    ],
+    providerStatus: [{ name: "uscf-graph", label: "Tournament graph", available: true, notes: ["Answered from stored identities."] }],
+    elapsedMs: Date.now() - t0,
+    phaseTimings: {},
+    fromStore: true,
+  };
 }
 
 /** The expensive half: run the full discovery pipeline over a CONFIRMED person. */
@@ -283,7 +333,7 @@ export async function discoverAccounts(
   anchor: ConfirmedAnchor,
   options: DiscoverOptions = {}
 ): Promise<ResolutionResult> {
-  const { clues, ...resolveOpts } = options;
+  const { clues, skipStore, ...resolveOpts } = options;
   const query: PlayerQuery = {
     ...clues,
     name: anchor.name,
@@ -293,6 +343,43 @@ export async function discoverAccounts(
     fideId: clues?.fideId ?? anchor.fideId,
     approxRating: clues?.approxRating ?? anchor.approxRating,
   };
+  const t0 = Date.now();
+  const say = (message: string, status: SearchEvent["status"] = "info") =>
+    resolveOpts.onEvent?.({ id: ++eventCounter, message, status, provider: "uscf-graph", timestamp: Date.now() });
+
+  // 1. The store first (brief item 3.3). A server-verified verdict for this
+  //    member ends the search before any discovery request.
+  if (!skipStore && !resolveOpts.signal?.aborted) {
+    const stored = await fetchStoredIdentity(anchor.uscfId, resolveOpts.signal).catch(() => [] as StoredIdentity[]);
+    const verdicts = stored.filter((s) => s.kind === "verdict" && (s.platform === "chesscom" || s.platform === "lichess"));
+    if (verdicts.length) {
+      say(
+        `Already proven: ${verdicts.map((v) => `@${v.username} on ${v.platform === "lichess" ? "Lichess" : "Chess.com"}`).join(", ")} — a previous search aligned a whole section that includes ${anchor.name}.`,
+        "done"
+      );
+      return storedResult(query, anchor, verdicts, t0);
+    }
+  }
+
+  // 2. No online-rated history at all (brief item 5.1): no online game can
+  //    correspond to a crosstable row, so alignment cannot succeed at any
+  //    depth. Decided from the US Chess record alone, before any platform
+  //    request. Measured: 68% of active members; the old path spent a 338 s
+  //    median on them for 0 of 12 resolved.
+  if (anchor.hasOnline === false) {
+    say(
+      `${anchor.name} has no online-rated US Chess games, so there is no online game record to align against. Nothing was searched.`,
+      "done"
+    );
+    return {
+      query,
+      identities: [],
+      providerStatus: [{ name: "uscf-graph", label: "Tournament graph", available: true, notes: ["No online footprint to align against."] }],
+      elapsedMs: Date.now() - t0,
+      phaseTimings: {},
+      noOnlineFootprint: true,
+    };
+  }
   return resolveIdentity(query, resolveOpts);
 }
 
@@ -600,6 +687,7 @@ async function resolveIdentityCore(
   let traversalFound = false;
   let graphAvailable = false;
   let partialOpponents = 0;
+  let sectionSearch: SectionBfsResult | undefined;
   if (!hintStrong && !signal?.aborted) {
     const graph = await timePhase("Tournament graph fetch", () => getTournamentGraph(query, signal).catch(() => null));
     if (graph && graph.graphTraversalReady && graph.onlineEvents.length) {
@@ -647,18 +735,30 @@ async function resolveIdentityCore(
       let hardTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         traversal = await timePhase("Tournament-graph traversal", () => Promise.race([
-          runGraphTraversal(graph, {
+          // Section-scoped level-order search (sectionBfs.ts). It ends on
+          // evidence, frontier exhaustion or its request budget; the stall
+          // watchdog and the 6 h backstop only guard against a wedge.
+          runSectionBfs(graph, {
             targetName: graph.rootName || query.name,
             targetRating,
             targetFideId,
             signal,
-            budgetMs: TRAVERSAL_BUDGET_MS,
             stopWhen: stalledOrAbandoned,
             conductor,
+            shared: getSharedTraversalCaches(),
+            onProgress: (p) => {
+              tracker.progress.level = p.level;
+              tracker.progress.sectionsWalked = p.sectionsWalked;
+              tracker.progress.platformRequests = p.requests;
+              tracker.push();
+            },
             log: (m) => {
               lastLogAt = Date.now();
               emit(m, "running", "uscf-graph");
             },
+          }).then((r) => {
+            sectionSearch = r;
+            return r;
           }),
           new Promise<TraversalResult>((resolve) => {
             hardTimer = setTimeout(() => {
@@ -1043,6 +1143,9 @@ async function resolveIdentityCore(
       partialOpponents > 0 && !top.some((id) => id.accounts.some((a) => a.verified && !a.evidence?.some((e) => /namesake/i.test(e.label))))
         ? partialOpponents
         : undefined,
+    sectionSearch: sectionSearch
+      ? (({ accounts: _a, notes: _n, ...stats }) => stats)(sectionSearch)
+      : undefined,
   };
 }
 
