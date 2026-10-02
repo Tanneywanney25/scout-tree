@@ -406,15 +406,15 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
           findUsernames: (req) => hooks.findUsernames(req, signal),
         },
         onMapping: (m) => {
+          // Rank position BEFORE the mapping: once a member is known their
+          // rank jumps to 1000, which made every first resolution read as #1.
+          const wasKnown = known.has(m.memberId);
+          const mine = wasKnown ? Infinity : liveRank(m.memberId);
+          const others = wasKnown ? [] : [...platsOf.keys()].filter((id) => id !== m.memberId).map((id) => liveRank(id));
           const fresh = learnHandle(m.memberId, m.platform, m.username);
           if (fresh && m.how === "seed" && !firstPivotRankNoted) {
             firstPivotRankNoted = true;
-            const ranked = [...platsOf.keys()]
-              .map((id) => ({ id, r: liveRank(id) }))
-              .filter((x) => x.r > -Infinity && x.id !== m.memberId)
-              .sort((a, b) => b.r - a.r);
-            const mine = liveRank(m.memberId);
-            firstResolvedPivotRanks.push(ranked.filter((x) => x.r > mine).length + 1);
+            firstResolvedPivotRanks.push(others.filter((r) => r > mine).length + 1);
           }
         },
         onSectionAligned: (ev, link, a, trusted) => {
