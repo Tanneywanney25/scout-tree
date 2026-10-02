@@ -25,13 +25,20 @@ Retrieval, when the engines answer, works: cold discovery **8.2 s median**
 
 The decisive numbers are about the engines, not the code:
 
-- All general engines suspend this address under modest load. After ~5 hours
-  idle, duckduckgo + google cse + wikipedia recovered (26 results); brave and
-  google (CAPTCHA) did not.
-- Capacity inside a recovery window is about **12 queries**. One discovery
-  request costs 8. duckduckgo then escalated from `timeout` to `access denied`.
-- So a single residential address supports roughly **one or two lookups per
-  five-hour window**. Volume is not available at any price we are willing to pay.
+- All general engines suspend this address under load. brave and google
+  (CAPTCHA) stay suspended for hours; duckduckgo and google cse recover.
+- **CORRECTED 2026-10-02.** An earlier revision of this ADR said capacity was
+  about 12 queries per five-hour window, i.e. one or two lookups. That was
+  wrong, and it was the headline reason for shelving. The limit is a RATE, not
+  a cumulative count: 16 consecutive distinct queries at **10 s spacing** all
+  returned 24-30 results with no degradation whatsoever, where 96 queries at
+  400 ms spacing collapsed after about 12. Sustainable throughput is therefore
+  roughly **6 queries/minute**, so a discovery request (8 queries) costs about
+  80 s of wall clock but is not rate-limited out of existence.
+- Consequence for this decision: the capacity objection does not hold. The
+  stagger trial that rejected "burst concurrency causes blocking" only tested
+  0/200/500 ms and never probed a timescale 20x slower, so its conclusion was
+  right for its range and wrong as a general claim. Blocking is rate-driven.
 
 Two findings reframed the comparison:
 
@@ -41,11 +48,21 @@ Two findings reframed the comparison:
   (`_shared/ai.ts`). Clearing one secret took a trivial model call from
   **26,625 ms to 979 ms** (medians, n=3 each). This was the single largest
   latency item in the system and had nothing to do with retrieval.
-- The earlier 8%-of-lookups baseline was measured **under that handicap**: the
-  live runs made 1,143 `findUsername` and 197 `discoverEvent` calls "at an
-  average of 25 s each, all empty", and work on the first event started at a
-  median of 108 s. The deterministic engine was being starved of its own 240 s
-  budget by the search path's failure mode.
+- The earlier 8%-of-lookups baseline was measured while the live runs made
+  1,143 `findUsername` and 197 `discoverEvent` calls "at an average of 25 s
+  each, all empty", with first-event work starting at a median of 108 s.
+  **A previous revision of this ADR concluded that clearing the proxy therefore
+  hands ~100 s of useful work back to the deterministic engine. That was wrong.**
+  The investigation had already run the counterfactual (section 2.5, "same, but
+  with discovery failing instantly"): the match did NOT arrive within 180 s,
+  because ~1,650 speculative guessed-handle requests then shared one queue with
+  the 27 the proven trace needed. The mechanism is still in the code - a single
+  `chesscomGate = semaphore(8)` with lanes chosen by endpoint, not by whether
+  work is proven or speculative (`src/lib/identity/net.ts:106-107,130`), and no
+  request prioritisation anywhere. The 25 s delay was accidentally throttling
+  wasteful work. Also note the 8% figure is a re-weighted model, not a
+  measurement: measured was 6/35 overall and 6/23 online-rated, with a 95%
+  interval of 12-47%.
 
 Against that, the deterministic layers measured far better: organizer research
 resolved **16 of 16 sections, 184 of 186 players, in 25 requests** with no seed
@@ -86,9 +103,11 @@ for **4.7%**.
 
 **Do not merge this branch as production retrieval.** Keep it on the shelf.
 
-A production dependency on a laptop, a Docker container, and a Cloudflare quick
-tunnel whose hostname is discarded on every restart is not acceptable, and the
-engines cap throughput below one lookup per hour regardless. Five tunnel
+The reason is now narrower than when this ADR was first written. A production
+dependency on a laptop, a Docker container, and a Cloudflare quick tunnel whose
+hostname is discarded on every restart is not acceptable. Capacity is NOT the
+reason - see the correction above - so if the hosting dependency is ever solved,
+this pipeline is materially more viable than this ADR originally claimed. Five tunnel
 hostnames died during development; two had to be re-registered by hand in a
 single day. Note the actual failure mode, which is easy to get wrong: a
 `cloudflared` process outlives the shell that started it and keeps serving, so
@@ -126,8 +145,8 @@ Three things follow, and are not optional:
 
 - A zero-cost retrieval host that is not this laptop and not a single
   residential IP. Engine capacity, not code, is the binding constraint.
-- `engine-health.mjs` showing the ~12-queries-per-window ceiling has materially
-  improved.
+- The hosting dependency being solved. That is now the binding constraint, not
+  engine capacity.
 - Post-proxy-fix measurement showing host pinning, rather than seed
   acquisition, is the dominant remaining failure — which would justify item 3
   on its own.
