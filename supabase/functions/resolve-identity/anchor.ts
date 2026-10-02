@@ -359,24 +359,81 @@ export async function handleResolvedHandles(
 const CLAIM_SOURCES = new Set(["engine", "user-correction", "claim"]);
 const CLAIM_PLATFORMS = new Set(["lichess", "chesscom", "chesskid", "icc", "other"]);
 
-export async function handleClaimHandle(req: Record<string, unknown>): Promise<Record<string, unknown>> {
+/** The highest confidence the browser engine can produce: scoreFromEvidence()
+ *  clamps at 0.985 (src/lib/identity/confidence.ts). Anything above it did not
+ *  come from the engine. */
+const ENGINE_CONFIDENCE_CEILING = 0.985;
+const EVIDENCE_MAX_ITEMS = 12;
+
+/** Validate the evidence array the engine sends: at most 12 items of
+ *  {kind, weight, label, source}, short strings, bounded weights. Labels are
+ *  truncated, not rejected; anything else malformed rejects the write.
+ *  Unknown keys are dropped. Returns null when the shape is wrong. */
+function validEvidence(raw: unknown): { kind: string; weight: number; label: string; source: string }[] | null {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw) || raw.length > EVIDENCE_MAX_ITEMS) return null;
+  const out: { kind: string; weight: number; label: string; source: string }[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") return null;
+    const e = item as Record<string, unknown>;
+    if (typeof e.kind !== "string" || !/^[a-z][a-z0-9-]{1,39}$/.test(e.kind)) return null;
+    if (typeof e.weight !== "number" || !Number.isFinite(e.weight) || Math.abs(e.weight) > 10) return null;
+    if (typeof e.label !== "string" || !e.label.trim()) return null;
+    if (typeof e.source !== "string" || !/^[a-z][a-z0-9-]{1,39}$/.test(e.source)) return null;
+    out.push({ kind: e.kind, weight: e.weight, label: e.label.slice(0, 300), source: e.source });
+  }
+  return out;
+}
+
+/**
+ * Write a resolution into resolved_handles.
+ *
+ * Constrained rather than gated (brief item 3.4). Its one legitimate caller is
+ * the browser persisting the engine's own confirmations after ANY hunt,
+ * anonymous ones included (huntStore.persistConfirmedHandles ->
+ * storeResolvedHandle, source "engine"). That path stays open and unchanged:
+ *   • source "engine" is accepted without a session;
+ *   • its confidence must be a number no higher than the engine's own clamp
+ *     (0.985) — a higher value did not come from the engine and is refused;
+ *   • its evidence must have the engine's shape (validEvidence);
+ *   • it can never overwrite a server-verified ("alignment") row, a user
+ *     correction or a claim (putResolvedHandle enforces precedence).
+ * "user-correction" and "claim" bypass the confidence guard by design (the
+ * human overrides the engine), so they require a signed-in caller. Nothing in
+ * the app sends them today.
+ */
+export async function handleClaimHandle(req: Record<string, unknown>, authorization: string | null): Promise<Record<string, unknown>> {
   const uscfId = typeof req.uscfId === "string" ? req.uscfId.replace(/\D/g, "") : "";
   const platform = typeof req.platform === "string" && CLAIM_PLATFORMS.has(req.platform) ? req.platform : "";
   const username = typeof req.username === "string" ? req.username.trim().replace(/^@/, "") : "";
   const source = typeof req.source === "string" && CLAIM_SOURCES.has(req.source) ? req.source : "engine";
-  const confidence =
-    typeof req.confidence === "number" && isFinite(req.confidence)
-      ? Math.max(0, Math.min(1, req.confidence))
-      : 0;
   if (!uscfId || !platform || !username || !/^[A-Za-z0-9_.-]{2,30}$/.test(username)) {
-    return { available: true, stored: false };
+    return { available: true, stored: false, reason: "malformed" };
+  }
+  if (typeof req.confidence !== "number" || !Number.isFinite(req.confidence) || req.confidence < 0) {
+    return { available: true, stored: false, reason: "confidence missing or invalid" };
+  }
+  const evidence = validEvidence(req.evidence);
+  if (evidence === null) return { available: true, stored: false, reason: "evidence malformed" };
+
+  let confidence = Math.min(1, req.confidence);
+  let by: string | undefined;
+  if (source === "engine") {
+    if (confidence > ENGINE_CONFIDENCE_CEILING) {
+      return { available: true, stored: false, reason: `engine confidence above ${ENGINE_CONFIDENCE_CEILING}` };
+    }
+  } else {
+    const caller = await authenticateCaller(authorization);
+    if (!caller) return { available: false, stored: false, unauthorized: true };
+    by = caller.userId;
+    confidence = Math.max(confidence, 0.9);
   }
   const stored = await putResolvedHandle({
     uscfId,
     platform,
     username,
     confidence,
-    evidence: req.evidence,
+    evidence: by ? [...evidence, { kind: "user-assertion", weight: 0, label: `asserted by signed-in user ${by}`, source: "claim" }] : evidence,
     source,
   });
   console.log("[resolve-identity] claimHandle:", JSON.stringify({ uscfId, platform, username, source, stored }));
