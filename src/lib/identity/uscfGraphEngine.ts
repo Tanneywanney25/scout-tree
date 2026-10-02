@@ -204,7 +204,7 @@ const COMMON_FIRST_NAMES = new Set([
  * Higher = the name is a sharper Google search key. Uses common-name lists
  * plus how often the surname repeats inside this very tournament graph.
  */
-function nameUniqueness(name: string, lastNameCounts?: Map<string, number>): number {
+export function nameUniqueness(name: string, lastNameCounts?: Map<string, number>): number {
   const tokens = normalizeName(name).split(" ").filter(Boolean);
   if (!tokens.length) return 0;
   const first = tokens[0];
