@@ -92,6 +92,7 @@ import {
   alignmentTrustworthy,
   lastExportFailure,
   type TournamentGameRow,
+  type SectionAlignment,
 } from "./sectionAlign";
 import {
   nameSimilarity,
@@ -1417,6 +1418,18 @@ export interface TraversalOptions {
    *  without depending on live Google seed discovery. Each is verified and
    *  mapped as a "seed" before the main loop. */
   seedMappings?: { memberId: string; platform: OnlinePlatform; username: string }[];
+  /** Section-scoped traversal (sectionBfs.ts). When set, seed scouts work the
+   *  roster in rank order (highest first) instead of direct-opponents-then-
+   *  name-uniqueness; members ranked -Infinity are never scouted (no lead
+   *  search, no guessing: they have no Chess.com or Lichess history to align).
+   *  maxGuessMembers caps how many distinct members may have handles GUESSED
+   *  in this run — guessing is the speculative work that measured 63% of all
+   *  Chess.com requests as 404s. */
+  seedPolicy?: { rank?: (memberId: string) => number; maxGuessMembers?: number };
+  /** Every member → handle mapping the run makes (seeds, pairings, alignments). */
+  onMapping?: (m: { memberId: string; platform: OnlinePlatform; username: string; how: string }) => void;
+  /** Every whole-section alignment attempted against a real games list. */
+  onSectionAligned?: (ev: GraphEvent, link: EventLink, a: SectionAlignment, trusted: boolean) => void;
 }
 
 export interface TraversalResult {
@@ -1664,6 +1677,11 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     const per = mapped.get(memberId) || new Map<OnlinePlatform, Mapping>();
     if (!per.has(platform)) {
       per.set(platform, m);
+      try {
+        opts.onMapping?.({ memberId, platform, username: m.profile.username, how: m.how });
+      } catch {
+        /* an observer bug must never break the traversal */
+      }
       const key = claimKey(platform, m.profile.username);
       const claimants = handleClaims.get(key) || new Set<string>();
       claimants.add(memberId);
@@ -2120,6 +2138,8 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
   };
 
   const seedCache = new Map<string, Promise<VerifiedProfile | null>>();
+  const guessedMembers = new Set<string>();
+  let guessCapNoted = false;
 
   /** Resolve a NON-target member's account. PRIMARY: the Google index —
    *  collect ALL leads, score each candidate profile's attributes against the
@@ -2366,6 +2386,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
 
       const gate = (prof: VerifiedProfile): boolean =>
         !!prof.displayName && nameSimilarity(name, prof.displayName) >= 0.72;
+      const guessCap = opts.seedPolicy?.maxGuessMembers;
+      if (guessCap !== undefined && !guessedMembers.has(memberId) && guessedMembers.size >= guessCap) {
+        if (!guessCapNoted) {
+          guessCapNoted = true;
+          log(`Handle guessing has reached its cap of ${guessCap} member(s) for this section — the rest are left to proven paths.`);
+        }
+        return null;
+      }
+      guessedMembers.add(memberId);
       const guesses = guessHandles(name).filter((h) => !dudHandles.has(`${platform}:${h.toLowerCase()}`));
       // Lichess: one bulk POST answers existence for every uncached guess in a
       // single paced slot, where probing each guess costs a paced GET apiece.
@@ -3258,7 +3287,13 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
     sectionAligned.add(key); // a real games list = a real verdict either way
     const a = alignSectionBest(ev, rows);
-    if (!alignmentTrustworthy(ev, a)) {
+    const trusted = alignmentTrustworthy(ev, a);
+    try {
+      opts.onSectionAligned?.(ev, link, a, trusted);
+    } catch {
+      /* an observer bug must never break the traversal */
+    }
+    if (!trusted) {
       log(
         `"${ev.name}": the ${rows.length} games at ${linkUrl} don't line up with the crosstable (${a.assignments.length}/${n} players matched, ${a.contradicted.length} contradicted, ${a.inconsistentEdges} pairing conflict(s)) — ${
           link.source === "organizer" ? "a sibling section from the same day, most likely" : "probably not this section"
@@ -4011,6 +4046,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     // Stage-0 results: the organizer-located tournament(s) and any up-front
     // flyer answer for this event.
     for (const l of organizerLinks.get(ev.eventId) || []) state.links.set(linkKey(l), l);
+    // A stored or discovered answer for this event carries its exact tournament,
+    // which a platform named in the title does not. Stage 0 fetches it for
+    // every researchable event but only recorded it (discoveredInfo) for
+    // unknown-host events, so an event titled "...on Chess.com" never used its
+    // stored slug (investigation §2.5: 217 s, 778 calls, no match). Apply it
+    // whenever it exists.
+    if (!discoveredInfo.has(ev.eventId) && discoverCache.has(ev.eventId)) {
+      discoveredInfo.set(ev.eventId, await discoverCache.get(ev.eventId)!);
+    }
     if (discoveredInfo.has(ev.eventId)) {
       const implied = applyInfoLinks(discoveredInfo.get(ev.eventId) ?? null);
       if (!platforms.length && implied.length) platforms = implied;
@@ -4090,10 +4134,16 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       // "Ujwal Garine" (a sharp Google key) is worked before "John Smith"
       // (a swamp of namesakes).
       const byUniqueness = (a: string, b: string) => uniquenessOf(b) - uniquenessOf(a);
-      ws.seedOrder = [
-        ...roster.filter((p) => oppHere.has(p.uscfId)).map((p) => p.uscfId).sort(byUniqueness),
-        ...roster.filter((p) => p.uscfId !== targetId && !oppHere.has(p.uscfId)).map((p) => p.uscfId).sort(byUniqueness),
-      ].filter((id, i, arr) => arr.indexOf(id) === i);
+      const rank = opts.seedPolicy?.rank;
+      ws.seedOrder = rank
+        ? roster
+            .map((p) => p.uscfId)
+            .filter((id, i, arr) => id !== targetId && arr.indexOf(id) === i && rank(id) > -Infinity)
+            .sort((a, b) => rank(b) - rank(a))
+        : [
+            ...roster.filter((p) => oppHere.has(p.uscfId)).map((p) => p.uscfId).sort(byUniqueness),
+            ...roster.filter((p) => p.uscfId !== targetId && !oppHere.has(p.uscfId)).map((p) => p.uscfId).sort(byUniqueness),
+          ].filter((id, i, arr) => arr.indexOf(id) === i);
       log(
         `Working "${ev.name}"${ev.sectionName ? ` — ${ev.sectionName}` : ""} (${ev.ratingSystem}${
           ev.startDate ? `, ${ev.startDate}` : ""
