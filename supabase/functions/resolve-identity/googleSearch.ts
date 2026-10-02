@@ -29,6 +29,7 @@
 // ============================================================================
 
 import { callAIWithSearch, readEnv, geminiQuotaCoolingDown } from "../_shared/ai.ts";
+import { takeQuota } from "../_shared/identityStore.ts";
 
 export type WebPlatform = "chesscom" | "lichess";
 
@@ -48,6 +49,10 @@ export interface UsernameSearchRequest {
   platforms?: WebPlatform[];
   /** Handles this person is already known to use elsewhere (username reuse). */
   knownUsernames?: string[];
+  /** Spend at most this many search queries (the ladder's most precise
+   *  rungs, page 1 only). The traversal asks 1–2 for a pivot; the target's
+   *  own search leaves it unset and gets the whole ladder. */
+  maxQueries?: number;
 }
 
 export interface UsernameCandidate {
@@ -68,6 +73,14 @@ export interface UsernameSearchResult {
    *  exhausted (429), NOT because the index had no match. Callers must treat
    *  this differently from a clean empty result (retry later / lean on CSE). */
   quotaExhausted?: boolean;
+  /** True when no search backend is enabled at all (no Programmable Search
+   *  key, and grounded AI search switched off by GEMINI_GROUNDING_DAILY_CAP=0).
+   *  Not a miss and not a transient failure: nothing will answer until the
+   *  configuration changes, so callers should stop asking. */
+  disabled?: boolean;
+  /** True when today's Programmable Search budget (GOOGLE_CSE_DAILY_CAP,
+   *  default 100, the free tier) is spent. */
+  budgetExhausted?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -239,23 +252,36 @@ async function cseQuery(query: string, key: string, cx: string, start = 1): Prom
  *  often NOT on page one (namesakes crowd it out), so deep queries matter. */
 const CSE_PAGE2_QUERIES = 10;
 
+/** The free tier is 100 queries a day; the ledger makes it an explicit
+ *  budget every caller draws against (quota_ledger, provider "google_cse"). */
+const CSE_DAILY_CAP = Math.max(0, Number(readEnv("GOOGLE_CSE_DAILY_CAP") || 100));
+
+/** Take one query from today's budget. A null ledger (store unreachable)
+ *  falls back to Google's own enforcement rather than blocking search. */
+async function takeCseQuery(): Promise<boolean> {
+  const used = await takeQuota("google_cse", 1);
+  return used === null || used <= CSE_DAILY_CAP;
+}
+
 async function searchViaCse(
   queries: string[],
   key: string,
   cx: string,
-  log?: (m: string) => void
-): Promise<{ candidates: UsernameCandidate[]; queriesTried: number; quotaHit: boolean }> {
+  log?: (m: string) => void,
+  pageTwo = true
+): Promise<{ candidates: UsernameCandidate[]; queriesTried: number; quotaHit: boolean; budgetHit: boolean }> {
   const out: UsernameCandidate[] = [];
   const seen = new Set<string>();
   let tried = 0;
   let quotaHit = false;
+  let budgetHit = false;
 
   // Page 1 of every ladder query, then page 2 of the most precise ones — the
   // goal is MANY distinct candidates (verification happens downstream), never
   // just the first hit.
   const work: { q: string; start: number }[] = [
     ...queries.map((q) => ({ q, start: 1 })),
-    ...queries.slice(0, CSE_PAGE2_QUERIES).map((q) => ({ q, start: 11 })),
+    ...(pageTwo ? queries.slice(0, CSE_PAGE2_QUERIES).map((q) => ({ q, start: 11 })) : []),
   ];
 
   // Parallel workers, gently paced so Google doesn't block us.
@@ -271,7 +297,7 @@ async function searchViaCse(
 
   await Promise.all(
     Array.from({ length: Math.min(CONCURRENCY, work.length) }, async () => {
-      while (idx < work.length && !enough() && !quotaHit) {
+      while (idx < work.length && !enough() && !quotaHit && !budgetHit) {
         const { q, start } = work[idx++];
         if (start > 1) {
           const got = page1Count.get(q);
@@ -280,6 +306,11 @@ async function searchViaCse(
         const wait = Math.max(0, lastStart + PACE_MS - Date.now());
         lastStart = Math.max(Date.now(), lastStart + PACE_MS);
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        if (!(await takeCseQuery())) {
+          budgetHit = true;
+          log?.(`Programmable Search daily budget (${CSE_DAILY_CAP}) is spent — no more queries today.`);
+          return;
+        }
         tried++;
         const items = await cseQuery(q, key, cx, start);
         if (items === "quota") {
@@ -298,7 +329,7 @@ async function searchViaCse(
       }
     })
   );
-  return { candidates: out, queriesTried: tried, quotaHit };
+  return { candidates: out, queriesTried: tried, quotaHit, budgetHit };
 }
 
 // ---------------------------------------------------------------------------
@@ -419,6 +450,7 @@ export function findUsernamesOnWeb(
     req.fideId,
     req.eventName,
     [...(req.platforms || [])].sort(),
+    req.maxQueries,
   ]);
   const hit = usernameSearchMemo.get(key);
   if (hit) return hit;
@@ -439,23 +471,55 @@ async function findUsernamesOnWebUncached(
   req: UsernameSearchRequest,
   log?: (m: string) => void
 ): Promise<UsernameSearchResult> {
-  const queries = buildQueryLadder(req);
+  const ladder = buildQueryLadder(req);
+  const capped = typeof req.maxQueries === "number" && req.maxQueries > 0;
+  const queries = capped ? ladder.slice(0, Math.floor(req.maxQueries as number)) : ladder;
   if (!queries.length) return { candidates: [], backend: "none", queriesTried: 0 };
 
   const cseKey = readEnv("GOOGLE_CSE_KEY") || readEnv("GOOGLE_SEARCH_KEY");
   const cseCx = readEnv("GOOGLE_CSE_ID") || readEnv("GOOGLE_SEARCH_CX");
+  const groundingOff = (readEnv("GEMINI_GROUNDING_DAILY_CAP") || "").trim() === "0";
+  const cseConfigured = !!(cseKey && cseCx);
+
+  // Nothing can search: say so as a configuration fact, not a quota problem
+  // and not a miss, so clients stop asking instead of retrying every member.
+  if (!cseConfigured && groundingOff) {
+    return {
+      candidates: [],
+      backend: "none",
+      queriesTried: 0,
+      disabled: true,
+      note: "No search backend is enabled (no Programmable Search key; grounded AI search is off).",
+    };
+  }
 
   // CSE FIRST — the literal index with its own (separate) quota. The AI
   // backend is the escalation, not the default.
   let cseCleanMiss = false; // CSE searched the whole ladder and found nothing
-  if (cseKey && cseCx && Date.now() > cseCooldownUntil) {
-    const cse = await searchViaCse(queries, cseKey, cseCx, log);
+  let budgetExhausted = false;
+  if (cseConfigured && Date.now() > cseCooldownUntil) {
+    const cse = await searchViaCse(queries, cseKey as string, cseCx as string, log, !capped);
     if (cse.candidates.length) {
       return { candidates: rankForPlatforms(cse.candidates, req.platforms), backend: "google-cse", queriesTried: cse.queriesTried };
     }
-    cseCleanMiss = !cse.quotaHit;
+    cseCleanMiss = !cse.quotaHit && !cse.budgetHit;
+    budgetExhausted = cse.budgetHit;
     // Zero hits (or quota): escalate to AI search, which reads pages rather
     // than just result snippets and can follow context.
+  }
+  if (groundingOff) {
+    // The only escalation is switched off. A clean CSE miss IS the answer.
+    return {
+      candidates: [],
+      backend: cseCleanMiss ? "google-cse" : "none",
+      queriesTried: queries.length,
+      budgetExhausted: budgetExhausted || undefined,
+      note: cseCleanMiss
+        ? "Programmable Search found no match"
+        : budgetExhausted
+        ? "Programmable Search daily budget spent"
+        : "Programmable Search unavailable",
+    };
   }
 
   // Cooldown fast-fail: once the AI-search quota is PROVEN exhausted, don't
