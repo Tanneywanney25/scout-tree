@@ -672,7 +672,7 @@ serve(async (req) => {
       return json(await handleClaimHandle(body.claimHandle as Record<string, unknown>));
     }
     if (body?.optOut && typeof body.optOut === "object") {
-      return json(await handleOptOut(body.optOut as Record<string, unknown>));
+      return json(await handleOptOut(body.optOut as Record<string, unknown>, req.headers.get("authorization")));
     }
 
     // --- Expand mode (client recursion into an opponent's online history) ----

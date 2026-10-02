@@ -383,12 +383,44 @@ export async function handleClaimHandle(req: Record<string, unknown>): Promise<R
   return { available: true, stored };
 }
 
-export async function handleOptOut(req: Record<string, unknown>): Promise<Record<string, unknown>> {
+/**
+ * Record a do-not-resolve request. REQUIRES A SIGNED-IN CALLER.
+ *
+ * Why the gate is on the write and not the read: getResolvedHandles() honours
+ * an opt-out row without consulting `verified`, which the schema reserves for
+ * "a human confirms the requester is (or represents) the player". Honouring
+ * unverified rows is the right call for privacy — a request should take effect
+ * immediately, not after review — but it means a row is a suppression
+ * primitive. Combined with verify_jwt = false that made this an
+ * unauthenticated, unlimited, irreversible denial of service against the whole
+ * moat: USCF ids are sequential, handle_optouts has no unique constraint so
+ * duplicates accumulate, only `memberSearch` is rate-limited, and no code path
+ * anywhere can delete a row again.
+ *
+ * Reproduced before this gate existed: POST with no apikey and no
+ * Authorization returned {"stored":true} and the row landed.
+ *
+ * NOTE: `claimHandle` is deliberately NOT gated the same way. Its legitimate
+ * caller is the browser persisting the engine's own confirmations after a hunt
+ * (huntStore.ts persistConfirmedHandles -> storeResolvedHandle), which runs for
+ * anonymous users because anonymous scouting is a product feature. Gating it
+ * would be a product change, not a security fix. Its abuse primitive is the
+ * caller-supplied `source` and `confidence`, which is a narrower problem and a
+ * separate decision.
+ */
+export async function handleOptOut(
+  req: Record<string, unknown>,
+  authorization: string | null
+): Promise<Record<string, unknown>> {
+  const caller = await authenticateCaller(authorization);
+  if (!caller) return { available: false, stored: false, unauthorized: true };
+
   const stored = await putOptOut({
     uscfId: typeof req.uscfId === "string" ? req.uscfId : undefined,
     platform: typeof req.platform === "string" ? req.platform : undefined,
     username: typeof req.username === "string" ? req.username : undefined,
     note: typeof req.note === "string" ? req.note : undefined,
   });
+  console.log("[resolve-identity] optOut:", JSON.stringify({ by: caller.userId, stored }));
   return { available: true, stored };
 }

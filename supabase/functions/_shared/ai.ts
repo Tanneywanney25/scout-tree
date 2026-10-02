@@ -295,6 +295,29 @@ export async function callAIWithSearch(
   maxTokens = 1024,
   opts: { maxSearchUses?: number } = {}
 ): Promise<AIResult> {
+  // OPERATOR KILL-SWITCH. GEMINI_GROUNDING_DAILY_CAP="0" disables the grounded
+  // path outright, before any network call.
+  //
+  // Grounding is the quota this project already exhausted, and on the free tier
+  // Gemini 3.x does not offer it at all, so every attempt spends request
+  // allowance to fail. The cap secret existed but was read nowhere on this
+  // branch, so setting it to 0 silently did nothing here while working on the
+  // search branch - a safety control that is live in one deployment and inert
+  // in another is worse than no control, because it is believed.
+  //
+  // Guarded here rather than at the three call sites (googleSearch x2,
+  // school x1) so a new caller cannot miss it. The only other brake,
+  // geminiQuotaCoolingDown(), is reactive: it trips after a 429, i.e. after the
+  // quota has already been spent.
+  if ((readEnv("GEMINI_GROUNDING_DAILY_CAP") || "").trim() === "0") {
+    return {
+      ok: false,
+      text: "",
+      status: 503,
+      error: "grounded search disabled by GEMINI_GROUNDING_DAILY_CAP=0",
+      backend: "disabled",
+    };
+  }
   const proxy = proxyConfig();
   let proxyErr: AIResult | null = null;
   if (proxy) {
