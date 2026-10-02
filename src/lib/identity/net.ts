@@ -133,6 +133,22 @@ export function isSpeculativeSignal(signal?: AbortSignal | null): boolean {
 
 export type Lane = "proven" | "speculative";
 
+/** Thrown to a speculative request that was dropped under rate pressure. */
+export class SpeculativeShed extends Error {
+  constructor(where: string) {
+    super(`speculative request shed: ${where} is rate-limited`);
+    this.name = "SpeculativeShed";
+  }
+}
+
+// After a rate-limit signal, speculative work on that bucket is DROPPED (not
+// queued) until the pause has ended and this much longer has passed clean.
+// Measured in acceptance player #6: with speculative Lichess lookups merely
+// queued, 46 profile 429s kept the block alive, one speculative request
+// waited 17 minutes, and a backtrack that would have finished the search sat
+// behind the pauses for ~20 minutes. Proven work keeps its place.
+const SHED_GRACE_MS = 30_000;
+
 // ---------------------------------------------------------------------------
 // The rate scheduler: token bucket + priority lanes + AIMD.
 // ---------------------------------------------------------------------------
@@ -166,6 +182,7 @@ class RateScheduler {
   private last = Date.now();
   private currentRate: number;
   private pausedUntil = 0;
+  private shedUntil = 0;
   private lastLimitAt = 0;
   private lastStepAt = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -191,6 +208,7 @@ class RateScheduler {
     this.specTokens = Math.max(1, this.cfg.capacity * this.cfg.specShare);
     this.currentRate = this.cfg.rate;
     this.pausedUntil = 0;
+    this.shedUntil = 0;
     this.lastLimitAt = 0;
     this.limitEvents = 0;
   }
@@ -198,6 +216,7 @@ class RateScheduler {
   /** Resolves with the queue wait (ms) once a token is granted. */
   acquire(lane: Lane, signal?: AbortSignal): Promise<number> {
     if (signal?.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+    if (lane === "speculative" && Date.now() < this.shedUntil) return Promise.reject(new SpeculativeShed(this.name));
     return new Promise<number>((resolve, reject) => {
       const w: Waiter = { enqueuedAt: Date.now(), resolve, reject, signal };
       if (signal) {
@@ -221,7 +240,13 @@ class RateScheduler {
     this.lastLimitAt = now;
     this.currentRate = Math.max(this.cfg.minRate, this.currentRate * 0.5);
     this.pausedUntil = Math.max(this.pausedUntil, now + pauseMs);
+    this.shedUntil = Math.max(this.shedUntil, this.pausedUntil + SHED_GRACE_MS);
     this.tokens = Math.min(this.tokens, 1);
+    // Drop every queued speculative request now; it would only re-trip the limit.
+    for (const w of this.queues.speculative.splice(0)) {
+      if (w.signal && w.onAbort) w.signal.removeEventListener("abort", w.onAbort);
+      w.reject(new SpeculativeShed(this.name));
+    }
     this.pump();
   }
 
@@ -296,8 +321,10 @@ const CHESSCOM_LIMIT_PAUSE_MS = 3_000;
 // Lichess: per-endpoint buckets, sized under the measurement.
 export type LichessClass = "user" | "games" | "export" | "other";
 export const LICHESS_BUCKETS: Record<LichessClass, BucketConfig> = {
-  // /api/user, POST /api/users, autocomplete: clean at 4/s serial.
-  user: { capacity: 4, rate: 2, minRate: 0.25, step: 0.25, recoverMs: 30_000, specShare: 0.5 },
+  // /api/user, POST /api/users, autocomplete: clean at 4/s in a 59-request
+  // serial probe, but 429s under minutes of sustained load in acceptance
+  // (player #6: 46 of 161 profile lookups). Sustained 1/s, speculative 0.25/s.
+  user: { capacity: 3, rate: 1, minRate: 0.2, step: 0.2, recoverMs: 30_000, specShare: 0.25 },
   // /api/games/user: bucket ~7–9 refilling ~0.5/s measured.
   games: { capacity: 6, rate: 0.4, minRate: 0.1, step: 0.05, recoverMs: 30_000, specShare: 0.5 },
   // tournament / team exports: one stream at a time is what Lichess asks.
@@ -442,6 +469,8 @@ export interface NetStats {
   chesscom: Record<Lane, LaneStats>;
   lichess: Record<Lane, LaneStats>;
   limitEvents: { chesscom: number; lichess: number };
+  /** Speculative requests dropped under rate pressure (never sent). */
+  shed: { chesscom: number; lichess: number };
 }
 
 const blankLane = (): LaneStats => ({ requests: 0, statuses: {}, waits: [], byClass: {} });
@@ -449,6 +478,7 @@ let netStats: NetStats = {
   chesscom: { proven: blankLane(), speculative: blankLane() },
   lichess: { proven: blankLane(), speculative: blankLane() },
   limitEvents: { chesscom: 0, lichess: 0 },
+  shed: { chesscom: 0, lichess: 0 },
 };
 
 export function getNetStats(): NetStats {
@@ -460,6 +490,7 @@ export function resetNetStats(): void {
     chesscom: { proven: blankLane(), speculative: blankLane() },
     lichess: { proven: blankLane(), speculative: blankLane() },
     limitEvents: { chesscom: 0, lichess: 0 },
+    shed: { chesscom: 0, lichess: 0 },
   };
 }
 
@@ -636,6 +667,10 @@ export async function politeFetch(
       record(platform, lane, url, res.status, waitMs);
       notifyNet(platform, res.status === 429 ? "429" : "ok");
     } catch (e) {
+      if (e instanceof SpeculativeShed) {
+        netStats.shed[platform]++;
+        throw e; // never sent; callers read it as a transient miss
+      }
       if (!outer?.aborted) {
         record(platform, lane, url, "THROW", waitMs);
         breakerFailure(platform);
@@ -654,6 +689,18 @@ export async function politeFetch(
       if (outer?.aborted || attempt >= 2) throw e;
       await sleep(500 * (attempt + 1));
       continue;
+    }
+    if (res.status === 429 && lane === "speculative") {
+      // A speculative request is never retried: report the limit, shed the
+      // rest of the speculative queue, and let the caller treat it as a miss.
+      if (platform === "chesscom") {
+        netStats.limitEvents.chesscom++;
+        chesscomScheduler.onLimit(CHESSCOM_LIMIT_PAUSE_MS);
+      } else {
+        netStats.limitEvents.lichess++;
+        scheduler.onLimit(lichessBackoffMs(lcls!, res));
+      }
+      return res;
     }
     if (res.status === 429 && attempt < maxRetries && !outer?.aborted) {
       let backoff: number;

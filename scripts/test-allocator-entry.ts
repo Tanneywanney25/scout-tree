@@ -10,7 +10,8 @@
 //   4. speculative work alone never exceeds its share of the rate;
 //   5. a 429 halves the rate and pauses; a clean stretch steps it back up;
 //   6. Lichess backoff: Retry-After honoured, else 6 s doubling, ±20%, ≤60 s;
-//   7. every request is accounted to its lane.
+//   7. every request is accounted to its lane;
+//   8. under a 429, queued and new speculative work is shed, proven work is not.
 // ============================================================================
 
 import {
@@ -21,6 +22,7 @@ import {
   getNetStats,
   resetNetStats,
   lichessBackoffMs,
+  SpeculativeShed,
 } from "../src/lib/identity/net";
 
 let failures = 0;
@@ -137,6 +139,23 @@ await Promise.all([
 const s7 = getNetStats().chesscom;
 assert(s7.speculative.requests === 12 && s7.proven.requests === 7, `lanes: ${s7.speculative.requests} speculative, ${s7.proven.requests} proven`);
 assert((s7.speculative.statuses["404"] || 0) === 6, `404s attributed to the speculative lane (${s7.speculative.statuses["404"] || 0})`);
+
+console.log("Scenario 8: a 429 sheds speculative work; proven work keeps its place");
+_resetBreakers();
+resetNetStats();
+configureAllocator("chesscom", { capacity: 1, rate: 20, minRate: 5, step: 5, recoverMs: 60_000, specShare: 1 });
+let n8 = 0;
+script = () => (++n8 === 1 ? 429 : 200);
+const spec8 = speculativeSignal();
+const outcomes = await Promise.allSettled(Array.from({ length: 12 }, (_, i) => politeFetch(cc(6000 + i), { signal: spec8 }, "chesscom")));
+const shed8 = outcomes.filter((o) => o.status === "rejected" && (o.reason as Error) instanceof SpeculativeShed).length;
+const got429 = outcomes.filter((o) => o.status === "fulfilled" && (o.value as Response).status === 429).length;
+assert(got429 === 1 && shed8 >= 10, `one speculative 429 returned without retry (${got429}); ${shed8} queued speculative requests shed`);
+const late = await politeFetch(cc(6100), { signal: spec8 }, "chesscom").then(() => "sent", (e) => (e instanceof SpeculativeShed ? "shed" : "error"));
+assert(late === "shed", `a new speculative request inside the shed window is rejected at once (${late})`);
+const proven8 = await politeFetch(cc(6200), {}, "chesscom");
+assert(proven8.status === 200, "a proven request still goes through after the pause");
+assert(getNetStats().shed.chesscom >= 11, `shed counted (${getNetStats().shed.chesscom})`);
 
 console.log(failures ? `\n${failures} assertion(s) FAILED.` : "\nAll allocator scenarios passed.");
 process.exit(failures ? 1 : 0);
