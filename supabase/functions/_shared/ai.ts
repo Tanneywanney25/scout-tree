@@ -197,13 +197,52 @@ function retryAfterMs(res: Response): number | undefined {
   return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Optional-backend fail-fast.
+//
+// The AI proxy is OPTIONAL: when it fails, callAI falls through to the direct
+// keys. Retrying an unreachable proxy therefore buys nothing and costs the
+// whole retry budget. Measured 2026-10-02 with the retry loop below applied to
+// the proxy: a DNS-dead hostname (what a dropped quick tunnel becomes), and a
+// live tunnel with no origin behind it (Cloudflare 502), each cost 25.0 s on
+// EVERY model call (n=3 per mode, medians 25,021 / 25,021 / 25,120 ms).
+//
+// So an optional backend gets exactly one attempt: a thrown fetch or a 5xx
+// ends it, and marks the backend down for OPTIONAL_DOWN_MS so the next calls
+// skip it without a round trip. 429 keeps its normal handling (the pool is
+// up and saying "quota", which callAI treats as the answer).
+// ---------------------------------------------------------------------------
+
+const OPTIONAL_DOWN_MS = envInt("AI_OPTIONAL_DOWN_MS", 60_000);
+const optionalDownUntil = new Map<string, number>();
+
+function backendKey(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** True while an optional backend is inside its post-failure cooldown. */
+function optionalBackendDown(url: string): boolean {
+  return (optionalDownUntil.get(backendKey(url)) || 0) > Date.now();
+}
+
+function markOptionalBackendDown(url: string): void {
+  optionalDownUntil.set(backendKey(url), Date.now() + OPTIONAL_DOWN_MS);
+}
+
 /**
  * Fetch the Gemini API with the concurrency gate, spacing, per-attempt timeout
  * and bounded backoff-retry applied. Returns the final Response — ok, or the
  * last 429/5xx once the retry budget is spent. On a proven-exhausted quota it
  * trips the process-wide cooldown so the rest of the burst can fail fast.
+ *
+ * `optional`: the backend has a fallback behind it — one attempt only on a
+ * transport failure or 5xx (see the fail-fast note above).
  */
-async function geminiFetch(url: string, init: RequestInit): Promise<Response> {
+async function geminiFetch(url: string, init: RequestInit, opts: { optional?: boolean } = {}): Promise<Response> {
   await geminiAcquire();
   try {
     const deadline = Date.now() + GEMINI_RETRY_BUDGET_MS;
@@ -217,12 +256,20 @@ async function geminiFetch(url: string, init: RequestInit): Promise<Response> {
         res = await fetch(url, { ...init, signal: controller.signal });
       } catch (e) {
         clearTimeout(timer);
+        if (opts.optional) {
+          markOptionalBackendDown(url);
+          throw e;
+        }
         // Timeout / transient network error: retry within budget, else rethrow.
         if (Date.now() >= deadline || attempt >= 4) throw e;
         await sleep(backoffMs(attempt++, deadline));
         continue;
       }
       clearTimeout(timer);
+      if (opts.optional && res.status >= 500) {
+        markOptionalBackendDown(url);
+        return res;
+      }
       if ((res.status === 429 || res.status >= 500) && Date.now() < deadline && attempt < 5) {
         const wait = Math.min(
           retryAfterMs(res) ?? backoffMs(attempt, deadline),
@@ -381,9 +428,14 @@ async function callProxy(
     ? readEnv("AI_PROXY_SEARCH_MODEL") || PROXY_DEFAULT_SEARCH_MODEL
     : readEnv("AI_PROXY_MODEL") || PROXY_DEFAULT_MODEL;
 
+  const endpoint = `${proxy.baseUrl}/v1/chat/completions`;
+  if (optionalBackendDown(endpoint)) {
+    return { ok: false, text: "", status: 503, error: "AI proxy unreachable on its last attempt (cooling down)", backend: "proxy" };
+  }
+
   let response: Response;
   try {
-    response = await geminiFetch(`${proxy.baseUrl}/v1/chat/completions`, {
+    response = await geminiFetch(endpoint, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${proxy.apiKey}`,
@@ -408,7 +460,7 @@ async function callProxy(
           ? { tools: [{ type: "function", function: { name: "google_search", description: "Google Search grounding", parameters: { type: "object", properties: {} } } }] }
           : {}),
       }),
-    });
+    }, { optional: true });
   } catch (e) {
     return { ok: false, text: "", status: 500, error: e instanceof Error ? e.message : "network error", backend: "proxy" };
   }
