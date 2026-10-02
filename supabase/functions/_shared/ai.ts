@@ -214,6 +214,11 @@ function retryAfterMs(res: Response): number | undefined {
 // ---------------------------------------------------------------------------
 
 const OPTIONAL_DOWN_MS = envInt("AI_OPTIONAL_DOWN_MS", 60_000);
+// A HUNG optional backend is the third failure mode: measured 2026-10-02 after
+// deployment, the live FreeLLMAPI tunnel answered one health call in 0.96 s
+// and held the next past the 30 s attempt timeout. The proxy's healthy calls
+// take ~1 s, so 10 s bounds a hang without cutting off real answers.
+const OPTIONAL_ATTEMPT_TIMEOUT_MS = envInt("AI_OPTIONAL_TIMEOUT_MS", 10_000);
 const optionalDownUntil = new Map<string, number>();
 
 function backendKey(url: string): string {
@@ -250,7 +255,7 @@ async function geminiFetch(url: string, init: RequestInit, opts: { optional?: bo
     for (;;) {
       await geminiPace();
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), GEMINI_ATTEMPT_TIMEOUT_MS);
+      const timer = setTimeout(() => controller.abort(), opts.optional ? OPTIONAL_ATTEMPT_TIMEOUT_MS : GEMINI_ATTEMPT_TIMEOUT_MS);
       let res: Response;
       try {
         res = await fetch(url, { ...init, signal: controller.signal });
