@@ -36,3 +36,9 @@ node_modules/
 
 # Local Claude Code tooling (dev-server launch config, local settings)
 .claude/
+
+# Supabase CLI scratch (version pins, linked-project state)
+supabase/.temp/
+
+# Runtime state from scripts/start-search.sh (pids, tunnel + proxy logs)
+.searxng-run/
