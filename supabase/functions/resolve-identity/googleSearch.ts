@@ -1,26 +1,29 @@
 // ============================================================================
-// Google-index username discovery + event/flyer web discovery.
+// Web discovery: username leads + event/flyer location.
+//
+// ARCHITECTURE (rewritten): retrieval and reasoning are now separate jobs.
+//
+//   cache  ->  SearXNG (unmetered)  ->  Gemini (tool-free)  ->  [gated grounding]
+//
+// Previously this file asked a model to search the web for us (Gemini
+// google_search grounding / Anthropic web_search). That stopped working: the
+// grounding quota was exhausted, and on the free tier Gemini 3.x does not offer
+// grounding at all, so every discovery call that needed the open web failed.
+// Retrieval now goes through a self-hosted SearXNG instance — no API key, no
+// per-query cost — and the model only ever reasons over what SearXNG returned,
+// with no search tool attached. See _shared/search/pipeline.ts.
+//
+// The GOOGLE PROGRAMMABLE SEARCH path is retained but DISABLED BY DEFAULT
+// behind SEARCH_ENABLE_CSE=1. Google announced in January 2026 that the Custom
+// Search JSON API will be discontinued on 2027-01-01, and it has been closed to
+// new customers since 2025 — so it is a dead end even where a key still works.
 //
 // Finding a person's Lichess/Chess.com username from their real name must NOT
 // go through the platforms' own name search (autocomplete / handle guessing):
 // that finds the wrong homonym far too easily. Both platforms let public
-// profile pages be indexed by Google, and blogs/club pages/tournament flyers
-// often mention a real name next to a handle — so the trusted route is the
-// GOOGLE INDEX, queried with an escalating ladder of site-restricted searches:
-//
-//   1. site:lichess.org "John Smith"        (exact, site-restricted)
-//   2. site:chess.com "John Smith"
-//   3. unquoted + broad ("John Smith" lichess / chess.com)
-//   4. + identifying context (state, USCF, club/school, event name)
-//   5. profile-URL and cross-mention searches ("John Smith" "chess.com/member")
-//   6. partial names / username-reuse ("knownhandle" lichess)
-//
-// Two interchangeable backends:
-//   • Google Programmable Search JSON API (GOOGLE_CSE_KEY + GOOGLE_CSE_ID) —
-//     the literal Google index, queried directly, in parallel with pacing.
-//   • AI with live web search (Gemini google_search grounding / Anthropic
-//     web_search via _shared/ai.ts) — the model runs the same ladder and
-//     reports what the index shows. Used when no CSE key is configured.
+// profile pages be indexed, and blogs/club pages/tournament flyers often
+// mention a real name next to a handle — so the trusted route is a search
+// index, queried with an escalating ladder of site-restricted searches.
 //
 // Candidates returned here are LEADS, not identifications: the traversal
 // engine must verify each against the platform APIs (account exists, games in
@@ -28,7 +31,15 @@
 // trusting it. Runtime-agnostic: works in Deno (edge) and Node (CLI harness).
 // ============================================================================
 
-import { callAIWithSearch, readEnv, geminiQuotaCoolingDown } from "../_shared/ai.ts";
+import { readEnv } from "../_shared/ai.ts";
+import {
+  retrieve,
+  reasonOverHits,
+  expandQueries,
+  emergencyGroundedSearch,
+  parseJsonLoose,
+} from "../_shared/search/pipeline.ts";
+import { searxngConfigured, type SearchHit } from "../_shared/search/searxng.ts";
 
 export type WebPlatform = "chesscom" | "lichess";
 
@@ -55,19 +66,27 @@ export interface UsernameCandidate {
   username: string;
   /** The indexed page that ties the name to the handle, when known. */
   sourceUrl?: string;
-  /** Short human-readable why ("Google: site:lichess.org \"John Smith\""). */
+  /** Short human-readable why. */
   note?: string;
 }
 
 export interface UsernameSearchResult {
   candidates: UsernameCandidate[];
-  backend: "google-cse" | "ai-search" | "none";
+  /**
+   * Which backend answered. "searxng" is the normal path; "cache" is a repeat;
+   * "grounded-emergency" means the ledger-gated last resort actually ran.
+   */
+  backend: "searxng" | "cache" | "google-cse" | "grounded-emergency" | "none";
   queriesTried: number;
   note?: string;
-  /** True when discovery returned nothing because the AI search quota was
-   *  exhausted (429), NOT because the index had no match. Callers must treat
-   *  this differently from a clean empty result (retry later / lean on CSE). */
+  /**
+   * True when discovery returned nothing because a quota/budget was spent
+   * rather than because the index had no match. Callers must treat this
+   * differently from a clean empty result.
+   */
   quotaExhausted?: boolean;
+  /** True when SearXNG is simply not configured — an operator problem. */
+  retrievalUnavailable?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,10 +112,11 @@ function cleanName(name: string): string {
 }
 
 /**
- * The escalating ladder of Google queries for one person, in the order they
- * should be tried (most precise first). Mirrors the practical search order:
- * exact site-restricted → broad → +context → profile-URL forms → partial names
- * → username reuse.
+ * The escalating ladder of queries for one person, most precise first. This is
+ * hand-tuned domain knowledge and it is BETTER than asking a model to invent
+ * queries for this particular job — so username discovery feeds the ladder to
+ * SearXNG as seed queries and skips the model-expansion step entirely, which
+ * also removes one Gemini call per request.
  */
 export function buildQueryLadder(req: UsernameSearchRequest): string[] {
   const name = cleanName(req.name);
@@ -166,8 +186,8 @@ const LICHESS_PROFILE_RE = /lichess\.org\/@\/([A-Za-z0-9_-]{2,29})/gi;
 const CHESSCOM_PROFILE_RE = /chess\.com\/(?:member|members|player|players|stats\/live[a-z/]*)\/([A-Za-z0-9_-]{2,29})/gi;
 
 /** Path segments that regex-match a profile URL but are never usernames — plus
- *  chess titles, which the AI backend sometimes emits as a bare "username"
- *  (observed: it returned {"username":"GM A-Liang"} and {"username":"GM"}). */
+ *  chess titles, which a model sometimes emits as a bare "username"
+ *  (observed: {"username":"GM A-Liang"} and {"username":"GM"}). */
 const NOT_USERNAMES = new Set([
   "chess", "chesscom", "lichess", "member", "members", "player", "players",
   "login", "signup", "register", "settings", "search", "stats", "live",
@@ -177,7 +197,7 @@ const NOT_USERNAMES = new Set([
 function pushCandidate(out: UsernameCandidate[], seen: Set<string>, c: UsernameCandidate) {
   const uname = c.username.trim().replace(/^@+/, "");
   if (uname.length < 2 || uname.length > 29) return;
-  // Real Lichess/Chess.com handles are [A-Za-z0-9_-] only. The AI backend
+  // Real Lichess/Chess.com handles are [A-Za-z0-9_-] only. A model
   // occasionally returns a display-name string ("GM A-Liang") as the username —
   // a space (or any other char) means it isn't a handle, so drop it before it
   // wastes a verification round-trip.
@@ -206,38 +226,34 @@ export function extractCandidatesFromText(text: string, note?: string): Username
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Backend 1: Google Programmable Search JSON API (the literal index)
-// ---------------------------------------------------------------------------
-
-interface CseItem {
-  link?: string;
-  title?: string;
-  snippet?: string;
-}
-
-// When Google answers 429/403 (quota), stop hitting CSE for a while and let
-// the AI-search backend carry the load instead.
-let cseCooldownUntil = 0;
-
-async function cseQuery(query: string, key: string, cx: string, start = 1): Promise<CseItem[] | "quota"> {
-  const url =
-    `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(key)}` +
-    `&cx=${encodeURIComponent(cx)}&num=10&start=${start}&q=${encodeURIComponent(query)}`;
-  try {
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
-    if (res.status === 429 || res.status === 403) return "quota";
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data.items) ? (data.items as CseItem[]) : [];
-  } catch {
-    return [];
+/** Harvest handles straight out of the retrieved hits, with no model involved.
+ *  A profile URL in a result IS the evidence, so this costs nothing and cannot
+ *  hallucinate. The model pass then adds the cases where the handle is only in
+ *  prose ("... playing as @foo ..."). */
+function candidatesFromHits(hits: SearchHit[]): UsernameCandidate[] {
+  const out: UsernameCandidate[] = [];
+  const seen = new Set<string>();
+  for (const h of hits) {
+    const blob = `${h.url}\n${h.title}\n${h.content}`;
+    for (const c of extractCandidatesFromText(blob, `search: ${h.engine || "web"}`)) {
+      pushCandidate(out, seen, { ...c, sourceUrl: h.url });
+    }
   }
+  return out;
 }
 
-/** How many ladder queries also get a second result page. The right profile is
- *  often NOT on page one (namesakes crowd it out), so deep queries matter. */
-const CSE_PAGE2_QUERIES = 10;
+// ---------------------------------------------------------------------------
+// Google Programmable Search — retained, DISABLED BY DEFAULT
+//
+// Google announced (January 2026) that the Custom Search JSON API will be
+// discontinued on 2027-01-01, and it has been closed to new customers since
+// 2025. Enable with SEARCH_ENABLE_CSE=1 only if an existing key must be used
+// up; SearXNG is the supported path.
+// ---------------------------------------------------------------------------
+
+function cseEnabled(): boolean {
+  return readEnv("SEARCH_ENABLE_CSE") === "1";
+}
 
 async function searchViaCse(
   queries: string[],
@@ -248,94 +264,36 @@ async function searchViaCse(
   const out: UsernameCandidate[] = [];
   const seen = new Set<string>();
   let tried = 0;
-  let quotaHit = false;
-
-  // Page 1 of every ladder query, then page 2 of the most precise ones — the
-  // goal is MANY distinct candidates (verification happens downstream), never
-  // just the first hit.
-  const work: { q: string; start: number }[] = [
-    ...queries.map((q) => ({ q, start: 1 })),
-    ...queries.slice(0, CSE_PAGE2_QUERIES).map((q) => ({ q, start: 11 })),
-  ];
-
-  // Parallel workers, gently paced so Google doesn't block us.
-  const CONCURRENCY = 3;
-  const PACE_MS = 250;
-  let idx = 0;
-  let lastStart = 0;
-  const enough = () => out.length >= 30;
-  // Page-1 result counts, so a page-2 fetch is skipped when page 1 came back
-  // short — a start=11 request against a <10-result query is a guaranteed
-  // empty page that still costs a paced Google call.
-  const page1Count = new Map<string, number>();
-
-  await Promise.all(
-    Array.from({ length: Math.min(CONCURRENCY, work.length) }, async () => {
-      while (idx < work.length && !enough() && !quotaHit) {
-        const { q, start } = work[idx++];
-        if (start > 1) {
-          const got = page1Count.get(q);
-          if (got !== undefined && got < 10) continue; // page 1 was short — page 2 is empty
-        }
-        const wait = Math.max(0, lastStart + PACE_MS - Date.now());
-        lastStart = Math.max(Date.now(), lastStart + PACE_MS);
-        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-        tried++;
-        const items = await cseQuery(q, key, cx, start);
-        if (items === "quota") {
-          quotaHit = true;
-          cseCooldownUntil = Date.now() + 10 * 60_000;
-          log?.(`Google CSE quota hit — cooling down and switching to AI web search.`);
-          return;
-        }
-        if (start === 1) page1Count.set(q, items.length);
-        for (const item of items) {
-          const blob = `${item.link || ""}\n${item.title || ""}\n${item.snippet || ""}`;
-          for (const c of extractCandidatesFromText(blob, `Google: ${q}${start > 1 ? " (p2)" : ""}`)) {
-            pushCandidate(out, seen, { ...c, sourceUrl: item.link || c.sourceUrl });
-          }
+  for (const q of queries.slice(0, 10)) {
+    tried++;
+    try {
+      const url =
+        `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(key)}` +
+        `&cx=${encodeURIComponent(cx)}&num=10&q=${encodeURIComponent(q)}`;
+      const res = await fetch(url, { headers: { Accept: "application/json" } });
+      if (res.status === 429 || res.status === 403) {
+        log?.("Google CSE quota hit.");
+        return { candidates: out, queriesTried: tried, quotaHit: true };
+      }
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const item of (Array.isArray(data.items) ? data.items : []) as Array<Record<string, string>>) {
+        const blob = `${item.link || ""}\n${item.title || ""}\n${item.snippet || ""}`;
+        for (const c of extractCandidatesFromText(blob, `Google CSE: ${q}`)) {
+          pushCandidate(out, seen, { ...c, sourceUrl: item.link || c.sourceUrl });
         }
       }
-    })
-  );
-  return { candidates: out, queriesTried: tried, quotaHit };
+      if (out.length >= 30) break;
+    } catch {
+      /* one failed query never fails the ladder */
+    }
+  }
+  return { candidates: out, queriesTried: tried, quotaHit: false };
 }
 
 // ---------------------------------------------------------------------------
-// Backend 2: AI with live web search (Gemini grounding / Anthropic web_search)
+// Public entry — username discovery
 // ---------------------------------------------------------------------------
-
-function buildAiSearchPrompt(req: UsernameSearchRequest, queries: string[]): string {
-  const ctx: string[] = [`Real name: ${cleanName(req.name)}`];
-  const add = (label: string, v?: string | number) => {
-    if (v !== undefined && v !== null && `${v}`.trim?.() !== "") ctx.push(`${label}: ${v}`);
-  };
-  add("US state", req.state && (STATE_NAMES[req.state.toUpperCase()] || req.state));
-  add("City", req.city);
-  add("Club/School", req.clubOrSchool);
-  add("USCF rating (approx)", req.uscfRating);
-  add("FIDE ID", req.fideId);
-  add("Played USCF online event", req.eventName);
-  add("Event date", req.eventDate);
-  if (req.knownUsernames?.length) add("Known usernames elsewhere", req.knownUsernames.join(", "));
-
-  return `Find the Lichess and/or Chess.com USERNAME(S) of a specific chess player using Google-indexed pages. Their profile pages (lichess.org/@/<username>, chess.com/member/<username>) are often indexed, and club pages / tournament flyers / forum posts often mention the real name next to the handle.
-
-PLAYER:
-${ctx.join("\n")}
-
-Run web searches following this ladder (multiple query VARIATIONS, both platforms — do not settle for the first plausible hit; the correct account is often buried behind namesakes and appears only under a different query or deeper in the results):
-${queries.map((q, i) => `${i + 1}. ${q}`).join("\n")}
-
-Rules:
-- Collect EVERY distinct username the index ties to this person — main account, older accounts, and even same-name candidates that might be namesakes. Verification (ratings, games on the tournament dates) happens downstream; your job is a COMPLETE candidate list, up to 12 entries, not a single answer.
-- Only report usernames that an indexed page actually ties to the person or name (their name on the profile, or a page mentioning both the name and the handle). Do NOT invent or guess handles from the name — a username that merely LOOKS like the name (e.g. johnsmith) is worthless unless a page connects it to them; real players almost never use their real name as a handle.
-- Prefer exact profile URLs. Include the URL of the page that made the connection.
-- Rating sanity: their online rating should be roughly compatible with the USCF rating above (online is often a few hundred points lower). Note mismatches but still report the candidate.
-
-Return STRICT JSON only (no prose, no markdown fences):
-{"candidates":[{"platform":"lichess"|"chesscom","username":"handle","url":"page that ties name to handle","why":"one short sentence"}],"note":"one short sentence on overall findings"}`;
-}
 
 interface AiCandidateRow {
   platform?: unknown;
@@ -344,68 +302,12 @@ interface AiCandidateRow {
   why?: unknown;
 }
 
-async function searchViaAi(
-  req: UsernameSearchRequest,
-  queries: string[],
-  log?: (m: string) => void
-): Promise<{ candidates: UsernameCandidate[]; note?: string; ok: boolean; quota: boolean }> {
-  const ai = await callAIWithSearch(
-    "You are a research assistant who finds chess players' online usernames strictly from what Google-indexed web pages say. You never guess handles from a name. You output strict JSON only.",
-    buildAiSearchPrompt(req, queries),
-    1600,
-    { maxSearchUses: 8 }
-  );
-  if (!ai.ok) {
-    log?.(`AI web search unavailable (${ai.status}, backend ${ai.backend || "?"}): ${ai.error || "no detail"}`);
-    return { candidates: [], ok: false, quota: ai.status === 429 };
-  }
-  log?.(`AI web search served by ${ai.backend || "unknown backend"}`);
-
-  const out: UsernameCandidate[] = [];
-  const seen = new Set<string>();
-  let note: string | undefined;
-
-  try {
-    const s = ai.text.replace(/```(?:json)?/gi, "").trim();
-    const start = s.indexOf("{");
-    const end = s.lastIndexOf("}");
-    if (start !== -1 && end > start) {
-      const parsed = JSON.parse(s.slice(start, end + 1));
-      if (typeof parsed.note === "string") note = parsed.note.slice(0, 300);
-      if (Array.isArray(parsed.candidates)) {
-        for (const row of parsed.candidates as AiCandidateRow[]) {
-          const p = typeof row.platform === "string" ? row.platform.toLowerCase().replace(/[^a-z]/g, "") : "";
-          const platform: WebPlatform | null = p.includes("lichess") ? "lichess" : p.includes("chess") ? "chesscom" : null;
-          const username = typeof row.username === "string" ? row.username.trim() : "";
-          if (!platform || !username) continue;
-          pushCandidate(out, seen, {
-            platform,
-            username,
-            sourceUrl: typeof row.url === "string" ? row.url : undefined,
-            note: typeof row.why === "string" ? `Google: ${row.why.slice(0, 160)}` : "Google index (AI web search)",
-          });
-        }
-      }
-    }
-  } catch {
-    /* fall through to regex extraction */
-  }
-  // Regex-scan the whole answer too — grounded replies often cite profile URLs
-  // outside the JSON.
-  for (const c of extractCandidatesFromText(ai.text, "Google index (cited URL)")) pushCandidate(out, seen, c);
-  return { candidates: out, note, ok: true, quota: false };
-}
-
-// ---------------------------------------------------------------------------
-// Public entry — the ladder, CSE first, AI fallback
-// ---------------------------------------------------------------------------
+const USERNAME_SCHEMA = `{"candidates":[{"platform":"lichess"|"chesscom","username":"handle","url":"the result URL that ties name to handle","result_index":0,"why":"one short sentence"}],"note":"one short sentence"}`;
 
 // Memoized per person+context for the life of the (warm) process: the
 // traversal asks about the same member from several events and the resolver's
-// own fallback repeats the traversal's query — each repeat used to re-run the
-// whole ladder (up to ~30 paced CSE fetches or an AI web-search call).
-// Quota/failure results are NOT memoized, so a later call can retry once the
-// cooldown lifts.
+// own fallback repeats the traversal's query. Failure/quota results are NOT
+// memoized, so a later call can retry.
 const usernameSearchMemo = new Map<string, Promise<UsernameSearchResult>>();
 
 export function findUsernamesOnWeb(
@@ -428,7 +330,7 @@ export function findUsernamesOnWeb(
     (r) => {
       // Only a completed search (hits, or a clean whole-ladder miss) is a
       // stable answer worth remembering.
-      if (!r.candidates.length && (r.quotaExhausted || r.backend === "none")) usernameSearchMemo.delete(key);
+      if (!r.candidates.length && (r.quotaExhausted || r.retrievalUnavailable)) usernameSearchMemo.delete(key);
     },
     () => usernameSearchMemo.delete(key)
   );
@@ -442,47 +344,139 @@ async function findUsernamesOnWebUncached(
   const queries = buildQueryLadder(req);
   if (!queries.length) return { candidates: [], backend: "none", queriesTried: 0 };
 
-  const cseKey = readEnv("GOOGLE_CSE_KEY") || readEnv("GOOGLE_SEARCH_KEY");
-  const cseCx = readEnv("GOOGLE_CSE_ID") || readEnv("GOOGLE_SEARCH_CX");
+  const name = cleanName(req.name);
+  const context = {
+    "Real name": name,
+    "US state": req.state && (STATE_NAMES[req.state.toUpperCase()] || req.state),
+    City: req.city,
+    "Club/School": req.clubOrSchool,
+    "USCF rating (approx)": req.uscfRating,
+    "FIDE ID": req.fideId,
+    "Played USCF online event": req.eventName,
+    "Event date": req.eventDate,
+    "Known usernames elsewhere": req.knownUsernames?.length ? req.knownUsernames.join(", ") : undefined,
+  };
 
-  // CSE FIRST — the literal index with its own (separate) quota. The AI
-  // backend is the escalation, not the default.
-  let cseCleanMiss = false; // CSE searched the whole ladder and found nothing
-  if (cseKey && cseCx && Date.now() > cseCooldownUntil) {
-    const cse = await searchViaCse(queries, cseKey, cseCx, log);
-    if (cse.candidates.length) {
-      return { candidates: rankForPlatforms(cse.candidates, req.platforms), backend: "google-cse", queriesTried: cse.queriesTried };
+  // --- cache + SearXNG retrieval (the ladder is the seed; no expansion call)
+  const got = await retrieve({
+    intent: `Find the Lichess and/or Chess.com username of the chess player ${name}`,
+    context,
+    seedQueries: queries.slice(0, 8),
+    // An identity resolution is permanent: a USCF member mapped to a handle
+    // does not change, so this is cached forever rather than for 30 days.
+    cacheKind: "identity",
+    maxResults: 25,
+    log,
+  });
+
+  if (!got.hits.length) {
+    // Optional CSE sweep, only if an operator deliberately enabled it.
+    const cseKey = readEnv("GOOGLE_CSE_KEY") || readEnv("GOOGLE_SEARCH_KEY");
+    const cseCx = readEnv("GOOGLE_CSE_ID") || readEnv("GOOGLE_SEARCH_CX");
+    if (cseEnabled() && cseKey && cseCx) {
+      const cse = await searchViaCse(queries, cseKey, cseCx, log);
+      if (cse.candidates.length) {
+        return {
+          candidates: rankForPlatforms(cse.candidates, req.platforms),
+          backend: "google-cse",
+          queriesTried: cse.queriesTried,
+        };
+      }
     }
-    cseCleanMiss = !cse.quotaHit;
-    // Zero hits (or quota): escalate to AI search, which reads pages rather
-    // than just result snippets and can follow context.
-  }
-
-  // Cooldown fast-fail: once the AI-search quota is PROVEN exhausted, don't
-  // re-hit the wall for every seed in the burst — fail fast and say WHY, so
-  // callers can distinguish "quota" from "the index has no match".
-  if (geminiQuotaCoolingDown()) {
-    log?.("AI web search cooling down after quota exhaustion — skipping (not a no-match).");
+    if (!searxngConfigured()) {
+      return {
+        candidates: [],
+        backend: "none",
+        queriesTried: 0,
+        retrievalUnavailable: true,
+        note: "SearXNG is not configured (set SEARXNG_URL/SEARXNG_LOCAL_URL + SEARXNG_TOKEN)",
+      };
+    }
+    // --- step 5: emergency grounding, ledger-gated. Returns null when the
+    // budget is spent, which is an honest "could not search", not "no match".
+    const emergency = await emergencyGroundedSearch(
+      "You find chess players' online usernames strictly from what web pages say. You never guess handles from a name. You output strict JSON only.",
+      `Find the Lichess and/or Chess.com username(s) of this player.\n\n${Object.entries(context)
+        .filter(([, v]) => v !== undefined && v !== null && `${v}` !== "")
+        .map(([k, v]) => `${k}: ${v}`)
+        .join("\n")}\n\nReturn STRICT JSON only:\n${USERNAME_SCHEMA}`,
+      1600,
+      log
+    );
+    if (!emergency) {
+      return {
+        candidates: [],
+        backend: "none",
+        queriesTried: got.queries.length,
+        quotaExhausted: true,
+        note: "retrieval found nothing and the grounding budget is spent",
+      };
+    }
+    const cands = collectFromModelText(emergency.text);
     return {
-      candidates: [],
-      backend: "none",
-      queriesTried: 0,
-      quotaExhausted: !cseCleanMiss,
-      note: cseCleanMiss ? "CSE found no match; AI search quota exhausted" : "AI search quota exhausted (cooling down)",
+      candidates: rankForPlatforms(cands, req.platforms),
+      backend: "grounded-emergency",
+      queriesTried: got.queries.length,
     };
   }
 
-  const ai = await searchViaAi(req, queries, log);
+  // --- free, non-hallucinable pass: handles visible in the results themselves
+  const direct = candidatesFromHits(got.hits);
+
+  // --- step 3: model extraction for handles that only appear in prose
+  const reasoned = await reasonOverHits<{ candidates?: AiCandidateRow[]; note?: string }>(
+    `Identify every distinct Lichess or Chess.com username that the search results below tie to this specific person. Collect ALL of them — main account, older accounts, and same-name candidates that might be namesakes; verification happens downstream, so a COMPLETE list (up to 12) matters more than a single answer. A username that merely LOOKS like the name (e.g. johnsmith) is worthless unless a result connects it to them; real players rarely use their real name as a handle.`,
+    USERNAME_SCHEMA,
+    got.hits,
+    { maxTokens: 1600, context, log }
+  );
+
+  const merged: UsernameCandidate[] = [];
+  const seen = new Set<string>();
+  for (const c of direct) pushCandidate(merged, seen, c);
+  if (reasoned.data?.candidates && Array.isArray(reasoned.data.candidates)) {
+    for (const row of reasoned.data.candidates) {
+      const p = typeof row.platform === "string" ? row.platform.toLowerCase().replace(/[^a-z]/g, "") : "";
+      const platform: WebPlatform | null = p.includes("lichess") ? "lichess" : p.includes("chess") ? "chesscom" : null;
+      const username = typeof row.username === "string" ? row.username.trim() : "";
+      if (!platform || !username) continue;
+      pushCandidate(merged, seen, {
+        platform,
+        username,
+        sourceUrl: typeof row.url === "string" ? row.url : undefined,
+        note: typeof row.why === "string" ? `search: ${row.why.slice(0, 160)}` : "search result (model-extracted)",
+      });
+    }
+  }
+  // Regex-scan the raw answer too — replies often cite URLs outside the JSON.
+  if (reasoned.raw) for (const c of extractCandidatesFromText(reasoned.raw, "cited URL")) pushCandidate(merged, seen, c);
+
   return {
-    candidates: rankForPlatforms(ai.candidates, req.platforms),
-    backend: ai.ok ? "ai-search" : "none",
-    queriesTried: queries.length,
-    note: ai.note,
-    // Honest empty-result semantics: only claim "no match" when a search
-    // actually completed. If the AI path died on quota AND CSE didn't cleanly
-    // cover the ladder, the truth is "couldn't search", not "not found".
-    quotaExhausted: !ai.ok && ai.quota && !cseCleanMiss ? true : undefined,
+    candidates: rankForPlatforms(merged, req.platforms),
+    backend: got.fromCache ? "cache" : "searxng",
+    queriesTried: got.queries.length,
+    note: typeof reasoned.data?.note === "string" ? reasoned.data.note.slice(0, 300) : undefined,
   };
+}
+
+function collectFromModelText(text: string): UsernameCandidate[] {
+  const out: UsernameCandidate[] = [];
+  const seen = new Set<string>();
+  const parsed = parseJsonLoose<{ candidates?: AiCandidateRow[] }>(text);
+  for (const row of parsed?.candidates || []) {
+    const p = typeof row.platform === "string" ? row.platform.toLowerCase().replace(/[^a-z]/g, "") : "";
+    const platform: WebPlatform | null = p.includes("lichess") ? "lichess" : p.includes("chess") ? "chesscom" : null;
+    const username = typeof row.username === "string" ? row.username.trim() : "";
+    if (!platform || !username) continue;
+    pushCandidate(out, seen, {
+      platform,
+      username,
+      sourceUrl: typeof row.url === "string" ? row.url : undefined,
+      note: "grounded emergency search",
+    });
+  }
+  for (const c of extractCandidatesFromText(text, "grounded emergency (cited URL)")) pushCandidate(out, seen, c);
+  return out;
 }
 
 /** Requested-platform candidates first, preserving discovery order. */
@@ -493,8 +487,8 @@ function rankForPlatforms(cands: UsernameCandidate[], platforms?: WebPlatform[])
 }
 
 // ---------------------------------------------------------------------------
-// Event/flyer discovery (moved here so the Node CLI can use it too): which
-// platform hosted a USCF online event, ideally with the exact tournament page.
+// Public entry — event/flyer discovery: which platform hosted a USCF online
+// event, ideally with the exact tournament page.
 // ---------------------------------------------------------------------------
 
 export interface DiscoverEventRequest {
@@ -531,8 +525,7 @@ function collectMatches(re: RegExp, text: string): string[] {
 }
 
 // Memoized per event for the life of the (warm) process: the answer to "where
-// was this 2020 tournament hosted" never changes, and each miss costs a full
-// grounded AI web-search call. Failures are not memoized (retryable).
+// was this 2020 tournament hosted" never changes. Failures are not memoized.
 const discoverEventMemo = new Map<string, Promise<DiscoveredEventInfo | null>>();
 
 export function discoverEventOnWeb(ev: DiscoverEventRequest): Promise<DiscoveredEventInfo | null> {
@@ -543,65 +536,67 @@ export function discoverEventOnWeb(ev: DiscoverEventRequest): Promise<Discovered
   discoverEventMemo.set(key, p);
   void p.then(
     (r) => {
-      if (r === null) discoverEventMemo.delete(key); // AI failure/quota — retryable
+      if (r === null) discoverEventMemo.delete(key); // retryable
     },
     () => discoverEventMemo.delete(key)
   );
   return p;
 }
 
+const EVENT_SCHEMA = `{"platform":"chesscom"|"lichess"|"chesskid"|"icc"|"unknown","urls":["tournament/flyer URLs found in the results"],"result_index":0,"confidence":0.0,"note":"one short sentence"}`;
+
 async function discoverEventOnWebUncached(ev: DiscoverEventRequest): Promise<DiscoveredEventInfo | null> {
   const name = (ev.name || "").trim();
   if (!name) return null;
 
-  const lines = [
-    `Name: ${name}`,
-    ev.sectionName ? `Section: ${ev.sectionName}` : "",
-    ev.startDate ? `Dates: ${ev.startDate}${ev.endDate && ev.endDate !== ev.startDate ? ` to ${ev.endDate}` : ""}` : "",
-    ev.ratingSystem ? `US Chess rating system: ${ev.ratingSystem} (online-rated)` : "",
-    ev.timeControl ? `Time control: ${ev.timeControl}` : "",
-  ].filter(Boolean);
+  const context = {
+    Name: name,
+    Section: ev.sectionName,
+    Dates: ev.startDate
+      ? `${ev.startDate}${ev.endDate && ev.endDate !== ev.startDate ? ` to ${ev.endDate}` : ""}`
+      : undefined,
+    "US Chess rating system": ev.ratingSystem ? `${ev.ratingSystem} (online-rated)` : undefined,
+    "Time control": ev.timeControl,
+  };
 
-  const prompt = `A US Chess (USCF) rated ONLINE tournament needs to be located on the web. Figure out which platform hosted the games — chess.com, lichess, chesskid or ICC — and if at all possible find the EXACT tournament page.
+  // Here the model DOES write the queries: unlike username discovery there is
+  // no hand-tuned ladder for "where was this event hosted", and organiser/club
+  // names buried in an event title make good search terms that are hard to
+  // template.
+  const intent = `Find which platform hosted the US Chess (USCF) rated ONLINE tournament "${name}" — chess.com, lichess, chesskid or ICC — and the exact tournament page if possible. USCF online events (mostly 2020-2021) usually say "played on Chess.com" or "hosted on lichess.org" in a flyer, TLA or results page.`;
 
-EVENT:
-${lines.join("\n")}
+  const got = await retrieve({ intent, context, cacheKind: "web", maxResults: 20 });
+  if (!got.hits.length) return null;
 
-Search for the event's flyer, TLA (Tournament Life Announcement), club announcement/website, or results page. USCF online events (mostly 2020-2021) almost always say "played on Chess.com" or "hosted on lichess.org", and often link the tournament directly (chess.com/tournament/..., lichess.org/swiss/... or lichess.org/tournament/...). Organiser/club names inside the event name are strong search terms.
-
-Return STRICT JSON only (no prose, no markdown fences):
-{"platform":"chesscom"|"lichess"|"chesskid"|"icc"|"unknown","urls":["any tournament/flyer URLs found"],"confidence":0.0-1.0,"note":"one short sentence on what you found"}`;
-
-  const ai = await callAIWithSearch(
-    "You are a research assistant locating where US Chess online-rated tournaments were hosted. You search the web, answer only from what you find, and output strict JSON.",
-    prompt,
-    1200
+  const reasoned = await reasonOverHits<{
+    platform?: unknown;
+    urls?: unknown;
+    confidence?: unknown;
+    note?: unknown;
+  }>(
+    `Determine which platform hosted this tournament and extract any tournament or flyer URLs.`,
+    EVENT_SCHEMA,
+    got.hits,
+    { maxTokens: 900, context }
   );
-  if (!ai.ok) return null;
 
-  // Parse the JSON answer, but also regex-scan the WHOLE response for platform
-  // URLs — grounded answers sometimes cite links outside the JSON.
-  let platform: DiscoveredEventInfo["platform"];
-  let confidence: number | undefined;
-  let note: string | undefined;
-  let urlText = ai.text;
-  try {
-    const s = ai.text.replace(/```(?:json)?/gi, "").trim();
-    const start = s.indexOf("{");
-    const end = s.lastIndexOf("}");
-    if (start !== -1 && end > start) {
-      const parsed = JSON.parse(s.slice(start, end + 1));
-      if (typeof parsed.platform === "string") {
-        const p = parsed.platform.toLowerCase().replace(/[^a-z]/g, "");
-        if (["chesscom", "lichess", "chesskid", "icc"].includes(p)) platform = p as DiscoveredEventInfo["platform"];
-      }
-      if (typeof parsed.confidence === "number") confidence = Math.max(0, Math.min(1, parsed.confidence));
-      if (typeof parsed.note === "string") note = parsed.note.slice(0, 300);
-      if (Array.isArray(parsed.urls)) urlText += "\n" + parsed.urls.filter((u: unknown) => typeof u === "string").join("\n");
-    }
-  } catch {
-    /* fall through to regex-only parsing */
+  // Regex-scan BOTH the model's answer and the raw hits — a tournament link is
+  // self-evidencing, so it counts whether or not the model reported it.
+  let urlText = reasoned.raw || "";
+  for (const h of got.hits) urlText += `\n${h.url}\n${h.content}`;
+  if (Array.isArray(reasoned.data?.urls)) {
+    urlText += "\n" + (reasoned.data!.urls as unknown[]).filter((u) => typeof u === "string").join("\n");
   }
+
+  let platform: DiscoveredEventInfo["platform"];
+  const praw = typeof reasoned.data?.platform === "string" ? reasoned.data.platform.toLowerCase().replace(/[^a-z]/g, "") : "";
+  if (["chesscom", "lichess", "chesskid", "icc"].includes(praw)) {
+    platform = praw as DiscoveredEventInfo["platform"];
+  }
+  const confidence = typeof reasoned.data?.confidence === "number"
+    ? Math.max(0, Math.min(1, reasoned.data.confidence))
+    : undefined;
+  const note = typeof reasoned.data?.note === "string" ? reasoned.data.note.slice(0, 300) : undefined;
 
   const chesscomSlugs = collectMatches(CHESSCOM_TOURNAMENT_RE, urlText);
   const lichessSwissIds = collectMatches(LICHESS_SWISS_RE, urlText);
@@ -614,3 +609,7 @@ Return STRICT JSON only (no prose, no markdown fences):
   if (!platform && !chesscomSlugs.length && !lichessSwissIds.length && !lichessArenaIds.length) return null;
   return { platform, chesscomSlugs, lichessSwissIds, lichessArenaIds, confidence, note };
 }
+
+/** Re-exported so callers that only need query expansion don't reach past this
+ *  module into the pipeline internals. */
+export { expandQueries };

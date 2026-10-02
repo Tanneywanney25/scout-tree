@@ -25,7 +25,7 @@
 // Node CLI), same as googleSearch.ts / uscf.ts.
 // ============================================================================
 
-import { callAIWithSearch, geminiQuotaCoolingDown } from "../_shared/ai.ts";
+import { retrieve, reasonOverHits } from "../_shared/search/pipeline.ts";
 import { readChesscomSessionCookie } from "../_shared/chessCookie.ts";
 import {
   EXTERNAL_ADAPTERS,
@@ -369,34 +369,44 @@ interface AiSchoolRow {
   note?: unknown;
 }
 
-function buildSchoolSearchPrompt(req: SchoolLookupRequest): string {
-  const stateName = req.state ? STATE_NAMES[req.state.toUpperCase()] || req.state : undefined;
-  const hints = req.state ? STATE_SOURCE_HINTS[req.state.toUpperCase()] || [] : [];
-  const ctx: string[] = [`Full name: ${req.name}`];
-  if (stateName) ctx.push(`US state: ${stateName}`);
-  if (req.city) ctx.push(`City: ${req.city}`);
-  if (req.uscfRating) ctx.push(`USCF rating (approx): ${req.uscfRating}`);
-  if (req.uscfId) ctx.push(`USCF member ID: ${req.uscfId}`);
+/**
+ * Concrete search queries for "which school does this player attend".
+ *
+ * These are the five angles the old grounded prompt asked a model to try, now
+ * expressed as real queries so SearXNG can run them directly. That is both
+ * cheaper (no model call to invent queries) and better: the per-state source
+ * domains in STATE_SOURCE_HINTS are hard-won domain knowledge that a model
+ * would not reproduce, and a site: restriction against the right state
+ * affiliate is far more precise than anything it would guess.
+ */
+function buildSchoolQueryLadder(req: SchoolLookupRequest): string[] {
+  const name = req.name.replace(/\s+/g, " ").replace(/["',]/g, "").trim();
+  if (!name) return [];
+  const stateCode = req.state ? req.state.trim().toUpperCase() : undefined;
+  const stateName = stateCode ? STATE_NAMES[stateCode] || stateCode : undefined;
+  const hints = stateCode ? STATE_SOURCE_HINTS[stateCode] || [] : [];
 
-  return `Find the SCHOOL (K-12 school, or the college/university for an adult) that a specific US chess player attends or attended. This is used to locate their schoolmates, so a current or recent school is what matters.
+  const q: string[] = [];
+  const push = (s: string) => {
+    const t = s.replace(/\s+/g, " ").trim();
+    if (t && !q.includes(t)) q.push(t);
+  };
 
-PLAYER:
-${ctx.join("\n")}
-
-Search the open web, trying these angles (do not stop at the first plausible hit — corroborate the state):
-1. State scholastic chess results / crosstables that print name + school together${hints.length ? ` (try: ${hints.join(", ")})` : ""}.
-2. State high-school activity-association chess rosters (team by school, board order).
-3. Tournament registration / advance-entry lists (KingRegistration, caissachess.net, Tri-State Chess, officialchess.org) — these show name + school + section.
-4. LinkedIn: site:linkedin.com/in "${req.name}"${stateName ? ` ${stateName}` : ""} — the Education section, or the Google snippet, often states a school even without login.
-5. Other indexed pages that tie the name to a school: youth sports / running / robotics / debate rosters, honor rolls, news, club pages. Many list the athlete's school outright.
-
-Rules:
-- Only report a school an indexed page ACTUALLY ties to THIS person (same name, and same state when the state is known). Do not guess a school from the city.
-- If the state you find contradicts the known state above, do NOT report it.
-- Report every distinct well-supported school (current first), up to 4.
-
-Return STRICT JSON only (no prose, no markdown fences):
-{"schools":[{"school":"Full School Name","state":"2-letter","source":"linkedin|state-assoc|registration|web","url":"page that ties name to school","confidence":0.0-1.0,"note":"one short sentence"}]}`;
+  // 1. The state affiliate / scholastic sources that print name + school.
+  for (const h of hints.slice(0, 3)) {
+    if (h.includes(".")) push(`site:${h} "${name}"`);
+    else push(`"${name}" ${h}`);
+  }
+  // 2. LinkedIn education section — often readable from the snippet alone.
+  push(`site:linkedin.com/in "${name}"${stateName ? ` ${stateName}` : ""}`);
+  // 3. Scholastic results / rosters naming the school next to the player.
+  push(`"${name}" chess school${stateName ? ` ${stateName}` : ""}`);
+  push(`"${name}" scholastic chess "high school"${stateName ? ` ${stateName}` : ""}`);
+  // 4. Registration / advance-entry lists show name + school + section.
+  push(`"${name}" chess registration school`);
+  // 5. Any indexed roster that states a school outright.
+  push(`"${name}" roster school${stateName ? ` ${stateName}` : ""}`);
+  return q.slice(0, 8);
 }
 
 /** Map an AI "source" string to our SchoolSource enum. */
@@ -408,22 +418,49 @@ function aiSourceKind(s: unknown): SchoolAffiliation["source"] {
   return "web";
 }
 
+const SCHOOL_SCHEMA = `{"schools":[{"school":"Full School Name","state":"2-letter","source":"linkedin|state-assoc|registration|web","url":"result URL that ties name to school","result_index":0,"confidence":0.0,"note":"one short sentence"}]}`;
+
 async function webFindSchool(req: SchoolLookupRequest, log: (m: string) => void): Promise<SchoolAffiliation[]> {
-  if (geminiQuotaCoolingDown()) {
-    log("School web search: AI quota cooling down — skipping (not a no-match).");
+  // Retrieval is free (SearXNG) and the model never searches — so unlike the
+  // old grounded version there is no quota to cool down on before we even try,
+  // and a cached result can answer with no model call at all.
+  const context = {
+    "Player name": req.name,
+    "US state": req.state,
+    "USCF rating": (req as { uscfRating?: number }).uscfRating,
+  };
+  const got = await retrieve({
+    intent: `Find which school (high school, middle school, or academy) the chess player ${req.name} attends, from public pages such as state scholastic-association results, tournament registrations, club pages or public LinkedIn snippets.`,
+    context,
+    // The hand-built ladder beats model-invented queries here, and skipping
+    // expansion removes one Gemini call per school lookup.
+    seedQueries: buildSchoolQueryLadder(req),
+    cacheKind: "web",
+    maxResults: 20,
+    log,
+  });
+  if (!got.hits.length) {
+    log("School web search: retrieval returned nothing (SearXNG unavailable or no indexed match).");
     return [];
   }
-  const ai = await callAIWithSearch(
-    "You are a research assistant who finds which school a chess player attends, strictly from what public web pages state. You never guess; you corroborate the state; you output strict JSON only.",
-    buildSchoolSearchPrompt(req),
-    1400,
-    { maxSearchUses: 8 }
+  const reasoned = await reasonOverHits<unknown>(
+    "Identify which school this chess player attends. Corroborate the state: a same-name person in a different state is a classic false lead, so report the state you found and never override the known one.",
+    SCHOOL_SCHEMA,
+    got.hits,
+    { maxTokens: 1400, context, log }
   );
+  // Shim so the established parsing below is untouched.
+  const ai = {
+    ok: reasoned.ok || !!reasoned.raw,
+    text: reasoned.raw,
+    status: reasoned.status,
+    backend: got.fromCache ? "cache" : "searxng",
+  };
   if (!ai.ok) {
-    log(`School web search unavailable (${ai.status}, backend ${ai.backend || "?"}).`);
+    log(`School web search unavailable (${ai.status}, backend ${ai.backend}).`);
     return [];
   }
-  log(`School web search served by ${ai.backend || "unknown backend"}.`);
+  log(`School web search served by ${ai.backend} (${got.hits.length} hits).`);
 
   const out: SchoolAffiliation[] = [];
   try {
