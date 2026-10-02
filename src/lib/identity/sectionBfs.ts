@@ -263,7 +263,7 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
   const harvestPromises: Promise<void>[] = [];
   /** Wait (briefly) for in-flight harvest writes so the result can report them. */
   const end = async (t: SectionBfsResult["terminatedBy"]): Promise<SectionBfsResult> => {
-    await Promise.race([Promise.allSettled(harvestPromises), new Promise((r) => setTimeout(r, 20_000))]);
+    await Promise.race([Promise.allSettled(harvestPromises), new Promise((r) => setTimeout(r, 8_000))]);
     return finish(t);
   };
 
@@ -511,7 +511,9 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
     sectionsWalked++;
   }
   await drainBacktracks();
-  await restOfRanking;
+  // The rest of the ranking only feeds the next level; a found target must
+  // not wait for it (smoke run: 25 s of footprint fetches after the match).
+  if (!found && !stopped()) await restOfRanking;
 
   // ---- Levels 1..maxLevel ---------------------------------------------------
   const maxLevel = opts.maxLevel ?? 4;
