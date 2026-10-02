@@ -66,6 +66,8 @@ Running log, in order. "Production" means the Supabase project
 | P10 | ~23:25 | Deployed `explain-move` and `training-hint` from this branch (version 62 each). Their own code is unchanged; they import `_shared/ai.ts`, so this gives them the optional-proxy fail-fast. Without it, a dead tunnel would cost each call 25 s. Both boot (OPTIONS 200). | `gh workflow run deploy-supabase-functions.yml --ref main` |
 | P11 | end of session | **`AI_PROXY_BASE_URL` left set** to the quick tunnel (cloudflared pid 44944, alive at 23:25: `/v1/models` 401 in 0.8 s). It dies with this laptop. Every function that reads it now fails fast (one ≤ 10 s attempt, then a 60 s skip), and query mode waits at most 3 s for AI. Direct Gemini was answering 429 (quota) at 20:5x. | `supabase secrets unset AI_PROXY_BASE_URL` |
 
+**Credentials.** Before the first commit I scanned the diff and every tracked file for secret-key patterns (`sb_secret_`, `AIza…`, `sk-…`, JWTs, password assignments): none. The publishable key in `src/integrations/supabase/client.ts` is public by design. The probe function's token existed only in the scratchpad and in the deleted function. Scratch scripts live in the session scratchpad, outside the repository.
+
 Nothing else in production was changed: no other secret, no auth setting, no function other than the three above, no data outside the tables listed.
 
 ## Phase 0 — Environment
@@ -400,7 +402,7 @@ the measurement that would tell whether the order is right.
   opponents plus the first 30 section-mates and streams the rest while the
   engine works, re-reading ranks at every seed pick (`18b49e7`). In the first
   smoke run, ranking 61 section-mates up front took **59 s**; after the change
-  the second smoke run started platform work **11 s** after ranking began.
+  the second smoke run started platform work **12 s** after ranking began.
 
 ### 2.4 Search quota as an explicit budget (`921c662`)
 
@@ -911,9 +913,18 @@ power 0.8).
    session transcript.
 7. **Mis-read elapsed time once** and checked on a run that had only been going
    two minutes.
-8. **Heredoc edits failed silently three times** in this shell (content with
-   apostrophes and `$` sequences); one of them half-applied nothing and I
-   caught it before committing. I moved to writing edit files with the editor.
+8. **Heredoc edits failed three times** in this shell (content with
+   apostrophes and `$` sequences). Each failed loudly and applied nothing, and
+   I moved to writing edit files with the editor.
+9. **The first-resolved-pivot-rank metric was wrong for the whole acceptance
+   run** (every value read 1): the rank was read after the member had been
+   marked known. Fixed in `5459748`; that measurement (brief 2.4) is lost.
+10. **The acceptance runner hit the 2-hour background limit** during the
+    repeat pass; repeats for #28 onward were not run. All 35 first runs
+    completed.
+11. **The 25-minute runaway guard in the harness is a clock.** The brief rules
+    out a clock as termination; the product path has none, but the harness
+    needed one to finish. It fired twice (#6, #22), both on the Lichess wedge.
 
 ## What remains undetermined
 
