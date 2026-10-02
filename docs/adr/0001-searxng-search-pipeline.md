@@ -90,7 +90,12 @@ A production dependency on a laptop, a Docker container, and a Cloudflare quick
 tunnel whose hostname is discarded on every restart is not acceptable, and the
 engines cap throughput below one lookup per hour regardless. Five tunnel
 hostnames died during development; two had to be re-registered by hand in a
-single day.
+single day. Note the actual failure mode, which is easy to get wrong: a
+`cloudflared` process outlives the shell that started it and keeps serving, so
+a tunnel does not die when its parent task ends. It dies when it loses edge
+registration — after which it retry-loops forever and its hostname is gone for
+good. Four such processes were found alive but serving nothing at the start of
+this session.
 
 Three things follow, and are not optional:
 
@@ -102,7 +107,16 @@ Three things follow, and are not optional:
    an unreachable optional backend fail in one attempt rather than burning the
    retry budget. This is the largest measured win available and is independent
    of the branch.
-3. **If any part of the pipeline is revived, revive `discoverEventOnWeb` only.**
+3. **Fix two diagnostics before any revival.** `search_cache` identity rows are
+   permanent with no sweeper (`_shared/search/store.ts`), reproducing the
+   `resolved_handles` defect this branch criticises. And `googleSearch.ts`
+   reports `quotaExhausted: true` whenever grounding is unavailable, but
+   `groundingAllowed()` returns false for three different reasons — disabled by
+   policy (`cap === 0`), ledger unreachable, or actually exhausted. With the cap
+   deliberately at 0, every empty retrieval now blames the quota when the real
+   cause is engine suspension. Observed 2026-10-02: tunnel up, shim up,
+   container up, engines suspended, and the API said `quotaExhausted: true`.
+4. **If any part of the pipeline is revived, revive `discoverEventOnWeb` only.**
    Host pinning is the gap with no deterministic substitute for organizers who
    run no Lichess team. `findUsernamesOnWeb` was 85% of the call volume and
    contributed nothing measurable; better seeds already exist, ranked, with
