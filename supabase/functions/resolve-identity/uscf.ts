@@ -143,32 +143,45 @@ export interface OnlineSection {
 // Low-level fetch with timeout + light retry (429 / 5xx / network)
 // ---------------------------------------------------------------------------
 
-// MUIR rate-limits bursts; space requests out so a graph build (which can make
-// dozens of section/standings calls) stays under its limiter. The pacing is
-// ADAPTIVE: a light 50ms base gap (measured: 36 requests at 6-concurrent with
-// no gap at all drew zero 429s, median 135ms) that backs off hard the moment
-// MUIR pushes back with a 429 and decays back to the base as calls succeed.
-// The old fixed 160ms gap serialized every graph build at ~6 req/s even when
-// MUIR was perfectly happy — the single biggest cost of building tournament
-// graphs and of ranking pivot candidates (each candidate is a full build).
-const MUIR_BASE_GAP_MS = 50;
-const MUIR_MAX_GAP_MS = 2_000;
-let muirGapMs = MUIR_BASE_GAP_MS;
-let muirNextSlot = 0;
+// MUIR allows about 100 requests per minute per address. Measured
+// 2026-10-02 from fresh edge addresses: a 429 on exactly request 101 at 3/s,
+// 5/s and 10/s alike, and 201 requests at 1.6/s with none; from a laptop, a
+// lockout of 18–21 s after tripping it (docs/traversal-implementation.md,
+// Phase 1). The old pacer's 50 ms base gap (20/s) assumed "3–5 req/s
+// sustained", which only holds for bursts under ~20 s.
+//
+// So: a token bucket of 30 refilling 1.25/s (75 a minute, a quarter under the
+// wall) per isolate, and a 429 pauses every caller for the observed lockout
+// instead of stretching a gap. Cached reads (muir_cache) never touch it.
+const MUIR_BUCKET = 30;
+const MUIR_RATE_PER_S = 1.25;
+const MUIR_LOCKOUT_MS = 21_000;
+let muirTokens = MUIR_BUCKET;
+let muirLast = Date.now();
+let muirPausedUntil = 0;
 async function muirThrottle(): Promise<void> {
-  const now = Date.now();
-  const wait = Math.max(0, muirNextSlot - now);
-  muirNextSlot = Math.max(now, muirNextSlot) + muirGapMs;
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  for (;;) {
+    const now = Date.now();
+    muirTokens = Math.min(MUIR_BUCKET, muirTokens + ((now - muirLast) / 1000) * MUIR_RATE_PER_S);
+    muirLast = now;
+    if (now >= muirPausedUntil && muirTokens >= 1) {
+      muirTokens -= 1;
+      return;
+    }
+    const wait = now < muirPausedUntil ? muirPausedUntil - now : Math.ceil(((1 - muirTokens) / MUIR_RATE_PER_S) * 1000);
+    await new Promise((r) => setTimeout(r, Math.max(10, wait)));
+  }
 }
-/** MUIR answered 429 — quadruple the gap (up to a ceiling) until it calms. */
+/** MUIR answered 429 — every caller waits out the lockout. */
 function muirBackOff(): void {
-  muirGapMs = Math.min(MUIR_MAX_GAP_MS, Math.max(muirGapMs, MUIR_BASE_GAP_MS) * 4);
+  muirPausedUntil = Math.max(muirPausedUntil, Date.now() + MUIR_LOCKOUT_MS);
+  muirTokens = 0;
 }
-/** A successful response decays the gap back toward the base. */
-function muirCalm(): void {
-  if (muirGapMs > MUIR_BASE_GAP_MS) muirGapMs = Math.max(MUIR_BASE_GAP_MS, Math.round(muirGapMs * 0.8));
-}
+/** Kept for the call site; the bucket needs no decay step. */
+function muirCalm(): void {}
+
+/** Requests spent against MUIR by this isolate (for footprint accounting). */
+export let muirRequestsSent = 0;
 
 async function fetchJson(path: string, timeoutMs = 12000, retries = 3): Promise<any | null> {
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -176,6 +189,7 @@ async function fetchJson(path: string, timeoutMs = 12000, retries = 3): Promise<
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       await muirThrottle();
+      muirRequestsSent++;
       const res = await fetch(`${API}${path}`, {
         headers: { "User-Agent": UA, Accept: "application/json" },
         signal: ctrl.signal,
@@ -184,8 +198,9 @@ async function fetchJson(path: string, timeoutMs = 12000, retries = 3): Promise<
       if (res.status === 429 || res.status >= 500) {
         if (res.status === 429) muirBackOff(); // every in-flight caller slows down too
         if (attempt < retries) {
-          // 429s can persist for a while — back off meaningfully.
-          await new Promise((r) => setTimeout(r, (res.status === 429 ? 1500 : 500) * (attempt + 1)));
+          // A 429 is waited out inside muirThrottle (the lockout pause); a
+          // 5xx gets a short linear backoff.
+          if (res.status !== 429) await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
           continue;
         }
         return null;
@@ -286,7 +301,7 @@ const ONLINE_NAME_RE =
  *  and `\b` treats `_` as a word character — so \bONLINE\b silently missed
  *  them, dropping whole online events from the graph (observed: every
  *  post-2022 PNWCC G60 online event a player had). Normalise before testing. */
-const nameForMatch = (s: string) => s.replace(/_/g, " ");
+export const nameForMatch = (s: string) => s.replace(/_/g, " ");
 export const looksOnline = (name: string) => ONLINE_NAME_RE.test(nameForMatch(name));
 
 /** MUIR's online rating systems (OR/OQ/OB, introduced in the 2020 online-play
@@ -307,7 +322,7 @@ export const isOnlineRatingSystem = (rs?: string): boolean =>
  *  pinned every such event to Chess.com and skipped platform discovery
  *  entirely (observed live: 16 Lichess-hosted events searched on Chess.com for
  *  19 minutes with zero results). */
-function platformGuess(text: string): string | undefined {
+export function platformGuess(text: string): string | undefined {
   if (/lichess/i.test(text)) return "lichess";
   if (/(^|[^a-z0-9])chess\.?com(?![a-z0-9])/i.test(text)) return "chesscom";
   if (/chesskid/i.test(text)) return "chesskid";
@@ -456,8 +471,15 @@ export async function fetchMemberEventsSince(
   return out;
 }
 
+/** No lower date bound on online history. A 2020-03-01 cutoff used to hide
+ *  every online-rated section before the pandemic era (the investigation found
+ *  a player whose only online history was 2017–18 "US Chess Blitz on
+ *  Chess.com" events). Online rating systems are what make a section online,
+ *  not its date. */
+export const ONLINE_HISTORY_SINCE = "";
+
 /** One online section the TARGET actually played, learned from their game feed. */
-interface OnlineSecRef {
+export interface OnlineSecRef {
   eventId: string;
   eventName: string;
   startDate?: string;
@@ -489,7 +511,7 @@ interface OnlineSecRef {
  * Newest-first and paged; stops once a whole page predates the online era, or
  * the wall-clock deadline is hit. Fails soft to whatever it gathered.
  */
-async function fetchMemberOnlineSections(
+export async function fetchMemberOnlineSections(
   id: string,
   sinceDate: string,
   overBudget: () => boolean,
@@ -544,6 +566,7 @@ async function fetchMemberOnlineSections(
 }
 
 interface SectionMeta {
+  name?: string;
   isOnline: boolean;
   ratingSystem?: string;
   timeControl?: string;
@@ -553,10 +576,11 @@ interface SectionMeta {
   endDate?: string;
 }
 
-async function fetchSectionMeta(eventId: string, number: number): Promise<SectionMeta | null> {
+export async function fetchSectionMeta(eventId: string, number: number): Promise<SectionMeta | null> {
   const s = await cachedFetchJson("section", `${eventId}/${number}`, EVENT_CACHE_TTL_MS, `/rated-events/${eventId}/sections/${number}`);
   if (!s) return null;
   return {
+    name: typeof s.name === "string" ? s.name : undefined,
     isOnline: !!s.isOnline,
     ratingSystem: s.ratingSystem,
     timeControl: s.timeControl,
@@ -575,7 +599,7 @@ function colorFrom(raw: any): GameColor {
 }
 
 /** Standings → roster of players with round-by-round games. */
-async function fetchSectionPlayers(eventId: string, number: number, rootId: string): Promise<UscfSectionPlayer[]> {
+export async function fetchSectionPlayers(eventId: string, number: number, rootId: string): Promise<UscfSectionPlayer[]> {
   const data = await cachedFetchJson(
     "crosstable",
     `${eventId}/${number}`,
@@ -669,7 +693,7 @@ export async function buildOnlineGraphForMember(
   //    walk, no crosstable probing, and it is precisely the target's sections
   //    (multi-section events included). Online-rated systems launched in 2020,
   //    so page back to that era.
-  const onlineSecs = await fetchMemberOnlineSections(member.id, "2020-03-01", overBudget);
+  const onlineSecs = await fetchMemberOnlineSections(member.id, ONLINE_HISTORY_SINCE, overBudget);
   if (!onlineSecs.length) return [];
 
   // 2. Prioritise the sections most useful to the traversal, because the
@@ -737,4 +761,59 @@ export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) =>
   });
   await Promise.all(workers);
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Section-scoped helpers for the level-order traversal
+// ---------------------------------------------------------------------------
+
+/** A recurring event series, from its name: digits, dates, months, ordinals
+ *  and round/section words stripped. "US CHESS RAPID ON CHESS.COM 06/26/2026"
+ *  and "...07/03/2026" share a key; so do "WNZ RATED 1234" and "WNZ RATED 1300".
+ *  Used to learn a platform once per series rather than once per event. */
+export function seriesKey(eventName: string): string {
+  return nameForMatch(eventName)
+    .toLowerCase()
+    .replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/g, " ")
+    .replace(/\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*\b/g, " ")
+    .replace(/\b\d+(st|nd|rd|th)\b/g, " ")
+    .replace(/[0-9]+/g, " ")
+    .replace(/\b(round|rd|section|sec|week|wk|event|edition|no|part)\b/g, " ")
+    .replace(/[^a-z.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** The event's display name (cached 30 days with the rest of the event). */
+export async function fetchEventName(eventId: string): Promise<string> {
+  const ev = await cachedFetchJson("event", eventId, EVENT_CACHE_TTL_MS, `/rated-events/${eventId}`);
+  return typeof ev?.name === "string" ? ev.name : "";
+}
+
+/** One section as a traversable unit: meta + full crosstable + the event
+ *  name, the same shape buildOnlineGraphForMember produces. `rootId` marks
+ *  the target when they played here; pass "" when walking someone else's
+ *  section. Null when the crosstable could not be read. */
+export async function fetchSectionGraph(eventId: string, sectionNumber: number, rootId = ""): Promise<OnlineSection | null> {
+  const [meta, players, evName] = await Promise.all([
+    fetchSectionMeta(eventId, sectionNumber),
+    fetchSectionPlayers(eventId, sectionNumber, rootId),
+    fetchEventName(eventId),
+  ]);
+  if (!players.length) return null;
+  const sectionName = meta?.name;
+  return {
+    eventId,
+    name: evName,
+    sectionName,
+    sectionNumber,
+    startDate: meta?.startDate,
+    endDate: meta?.endDate,
+    ratingSystem: meta?.ratingSystem || "",
+    timeControl: meta?.timeControl,
+    roundCount: meta?.roundCount,
+    isBlitz: meta?.isBlitz,
+    platformGuess: platformGuess(nameForMatch(`${evName} ${sectionName || ""}`)),
+    players,
+  };
 }
