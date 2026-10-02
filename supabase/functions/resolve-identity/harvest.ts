@@ -146,7 +146,8 @@ export function parseRecordAlignment(body: Record<string, unknown>): RecordAlign
   if (!eventId || !Number.isFinite(sectionNumber) || sectionNumber < 1 || sectionNumber > 99) return null;
   if (kind === "chesscom-tournament") {
     tid = (tid.split("/").filter(Boolean).pop() || "").toLowerCase();
-    if (!/^[a-z0-9][a-z0-9-]{2,150}$/.test(tid)) return null;
+    // Chess.com slugs may start with a dash ("-us-chess-15--10-rapid-6578507").
+    if (!/^[a-z0-9-]{3,150}$/.test(tid) || !/[a-z0-9]/.test(tid)) return null;
   } else if (kind === "lichess-swiss" || kind === "lichess-arena") {
     if (!/^[A-Za-z0-9]{8}$/.test(tid)) return null;
   } else return null;
