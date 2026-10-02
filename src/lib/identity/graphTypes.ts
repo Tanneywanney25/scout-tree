@@ -31,6 +31,8 @@ export interface GraphEvent {
   eventId: string;
   name: string;
   sectionName?: string;
+  /** USCF section number within the event (absent from older edge builds). */
+  sectionNumber?: number;
   startDate?: string; // YYYY-MM-DD
   endDate?: string;
   ratingSystem: string; // OR / OQ / OB
@@ -68,6 +70,8 @@ export interface UsernameSearchRequest {
   platforms?: ("chesscom" | "lichess")[];
   /** Handles this person already uses elsewhere (username reuse). */
   knownUsernames?: string[];
+  /** Spend at most this many search queries (pivots ask for 1-2). */
+  maxQueries?: number;
 }
 
 /** One handle the Google index tied to the person — a LEAD to verify, never

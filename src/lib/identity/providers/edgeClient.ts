@@ -218,8 +218,13 @@ const discoverCache = new Map<string, Promise<EventPlatformInfo | null>>();
  * Chess.com tournament slug or Lichess swiss/arena id (whose public APIs then
  * hand the traversal engine the full participant roster).
  */
-export function discoverEventPlatform(ev: GraphEvent, signal?: AbortSignal): Promise<EventPlatformInfo | null> {
-  const existing = discoverCache.get(ev.eventId);
+export function discoverEventPlatform(
+  ev: GraphEvent,
+  signal?: AbortSignal,
+  opts: { cacheOnly?: boolean } = {}
+): Promise<EventPlatformInfo | null> {
+  const cacheKey = opts.cacheOnly ? `c:${ev.eventId}` : ev.eventId;
+  const existing = discoverCache.get(cacheKey);
   if (existing) return existing;
 
   const promise = (async (): Promise<EventPlatformInfo | null> => {
@@ -236,9 +241,10 @@ export function discoverEventPlatform(ev: GraphEvent, signal?: AbortSignal): Pro
           endDate: ev.endDate,
           ratingSystem: ev.ratingSystem,
           timeControl: ev.timeControl,
+          ...(opts.cacheOnly ? { cacheOnly: true } : {}),
         },
       },
-      90_000
+      opts.cacheOnly ? 15_000 : 90_000
     );
     if (!data || data.available === false) return null;
     const info: EventPlatformInfo = {
@@ -252,8 +258,8 @@ export function discoverEventPlatform(ev: GraphEvent, signal?: AbortSignal): Pro
     return info.platform || info.chesscomSlugs?.length || info.lichessSwissIds?.length || info.lichessArenaIds?.length ? info : null;
   })();
 
-  discoverCache.set(ev.eventId, promise);
-  promise.finally(() => setTimeout(() => discoverCache.delete(ev.eventId), 300_000));
+  discoverCache.set(cacheKey, promise);
+  promise.finally(() => setTimeout(() => discoverCache.delete(cacheKey), 300_000));
   return promise;
 }
 
@@ -264,6 +270,15 @@ export function discoverEventPlatform(ev: GraphEvent, signal?: AbortSignal): Pro
 // Memoize per person+context — the traversal asks about the same member from
 // several events. Kept for the whole session; the answer doesn't change.
 const usernameCache = new Map<string, Promise<UsernameCandidate[] | null>>();
+/** Set when the edge reports that no search backend is enabled at all. Until
+ *  it expires every lookup answers null locally (no round trip): before, each
+ *  member and event re-asked the edge, because "disabled" came back looking
+ *  like a transient failure (brief item 5.5). */
+let searchDisabledUntil = 0;
+const SEARCH_DISABLED_RECHECK_MS = 10 * 60_000;
+export function searchBackendDisabled(): boolean {
+  return Date.now() < searchDisabledUntil;
+}
 
 // Space the Google-search calls out (they fan out to Google/an AI web search).
 // This is pacing to avoid being blocked, NOT a cap — every request still runs.
@@ -284,7 +299,8 @@ async function usernameThrottle(): Promise<void> {
 export function findUsernameCandidates(req: UsernameSearchRequest, signal?: AbortSignal): Promise<UsernameCandidate[] | null> {
   const name = (req.name || "").trim();
   if (!name) return Promise.resolve([]);
-  const key = JSON.stringify([name.toLowerCase(), req.state, req.uscfRating, req.eventName, [...(req.platforms || [])].sort()]);
+  if (searchBackendDisabled()) return Promise.resolve(null);
+  const key = JSON.stringify([name.toLowerCase(), req.state, req.uscfRating, req.eventName, [...(req.platforms || [])].sort(), req.maxQueries]);
   const existing = usernameCache.get(key);
   if (existing) return existing;
 
@@ -302,6 +318,11 @@ export function findUsernameCandidates(req: UsernameSearchRequest, signal?: Abor
     if (signal?.aborted) return null;
     const data = await invokeEdge({ findUsername: req }, 180_000);
     if (!data) {
+      requestFailed = true;
+      return null;
+    }
+    if (data.disabled === true) {
+      searchDisabledUntil = Date.now() + SEARCH_DISABLED_RECHECK_MS;
       requestFailed = true;
       return null;
     }
@@ -555,6 +576,156 @@ export async function requestOptOut(row: {
   note?: string;
 }): Promise<boolean> {
   const data = await invokeEdge({ optOut: row }, 12_000);
+  return data?.stored === true;
+}
+
+// ---------------------------------------------------------------------------
+// Identity graph (section-scoped traversal). See resolve-identity/graphStore.ts
+// and harvest.ts for the server side.
+// ---------------------------------------------------------------------------
+
+export interface StoredIdentity {
+  platform: Platform;
+  username: string;
+  kind: "verdict" | "lead";
+  tier?: string;
+  confidence: number;
+  serverVerified: boolean;
+  source: string;
+  sections?: number;
+  checkedAt?: string;
+}
+
+/** One member's stored identities, classified by the server. The read every
+ *  search makes BEFORE discovery (the short circuit). */
+export async function fetchStoredIdentity(uscfId: string, signal?: AbortSignal): Promise<StoredIdentity[]> {
+  const id = uscfId.replace(/\D/g, "");
+  if (signal?.aborted || !id) return [];
+  const data = await invokeEdge({ storedIdentity: { uscfId: id } }, 20_000);
+  if (!data || !Array.isArray(data.identities)) return [];
+  return (data.identities as StoredIdentity[]).filter((h) => h && typeof h.username === "string");
+}
+
+/** Stored verdicts for a batch of members (crosstable seeds). Requires a
+ *  signed-in session; anonymous callers get []. */
+export async function fetchSeedEdges(
+  uscfIds: string[],
+  signal?: AbortSignal
+): Promise<{ uscfId: string; platform: Platform; username: string; tier: string }[]> {
+  const ids = [...new Set(uscfIds.map((s) => s.replace(/\D/g, "")).filter(Boolean))];
+  if (signal?.aborted || !ids.length) return [];
+  const out: { uscfId: string; platform: Platform; username: string; tier: string }[] = [];
+  for (let i = 0; i < ids.length; i += 400) {
+    const data = await invokeEdge({ seedEdges: { uscfIds: ids.slice(i, i + 400) } }, 20_000);
+    if (!data || data.unauthorized || !Array.isArray(data.seeds)) return out;
+    out.push(...(data.seeds as { uscfId: string; platform: Platform; username: string; tier: string }[]));
+  }
+  return out;
+}
+
+/** Crosstables for named sections, as graph events. */
+export async function fetchSectionGraphs(
+  sections: { eventId: string; sectionNumber: number }[],
+  rootId = "",
+  signal?: AbortSignal
+): Promise<GraphEvent[]> {
+  const out: GraphEvent[] = [];
+  for (let i = 0; i < sections.length; i += 6) {
+    if (signal?.aborted) break;
+    const data = await invokeEdge({ sectionGraph: { sections: sections.slice(i, i + 6), rootId } }, 60_000);
+    if (!data || !Array.isArray(data.sections)) continue;
+    for (const s of data.sections as GraphEvent[]) out.push(s);
+  }
+  return out;
+}
+
+export interface FootprintSection {
+  eventId: string;
+  section: number;
+  name: string;
+  sectionName?: string;
+  date?: string;
+  rs: string;
+  platform: "chesscom" | "lichess" | "unknown";
+  via: string;
+  games: number;
+}
+
+export interface MemberFootprint {
+  uscfId: string;
+  total: number;
+  chesscom: number;
+  lichess: number;
+  other: number;
+  unknown: number;
+  lastDate?: string;
+  pagesRead: number;
+  truncated: boolean;
+  sections: FootprintSection[];
+}
+
+/** Portal footprints, batched; members the server's clock cut off are asked
+ *  again until done or maxCalls is spent. */
+export async function fetchMemberFootprints(
+  uscfIds: string[],
+  signal?: AbortSignal,
+  maxCalls = 12
+): Promise<Map<string, MemberFootprint>> {
+  const out = new Map<string, MemberFootprint>();
+  let queue = [...new Set(uscfIds.map((s) => s.replace(/\D/g, "")).filter(Boolean))];
+  let calls = 0;
+  while (queue.length && calls < maxCalls && !signal?.aborted) {
+    const batch = queue.slice(0, 10);
+    queue = queue.slice(10);
+    calls++;
+    const data = await invokeEdge({ memberFootprints: { uscfIds: batch } }, 60_000);
+    if (!data || data.rateLimited) {
+      queue.unshift(...batch);
+      await new Promise((r) => setTimeout(r, 5_000));
+      continue;
+    }
+    for (const fp of (data.footprints as MemberFootprint[]) || []) out.set(fp.uscfId, fp);
+    const pending = Array.isArray(data.pending) ? (data.pending as string[]) : [];
+    queue.unshift(...pending.filter((id) => !out.has(id)));
+  }
+  return out;
+}
+
+export interface RecordAlignmentResult {
+  recorded: boolean;
+  verified?: boolean;
+  players?: number;
+  assigned?: number;
+  strong?: number;
+  weak?: number;
+  store?: { written: number; skippedOptOut: number; superseded: number; conflicts: number; verdictsMirrored: number } | null;
+  target?: { handle: string; tier: string; rounds: number; corroborating: number } | null;
+  reason?: string;
+}
+
+/** Ask the server to re-run and record one section alignment. */
+export async function recordSectionAlignment(req: {
+  eventId: string;
+  sectionNumber: number;
+  kind: "chesscom-tournament" | "lichess-swiss" | "lichess-arena";
+  tournamentId: string;
+  targetUscfId?: string;
+}): Promise<RecordAlignmentResult | null> {
+  const data = await invokeEdge({ recordAlignment: req }, 90_000);
+  if (!data) return null;
+  return data as unknown as RecordAlignmentResult;
+}
+
+export async function fetchSectionNegatives(
+  keys: { eventId: string; sectionNumber: number }[]
+): Promise<{ eventId: string; sectionNumber: number; reason?: string }[]> {
+  if (!keys.length) return [];
+  const data = await invokeEdge({ sectionNegatives: { get: keys.slice(0, 200) } }, 15_000);
+  return data && Array.isArray(data.negatives) ? (data.negatives as { eventId: string; sectionNumber: number; reason?: string }[]) : [];
+}
+
+export async function putSectionNegative(row: { eventId: string; sectionNumber: number; reason: string; requests?: number }): Promise<boolean> {
+  const data = await invokeEdge({ sectionNegatives: { put: row } }, 30_000);
   return data?.stored === true;
 }
 

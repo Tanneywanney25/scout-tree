@@ -150,6 +150,7 @@ interface GraphEvent {
   eventId: string;
   name: string;
   sectionName?: string;
+  sectionNumber?: number;
   startDate?: string;
   endDate?: string;
   ratingSystem: string;
@@ -251,6 +252,7 @@ function sectionsToGraph(member: UscfMember, sections: OnlineSection[]): Tournam
     eventId: s.eventId,
     name: s.name,
     sectionName: s.sectionName,
+    sectionNumber: s.sectionNumber,
     startDate: s.startDate,
     endDate: s.endDate,
     ratingSystem: s.ratingSystem,
