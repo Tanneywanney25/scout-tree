@@ -434,8 +434,13 @@ export function createConductor(options: ConductorOptions = {}): Conductor {
       ccGateLimit: () => ccGateLimit,
     },
 
-    netEvent(_platform, kind) {
+    netEvent(platform, kind) {
       if (disposed) return;
+      // The governor resizes the CHESS.COM gate, so only Chess.com pressure
+      // counts. Lichess limits are per endpoint and handled by net.ts's own
+      // buckets; feeding them in here used to throttle Chess.com for a
+      // Lichess 429.
+      if (platform !== "chesscom") return;
       if (kind === "429") {
         const t = now();
         recent429.push(t);

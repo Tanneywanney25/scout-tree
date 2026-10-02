@@ -82,7 +82,7 @@ import type {
   UsernameCandidate,
 } from "./graphTypes";
 import { verifyChesscom, verifyLichess, lichessExistingSubset, lichessBulkVerify, enrichChesscomStats, type VerifiedProfile } from "./verify";
-import { pool, politeFetch, lichessSlot, classifyChesscomStatus } from "./net";
+import { pool, politeFetch, classifyChesscomStatus, speculativeSignal } from "./net";
 import type { Conductor } from "./conductor";
 import { researchOrganizers, sanitizePlatformGuess } from "./organizerDiscovery";
 import {
@@ -1477,6 +1477,10 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     opts.log(m);
   };
   const shared = opts.shared ?? makeSharedCaches();
+  // Seed hunting (unverified leads, guessed handles, their archive pulls,
+  // autocomplete) runs on the allocator's SPECULATIVE lane; everything that
+  // follows a confirmed identity or a known tournament link stays proven.
+  const specSignal = speculativeSignal(signal);
   // Phase I: attach the injected persistent cache to the shared caches so the
   // archive fetcher (and deep-phase sub-traversals, which share these caches)
   // consult it. Set once; a sub-traversal inherits it via opts.shared.
@@ -1557,10 +1561,15 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
    *  name/country/location); pass `full` for a candidate that survived the
    *  gate so its ratings/game counts get filled in (in place, so every cached
    *  reader sees them). */
-  const verifyOn = (platform: OnlinePlatform, handle: string, full = false): Promise<VerifiedProfile | null | undefined> => {
+  const verifyOn = (
+    platform: OnlinePlatform,
+    handle: string,
+    full = false,
+    sig: AbortSignal | undefined = signal
+  ): Promise<VerifiedProfile | null | undefined> => {
     const key = `${platform}:${handle.toLowerCase()}`;
     const hit = verifyCache.get(key);
-    if (hit) return full && platform === "chesscom" ? hit.then((prof) => (prof ? enrichChesscomStats(prof, signal) : prof)) : hit;
+    if (hit) return full && platform === "chesscom" ? hit.then((prof) => (prof ? enrichChesscomStats(prof, sig) : prof)) : hit;
     // A profile whose fetch failed moments ago fast-fails (same cooldown as
     // the archive shards — it is usually the same outage) instead of
     // re-hammering a down shard from every chain that reads the handle.
@@ -1570,7 +1579,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
     }
     // verifyLichess paces itself through the global Lichess slot machine;
     // verifyChesscom runs behind the global Chess.com gate.
-    const p = platform === "chesscom" ? verifyChesscom(handle, signal, { stats: full }) : verifyLichess(handle, signal);
+    const p = platform === "chesscom" ? verifyChesscom(handle, sig, { stats: full }) : verifyLichess(handle, sig);
     verifyCache.set(key, p);
     // A transient failure (undefined) is a HOLE, not a "no such account"
     // verdict. Memoizing it is how one outage-era fetch poisoned every later
@@ -1605,14 +1614,20 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           return shared.ccFailedMonths.has(k) || shared.ccStructural.has(k);
         })
       : shared.lichessFailedWindows.has(windowKeyOf(handle, startMs, endMs));
-  const windowGames = (platform: OnlinePlatform, handle: string, startMs: number, endMs: number): Promise<ArchiveGame[]> => {
+  const windowGames = (
+    platform: OnlinePlatform,
+    handle: string,
+    startMs: number,
+    endMs: number,
+    sig: AbortSignal | undefined = signal
+  ): Promise<ArchiveGame[]> => {
     const key = `${platform}:${windowKeyOf(handle, startMs, endMs)}`;
     const hit = gamesCache.get(key);
     if (hit) return hit;
     const p =
       platform === "chesscom"
-        ? chesscomWindowGames(handle, startMs, endMs, shared.ccMonths, signal, shared.ccFailedMonths, archiveXCaches(shared))
-        : lichessWindowGames(handle, startMs, endMs, signal, shared.lichessFailedWindows, windowKeyOf(handle, startMs, endMs));
+        ? chesscomWindowGames(handle, startMs, endMs, shared.ccMonths, sig, shared.ccFailedMonths, archiveXCaches(shared))
+        : lichessWindowGames(handle, startMs, endMs, sig, shared.lichessFailedWindows, windowKeyOf(handle, startMs, endMs));
     gamesCache.set(key, p);
     // An aggregate with a failed month/export in its span must not be
     // remembered as gospel — evict it so the next asker refetches (healthy
@@ -2148,7 +2163,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
           async (cand) => {
             if (stopHere()) return;
             if (dudHandles.has(`${platform}:${cand.username.toLowerCase()}`)) return;
-            const prof = await verifyOn(platform, cand.username, true);
+            const prof = await verifyOn(platform, cand.username, true, specSignal);
             if (!prof || dudHandles.has(`${platform}:${prof.username.toLowerCase()}`)) return;
             const attr = attributeMatch(
               name,
@@ -2183,13 +2198,13 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         const shortlist = scored.filter(
           (s) => s.score >= ATTR_SHORTLIST && !clearlyWrongPerson(memberRating.get(memberId), s.prof)
         );
-        for (const s of shortlist) void windowGames(platform, s.prof.username, win.startMs, win.endMs);
+        for (const s of shortlist) void windowGames(platform, s.prof.username, win.startMs, win.endMs, specSignal);
 
         let fallback: VerifiedProfile | null = null;
         const evTc = parseEventTc(ev.timeControl);
         for (const { prof, score } of shortlist) {
           if (stopHere()) break;
-          const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
+          const games = await windowGames(platform, prof.username, win.startMs, win.endMs, specSignal);
           if (!games.length) {
             if (archiveHole(platform, prof.username, win.startMs, win.endMs)) {
               transientMiss = true;
@@ -2275,7 +2290,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
             // The name gate passed on a LITE profile; the rating-gap check and
             // the archive judgment below want the full one (one /stats GET for
             // the few survivors instead of one for every guess that exists).
-            if (platform === "chesscom") await enrichChesscomStats(prof, signal).catch(() => prof);
+            if (platform === "chesscom") await enrichChesscomStats(prof, specSignal).catch(() => prof);
             // Early rejection: a name-match that is a clear same-name stranger
             // (foreign country AND a >1000pt rating gap) never justifies pulling
             // its archives — skip before the fetch. Name-gating already passed,
@@ -2286,7 +2301,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
               );
               return;
             }
-            const games = await windowGames(platform, prof.username, win.startMs, win.endMs);
+            const games = await windowGames(platform, prof.username, win.startMs, win.endMs, specSignal);
             // A window spanning a failed month/export is a HOLE: even a
             // NON-EMPTY result can be missing exactly the event games, so a
             // hole may never feed a REJECTION verdict — positive evidence
@@ -2312,7 +2327,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
                 transientMiss = true;
                 return; // can't judge a contradicted candidate over partial data
               }
-              const clubs = await fetchClubs(platform, prof.username, signal);
+              const clubs = await fetchClubs(platform, prof.username, specSignal);
               if (!clubs.some((c) => clubEventTie(c, ev.name, [st, graph.rootState]))) {
                 log(
                   `Name-guess @${prof.username} matches "${name}" and played in the window, but its profile contradicts the USCF record (${
@@ -2361,7 +2376,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
       let effGuesses = guesses;
       if (platform === "lichess" && guesses.length > 2 && !stopHere()) {
         const uncached = guesses.filter((h) => !verifyCache.has(`lichess:${h.toLowerCase()}`));
-        const existing = uncached.length > 2 ? await lichessExistingSubset(uncached, signal) : null;
+        const existing = uncached.length > 2 ? await lichessExistingSubset(uncached, specSignal) : null;
         if (existing) {
           effGuesses = guesses.filter(
             (h) => verifyCache.has(`lichess:${h.toLowerCase()}`) || existing.has(h.toLowerCase())
@@ -2374,7 +2389,7 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         VERIFY_POOL,
         async (h) => {
           if (stopHere()) return;
-          guessProfs.set(h, await verifyOn(platform, h));
+          guessProfs.set(h, await verifyOn(platform, h, false, specSignal));
         },
         () => stopHere()
       );
@@ -2417,14 +2432,14 @@ export async function runGraphTraversal(graph: TournamentGraph, opts: TraversalO
         if (last && last.length >= 4) terms.add(last);
         for (const term of terms) {
           if (stopHere()) return null;
-          const handles = (await lichessAutocomplete(term, signal)).slice(0, 5).filter((h) => !dudHandles.has(`lichess:${h.toLowerCase()}`));
+          const handles = (await lichessAutocomplete(term, specSignal)).slice(0, 5).filter((h) => !dudHandles.has(`lichess:${h.toLowerCase()}`));
           const acProfs = new Map<string, VerifiedProfile | null>();
           await pool(
             handles,
             4,
             async (h) => {
               if (stopHere()) return;
-              acProfs.set(h, await verifyOn("lichess", h));
+              acProfs.set(h, await verifyOn("lichess", h, false, specSignal));
             },
             () => stopHere()
           );
