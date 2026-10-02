@@ -29,7 +29,18 @@ import {
   handleOptOut,
   memberSearchRateLimited,
 } from "./anchor.ts";
-import { getEventPlatform, putEventPlatform } from "../_shared/identityStore.ts";
+import { getEventPlatform, putEventPlatform, sweepSearchCache } from "../_shared/identityStore.ts";
+import { authenticateCaller } from "../_shared/auth.ts";
+import { handleRecordAlignment, parseRecordAlignment } from "./harvest.ts";
+import {
+  clientKeyOf,
+  handleMemberFootprints,
+  handleSectionGraph,
+  handleSectionNegatives,
+  handleSeedEdges,
+  handleStoredIdentity,
+  rateLimited,
+} from "./graphStore.ts";
 import type { SchoolLookupRequest } from "../../../src/lib/identity/schoolTypes.ts";
 
 // ============================================================================
@@ -497,7 +508,7 @@ function summarisePlatform(info: {
   return "unknown";
 }
 
-async function handleDiscoverEvent(ev: DiscoverEventRequest): Promise<Response> {
+async function handleDiscoverEvent(ev: DiscoverEventRequest & { cacheOnly?: boolean }): Promise<Response> {
   const eventId = (ev.eventId || "").trim();
 
   // Persistent cache first: which platform hosted this event is immutable and
@@ -514,6 +525,10 @@ async function handleDiscoverEvent(ev: DiscoverEventRequest): Promise<Response> 
       return json({ available: true, cached: true, ...info });
     }
   }
+  // cacheOnly: the engine asks for EVERY event's stored answer, including
+  // events whose title already names a platform, without paying for a web
+  // search on a miss (brief item 5.3).
+  if (ev.cacheOnly === true) return json({ available: false, cached: false });
 
   const info = await discoverEventOnWeb(ev);
   if (!info) return json({ available: false });
@@ -570,12 +585,23 @@ async function handleFindUsername(body: Record<string, unknown>): Promise<Respon
     knownUsernames: Array.isArray(body.knownUsernames)
       ? (body.knownUsernames.filter((u) => typeof u === "string") as string[]).slice(0, 4)
       : undefined,
+    maxQueries:
+      typeof body.maxQueries === "number" && isFinite(body.maxQueries) && body.maxQueries > 0
+        ? Math.min(40, Math.floor(body.maxQueries))
+        : undefined,
   };
 
   const result = await findUsernamesOnWeb(req, (m) => console.log("[resolve-identity] findUsername:", m));
   console.log(
     "[resolve-identity] findUsername:",
-    JSON.stringify({ name, backend: result.backend, found: result.candidates.length, quotaExhausted: result.quotaExhausted ?? false })
+    JSON.stringify({
+      name,
+      backend: result.backend,
+      found: result.candidates.length,
+      quotaExhausted: result.quotaExhausted ?? false,
+      disabled: result.disabled ?? false,
+      budgetExhausted: result.budgetExhausted ?? false,
+    })
   );
   return json({
     available: result.backend !== "none",
@@ -585,8 +611,18 @@ async function handleFindUsername(body: Record<string, unknown>): Promise<Respon
     // True when the empty answer means "search quota exhausted", NOT "the
     // index has no match" — clients must not cache this as a definitive miss.
     quotaExhausted: result.quotaExhausted ?? false,
+    // No backend can search at all (configuration, not weather): clients stop
+    // asking for the session instead of re-asking for every member.
+    disabled: result.disabled ?? false,
+    budgetExhausted: result.budgetExhausted ?? false,
   });
 }
+
+// search_cache identity rows were written with no expiry and nothing ever
+// removed them (brief item 3.6). Swept opportunistically, at most once an
+// hour per isolate, off the request path.
+let lastSweepAt = 0;
+const SWEEP_EVERY_MS = 60 * 60_000;
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -595,6 +631,13 @@ serve(async (req) => {
 
   try {
     const body = await req.json().catch(() => ({}));
+    const clientKey = clientKeyOf(req);
+    if (Date.now() - lastSweepAt > SWEEP_EVERY_MS) {
+      lastSweepAt = Date.now();
+      void sweepSearchCache(90).then((n) => {
+        if (n) console.log("[resolve-identity] search_cache sweep removed", n, "row(s)");
+      });
+    }
 
     // --- Health check (monitoring): a cheap liveness/config probe that does NO
     //     MUIR or AI work, so an uptime monitor can tell the function is booting
@@ -631,8 +674,11 @@ serve(async (req) => {
       // retired model still reads as configured while every AI feature fails.
       // One tiny real call answers the question the uptime monitor (and the
       // deploy workflow) actually has, and reports Google's own reason
-      // (API_KEY_INVALID, …) — never the key.
-      if (body?.aiCheck === true) {
+      // (API_KEY_INVALID, …) — never the key. It spends model quota, so it is
+      // rate-limited per caller (6 a minute).
+      if (body?.aiCheck === true && rateLimited("aiCheck", clientKey, 6, 60_000)) {
+        payload.ai = { ok: false, status: 429, rateLimited: true };
+      } else if (body?.aiCheck === true) {
         const r = await callAI("Reply with the single word OK.", "Say OK.", 16);
         payload.ai = {
           ok: r.ok,
@@ -648,10 +694,6 @@ serve(async (req) => {
     // memberSearch powers the live picker: no graph build, no AI, one cached
     // MUIR search. Rate-limited per client because it fires while typing.
     if (body?.memberSearch && typeof body.memberSearch === "object") {
-      const clientKey =
-        req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-        req.headers.get("cf-connecting-ip") ||
-        "anon";
       if (memberSearchRateLimited(clientKey)) {
         return json({ available: false, hits: [], rateLimited: true });
       }
@@ -669,7 +711,43 @@ serve(async (req) => {
       );
     }
     if (body?.claimHandle && typeof body.claimHandle === "object") {
-      return json(await handleClaimHandle(body.claimHandle as Record<string, unknown>));
+      // One per finished hunt is the legitimate rate; 30 per 10 minutes per
+      // caller leaves room for a busy user and none for a scripted flood.
+      if (rateLimited("claimHandle", clientKey, 30, 10 * 60_000)) {
+        return json({ available: false, stored: false, rateLimited: true });
+      }
+      return json(await handleClaimHandle(body.claimHandle as Record<string, unknown>, req.headers.get("authorization")));
+    }
+
+    // --- Identity graph (section-scoped traversal) ----------------------------
+    if (body?.storedIdentity && typeof body.storedIdentity === "object") {
+      if (rateLimited("storedIdentity", clientKey, 60, 60_000)) return json({ available: false, identities: [], rateLimited: true });
+      return json(await handleStoredIdentity(body.storedIdentity as Record<string, unknown>));
+    }
+    if (body?.seedEdges && typeof body.seedEdges === "object") {
+      // Bulk read of the stored graph: signed-in callers only, like resolvedHandles.
+      const caller = await authenticateCaller(req.headers.get("authorization"));
+      if (!caller) return json({ available: false, seeds: [], unauthorized: true });
+      if (rateLimited("seedEdges", clientKey, 60, 60_000)) return json({ available: false, seeds: [], rateLimited: true });
+      return json(await handleSeedEdges(body.seedEdges as Record<string, unknown>));
+    }
+    if (body?.sectionGraph && typeof body.sectionGraph === "object") {
+      if (rateLimited("sectionGraph", clientKey, 40, 60_000)) return json({ available: false, sections: [], rateLimited: true });
+      return jsonMaybeGzip(await handleSectionGraph(body.sectionGraph as Record<string, unknown>), req.headers.get("accept-encoding"));
+    }
+    if (body?.memberFootprints && typeof body.memberFootprints === "object") {
+      if (rateLimited("memberFootprints", clientKey, 30, 60_000)) return json({ available: false, footprints: [], pending: [], rateLimited: true });
+      return jsonMaybeGzip(await handleMemberFootprints(body.memberFootprints as Record<string, unknown>, 40_000), req.headers.get("accept-encoding"));
+    }
+    if (body?.recordAlignment && typeof body.recordAlignment === "object") {
+      if (rateLimited("recordAlignment", clientKey, 20, 10 * 60_000)) return json({ available: false, recorded: false, rateLimited: true });
+      const parsed = parseRecordAlignment(body.recordAlignment as Record<string, unknown>);
+      if (!parsed) return json({ available: true, recorded: false, reason: "malformed" });
+      return json(await handleRecordAlignment(parsed));
+    }
+    if (body?.sectionNegatives && typeof body.sectionNegatives === "object") {
+      if (rateLimited("sectionNegatives", clientKey, 60, 60_000)) return json({ available: false, rateLimited: true });
+      return json(await handleSectionNegatives(body.sectionNegatives as Record<string, unknown>));
     }
     if (body?.optOut && typeof body.optOut === "object") {
       return json(await handleOptOut(body.optOut as Record<string, unknown>, req.headers.get("authorization")));
@@ -682,11 +760,13 @@ serve(async (req) => {
 
     // --- Discover mode (web/flyer search: which platform hosted this event) --
     if (body?.discoverEvent && typeof body.discoverEvent === "object") {
-      return await handleDiscoverEvent(body.discoverEvent as DiscoverEventRequest);
+      if (rateLimited("discoverEvent", clientKey, 60, 60_000)) return json({ available: false, rateLimited: true });
+      return await handleDiscoverEvent(body.discoverEvent as DiscoverEventRequest & { cacheOnly?: boolean });
     }
 
     // --- Find-username mode (Google-index search for a person's handles) -----
     if (body?.findUsername && typeof body.findUsername === "object") {
+      if (rateLimited("findUsername", clientKey, 60, 60_000)) return json({ available: false, candidates: [], rateLimited: true });
       return await handleFindUsername(body.findUsername as Record<string, unknown>);
     }
 
