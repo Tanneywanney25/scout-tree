@@ -989,7 +989,7 @@ workflow is public by design.
 
 ## Mass pre-resolution and target discovery (2026-10-03, 22:00 UTC session)
 
-Short results; numbers are as of 22:16 UTC and the unattended loop keeps adding.
+Short results; numbers are as of 22:19 UTC and the unattended loop keeps adding.
 
 **What runs.** `scripts/pre-resolve.mjs` joins USCF online sections against the
 roster index in bulk and writes exactly what the edge `indexJoin` writes
@@ -1011,9 +1011,9 @@ MUIR (about 75 requests a minute from one address, ~2.6 requests a section).
 | Not resolved, by reason | no roster in the window 1,211; candidates but none trusted 495; **below the 90% floor 126**; ICC / ChessKid title 180; ambiguous 4; under 3 players 2 |
 | Disagreements with stored identities | 9 equal-strength conflicts, 41 weaker edges superseded |
 | Resolved rows under 90% coverage | **0 of 1,376** (minimum 90.2%) |
-| Store, before → 22:16 | `identity_edge` 3,691 → **7,518** (7,443 active, 6,829 strong, 23 in conflict, 52 superseded); verified `section_link` 307 → **1,642** |
-| Enumerated from MUIR (`scripts/enumerate-online-sections.mjs`) | `/affiliates/{id}/events` lists an organiser's events newest first (no online or date filter; `isOnline` is only on the section). 11,424 sections in `preresolve_section` at 22:16, 7,912 still queued: the five series' affiliates back to 2025-01 (DMV to 2020, 3,790 of those with the online flag unknown, which the batch reads itself) |
-| Unattended loop (`scripts/pre-resolve-run.sh`, started 22:07) | works the queue at MUIR pace (about 30 sections a minute) and re-reads the index every pass; first 226 queued sections: 205 resolved. Log `logs/pre-resolve.log` |
+| Store, before → 22:19 | `identity_edge` 3,691 → **7,620** (7,545 active, 6,924 strong, 23 in conflict, 52 superseded); verified `section_link` 307 → **1,727**; 3,604 sections carry a verdict, 1,584 resolved, 26,897 alignments written |
+| Enumerated from MUIR (`scripts/enumerate-online-sections.mjs`) | `/affiliates/{id}/events` lists an organiser's events newest first (no online or date filter; `isOnline` is only on the section). **11,823 sections queued** at 22:19: the five series' affiliates back to 2025-01 (DMV to 2020), and the new series' and teams' affiliates back to 2020 (64Squares alone 2,984). Sections whose online flag the listing cannot tell are queued too; the batch reads the flag itself |
+| Unattended loop (`scripts/pre-resolve-run.sh 15`, restarted 22:18 on the full queue, ends about 13:18 UTC) | works the queue at MUIR pace (about 30 sections a minute, roughly 7 h for the present queue) and re-reads the index every pass. First 251 enumerated sections of the five series: 230 resolved; the new `sfs` series resolved its first 9 sections within a minute of the restart. Log `logs/pre-resolve.log` |
 
 "Alignments written" counts one row per member per section; a member seen in
 ten sections is one `identity_edge`, which is why 24,000 alignments became
