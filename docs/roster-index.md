@@ -989,7 +989,7 @@ workflow is public by design.
 
 ## Mass pre-resolution and target discovery (2026-10-03, 22:00 UTC session)
 
-Short results; numbers are as of 22:19 UTC and the unattended loop keeps adding.
+Short results; numbers are as of 22:19 UTC (22:25: 7,704 edges, 1,811 links) and the unattended loop keeps adding.
 
 **What runs.** `scripts/pre-resolve.mjs` joins USCF online sections against the
 roster index in bulk and writes exactly what the edge `indexJoin` writes
@@ -1043,10 +1043,18 @@ day, or on the organiser's own statement that its events there are USCF rated.
 | Chess.com | **1,211 tournaments** (1,121 + 90), pending in `roster_tournament` | New series `sfs` (64Squares) 351, `evangel` 512, `aocc` (Westford) 201, `seneca` 54, `morning` 24, `ktchess` 6, `transcon` 3, `supersat` 2, `pnwcc` 12 (10 since skipped); Waltham variants under `wnz` 46 (Under-1201/1400 rated, First Thursday, First Friday, Goldfarb). `chesscomSeries()` extended to match. The running crawler reads the queue from the database and has already fetched 99 of them. |
 | Lichess | **659 swisses**, 13 new teams in `crawl_source` | chess-klub-uscf-tournaments, sam-schenk-uscf-online-chess-tournaments, uscf-rated-tournament-club, uscf-chess, presidential-pawn-storm, the-golden-pawn, westfield-chess-club, livingston-scholastic-chess-club, seattle-chess-school-uscf, chess4everyonecom, online-tr-tournaments, start-right-chess, chess-for-all-online-team. `lichessLane` now reads teams from `crawl_source` and keeps Lichess-casual swisses for them. |
 
+A third wave over the long tail added little: Chess.com `mechanics` 8,
+`cccsa` 10 (camp events; no safe slug pattern, so queued by id only), `uscoq`
+(US Championship Online Qualifier) 2, and 51 missed tournaments of series
+already crawled; Lichess 2 GCSCL teams with 8 swisses. `/api/team/of/{user}`
+needs an OAuth token (401), so teams could not be tallied from known players.
+Totals queued: **Chess.com 1,282 tournaments, Lichess 667 swisses from 15 new
+teams.**
+
 Estimated additional USCF sections: about 2,000 on Chess.com (upper bound: every
 cached section whose name falls in an accepted series) and 400 to 500 on
 Lichess (not checked against MUIR). The running crawler's Lichess lane exited at
-start ("nothing pending"), so the 659 Lichess rows wait for the next crawler run:
+start ("nothing pending"), so the 667 Lichess rows wait for the next crawler run:
 `node scripts/roster-crawler.mjs --platform lichess` once the lease is free.
 
 Not traceable or not settled: HERMOVENEXT / Impact Coaching Network (653
@@ -1062,7 +1070,7 @@ matching swisses. Mechanics' and Marshall Sunday Beginner were not reached.
 applied (`drop table public.preresolve_section;`). Rows written by the batch:
 `delete from section_link where source = 'index' and checked_at >= '2026-10-03 22:04';`
 and the `identity_edge` rows whose `sections` name those events. Queued targets:
-`delete from roster_tournament where status = 'pending' and series in ('sfs','evangel','aocc','morning','seneca','transcon','ktchess','supersat','pnwcc');`
+`delete from roster_tournament where status = 'pending' and series in ('sfs','evangel','aocc','morning','seneca','transcon','ktchess','supersat','pnwcc','mechanics','cccsa','uscoq');`
 and `delete from crawl_source where platform = 'lichess' and kind = 'team' and key <> 'dmv-chess-tournaments';`
 with their pending `roster_tournament` rows. No secret was set and no function
 was deployed.

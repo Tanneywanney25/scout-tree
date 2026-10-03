@@ -37,6 +37,9 @@ export function chesscomSeries(slug) {
   if (/^-*sfs-/.test(s)) return "sfs";
   if (/(^|-)(jackalope|fast-five|three-two-fastball|wild-wednesday|sunday-seven|tuesday-twelve)(-|$)/.test(s)) return "evangel";
   if (/^-*super-saturday-/.test(s)) return "supersat";
+  // Third wave: Mechanics' Institute USCF online events, US Championship Online Qualifier.
+  if (/^(mechanics-uscf-online-rated-(rapid|blitz)|2020-mechanics-(rapid|blitz)-online-championship)/.test(s)) return "mechanics";
+  if (/^\d{4}-\d{4}-us-championship-online-qualifier-/.test(s)) return "uscoq";
   if (/(^|-)aocc-/.test(s) && /uscf-rated/.test(s)) return "aocc";
   if (/^-*morning-membership-event-/.test(s)) return "morning";
   if (/^-*seneca-/.test(s)) return "seneca";
