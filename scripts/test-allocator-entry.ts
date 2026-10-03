@@ -12,7 +12,9 @@
 //   6. Lichess backoff: Retry-After honoured, else 6 s doubling, ±20%, ≤60 s;
 //   7. every request is accounted to its lane;
 //   8. under a 429, queued and new speculative work is shed, proven work is not;
-//   9. four Lichess rate limits in two minutes make every Lichess request fail fast.
+//   9. four Lichess rate limits in two minutes make every Lichess request fail fast;
+//  10. the search-wide speculative request budget: exactly N speculative requests
+//      are sent, the rest are shed unsent, proven work is untouched.
 // ============================================================================
 
 import {
@@ -26,6 +28,8 @@ import {
   SpeculativeShed,
   PlatformSaturated,
   lichessSaturated,
+  setSpeculativeBudget,
+  speculativeBudgetState,
 } from "../src/lib/identity/net";
 
 let failures = 0;
@@ -176,6 +180,26 @@ assert(r9 === "saturated" && Date.now() - t9 < 50, `a PROVEN Lichess request now
 script = () => 200;
 const cc9 = await politeFetch(cc(9000), {}, "chesscom");
 assert(cc9.status === 200, "Chess.com is unaffected by Lichess saturation");
+
+console.log("Scenario 10: search-wide speculative request budget");
+_resetBreakers();
+configureAllocator("chesscom", { capacity: 500, rate: 1000, minRate: 4, step: 2, recoverMs: 15_000, specShare: 1 });
+script = () => 404;
+starts.length = 0;
+setSpeculativeBudget(30);
+const spec10 = speculativeSignal();
+const out10 = await Promise.allSettled(Array.from({ length: 100 }, (_, i) => politeFetch(cc(10_000 + i), { signal: spec10 }, "chesscom")));
+const sent10 = starts.length;
+const shed10 = out10.filter((o) => o.status === "rejected" && (o.reason as Error) instanceof SpeculativeShed).length;
+assert(sent10 === 30 && shed10 === 70, `budget 30: ${sent10} speculative requests sent, ${shed10} shed unsent`);
+script = () => 200;
+const proven10 = await politeFetch(cc(10_500), {}, "chesscom");
+assert(proven10.status === 200, "proven work is not charged to or blocked by the speculative budget");
+const st10 = speculativeBudgetState();
+assert(!!st10 && st10.used === 30 && st10.denied === 70, `budget state reports used ${st10?.used}, denied ${st10?.denied}`);
+setSpeculativeBudget(null);
+const free10 = await politeFetch(cc(10_600), { signal: spec10 }, "chesscom").then(() => "sent", () => "shed");
+assert(free10 === "sent", "clearing the budget lets speculative work through again");
 
 console.log(failures ? `\n${failures} assertion(s) FAILED.` : "\nAll allocator scenarios passed.");
 process.exit(failures ? 1 : 0);

@@ -149,6 +149,24 @@ export class SpeculativeShed extends Error {
 // behind the pauses for ~20 minutes. Proven work keeps its place.
 const SHED_GRACE_MS = 30_000;
 
+// Search-wide speculative REQUEST budget (docs/roster-index.md 4.1). The
+// earlier caps counted guessed MEMBERS (8 at level 0, 3 per deeper section,
+// 24 per search), and each guessed member costs ~20–30 profile probes, so the
+// caps compounded: one acceptance search spent 671 speculative requests over
+// 38 sections, and speculative work was 70% of all platform requests. This
+// counts what is actually sent, across every section and level of one search;
+// once spent, every further speculative request is shed before it is sent.
+let specBudget: { limit: number; used: number; denied: number } | null = null;
+
+/** Start (or with null, clear) the current search's speculative budget. */
+export function setSpeculativeBudget(limit: number | null): void {
+  specBudget = limit === null ? null : { limit: Math.max(0, Math.floor(limit)), used: 0, denied: 0 };
+}
+
+export function speculativeBudgetState(): { limit: number; used: number; denied: number } | null {
+  return specBudget ? { ...specBudget } : null;
+}
+
 // ---------------------------------------------------------------------------
 // The rate scheduler: token bucket + priority lanes + AIMD.
 // ---------------------------------------------------------------------------
@@ -217,6 +235,10 @@ class RateScheduler {
   acquire(lane: Lane, signal?: AbortSignal): Promise<number> {
     if (signal?.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
     if (lane === "speculative" && Date.now() < this.shedUntil) return Promise.reject(new SpeculativeShed(this.name));
+    if (lane === "speculative" && specBudget && specBudget.used >= specBudget.limit) {
+      specBudget.denied++;
+      return Promise.reject(new SpeculativeShed(`${this.name} (search speculative budget spent)`));
+    }
     return new Promise<number>((resolve, reject) => {
       const w: Waiter = { enqueuedAt: Date.now(), resolve, reject, signal };
       if (signal) {
@@ -282,7 +304,10 @@ class RateScheduler {
     if (!w) return false;
     if (w.signal && w.onAbort) w.signal.removeEventListener("abort", w.onAbort);
     this.tokens -= 1;
-    if (lane === "speculative") this.specTokens -= 1;
+    if (lane === "speculative") {
+      this.specTokens -= 1;
+      if (specBudget) specBudget.used++;
+    }
     w.resolve(now - w.enqueuedAt);
     return true;
   }
