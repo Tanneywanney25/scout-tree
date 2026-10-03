@@ -1,6 +1,6 @@
 # Roster index: enumerable platform data instead of open-web search
 
-Session date: 2026-10-02. Branch: `traversal/section-bfs`.
+Session 2026-10-03 01:12 UTC onward (evening of 2026-10-02, US Eastern). Branch: `traversal/section-bfs`.
 Every number below states the tag or commit that produced it.
 
 ## Phase 0: Housekeeping and freeze
@@ -254,9 +254,13 @@ for the Phase 5 change; 02:45:37 for the Phase 6 freeze) with no lost or
 duplicated work: of 738 Chess.com rosters, 707 cost exactly 1 + rounds and 31
 cost less (fewer rounds played than scheduled); all 1,514 Lichess rosters cost
 2 (3 for the 18 validation targets, which also read the tournament's info). No
-row shows a second fetch. Not tested: an actual laptop sleep (the code path is the same as a
-kill: transport failures retry with backoff; the database client retries up
-to 20 times with backoff to 60 s). A lease (`crawl_lease`, `4878633`) keeps a
+row shows a second fetch. **An actual sleep happened** (unplanned): the laptop slept from about 05:55
+to 14:22 UTC during the third crawl run. On wake, the two in-flight requests
+failed as transport errors, the run's 2.5-hour bound had passed, and it exited
+normally; both tournaments that were mid-fetch were still `pending` with
+`attempts = 0` and no partial data, and the lease (last renewed 05:55) had
+expired on its own. The release call at wake did not land; harmless, because
+the lease is time-bounded. A lease (`crawl_lease`, `4878633`) keeps a
 laptop run and the edge slices (7.2) from ever crawling at once.
 
 ### 3.4 Projection, 3.5 backfill coverage
@@ -514,7 +518,27 @@ Telling 76% from last session's reported 91% would need **~95 per arm**; a
 
 ### #44: what hung
 
-See the diagnosis note at the end of this section.
+Reproduced after the run with the same bundle and a diagnostic copy of the
+harness that writes its events as they happen and, 60 s after an unheeded
+abort, dumps what the process is still waiting on (`acc6/diag-entry.ts`):
+
+- The 25-minute abort fired at 1,500 s; the search had not returned at
+  1,560 s (exit by the dump). **Same failure.**
+- The last HTTP request of any kind left at **728 s**. For the next 13
+  minutes there was none, while **four engine instances** kept emitting
+  heartbeats, each "working" a Lichess-hosted event with no seeds and nothing
+  queued — waiting, not computing (CPU stayed flat in the live #45 check).
+- Open resources at the dump: one TCP socket, stdout's pipe, timers. The
+  request just before the silence was the Lichess team-history stream (headers
+  at 724 s).
+
+So: the team-history NDJSON stream stopped sending mid-body; `reader.read()`
+never settled; the single-file stream lane stayed held; every section worker
+that needed the organiser's history queued behind it; and nothing in that
+chain listens to the search's abort (`politeFetch`'s timeout and abort end at
+the headers). Fix `98b4cea`: every response body read now rejects on abort and
+after 30 s without a byte (`guardBody`, `test-allocator` scenario 11). The
+re-run of #44 on the fixed code is recorded just below.
 
 ## Phase 7: Retrieval and hosting, decided
 
@@ -669,7 +693,16 @@ remote. Times UTC, 2026-10-03.
 | R12 | 02:32 | Deployed a **new** function `roster-crawl` v1 (service-role only; 401 otherwise). **No schedule**: `supabase/sql/roster-crawl-schedule.sql` is staged, not run. | `supabase functions delete roster-crawl` |
 | R13 | — | `explain-move` / `training-hint` list as v63 (v62 at session start) with **unchanged** bundle hash and `updated_at` (2026-10-02 23:22). Not deployed by me; recorded because the number moved. | — |
 
-Further rows for the Phase 6 run and the resumed crawl are at the end.
+| R14 | 02:46–05:11 | **The Phase 6 run**: 124 searches through production. Writes: **2,153** `identity_edge` rows, **151** `section_link` rows from index joins and **78** from harvests, the mirrored `resolved_handles` verdicts, footprints and crosstables in `muir_cache`. All are re-run alignments of public games. | `delete … where first_seen / checked_at between '2026-10-03 02:46' and '2026-10-03 05:12'` per table |
+| R15 | 05:12–05:38, 05:4x–14:2x, 14:24– | Three diagnostic searches for #44 (same writes as any search). | as R14, by time window |
+| R16 | 05:11–05:55, 14:24– | Crawl runs 3 and 4 (`roster_tournament`, `crawl_source`, `series_platform` rows; `crawl_lease` taken and released). | as R6 / R9 |
+
+Database size: **112 MB** at the start, **187 MB** at 14:25. The roster index is
+**5.8 MB** of that (3,745 crawled rosters); `muir_cache` is **153 MB** (about
+83 MB at the start), grown by this session's ~140 searches at roughly 0.5 MB
+each. At that rate the 500 MB free-tier cap is a few hundred searches away
+unless `muir_cache` is pruned; nothing deletes its rows today (TTLs are applied
+on read).
 
 **Credentials.** Before the first code commit, and on every later commit, the
 staged diff was scanned for `sb_secret_…`, JWTs, `AIza…`, `sk-…` and e-mail
