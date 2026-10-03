@@ -419,7 +419,102 @@ index join, and is worth less than a section on a known platform.
 
 ## Phase 6: The measurement that was lost
 
-_pending_
+### 6.1 The pivot-rank metric, fixed and proven first
+
+`5459748` (last session) read the rank before the mapping, which cured "every
+value is 1", but it still counted every **already-known** member (rank 1000)
+as ranked above the scouted pivot, so the position grew with the store. Fixed
+in `d3b908a`: position = 1 + still-unknown, eligible members ranked above the
+pivot when it resolved. Proven on a scripted known case
+(`scripts/test-pivotrank.mjs`, the engine injected so no network): four
+scenarios pass; the same scenario reads **4** on the previous metric and **3**
+on the fixed one (K stored, C third among the unknown).
+
+### 6.2–6.3 Sample and conditions
+
+- **Held-out sample**: 60 online-rated + 15 OTB-only members drawn with a fixed
+  seed from the investigation's 900-member activity-weighted sample, after
+  removing last session's 35 and everyone with a stored identity (Decisions
+  15). None was in the store when the sample was drawn.
+- **Frozen**: tag **`rindex-p6`** (`fbd1a41`); client bundle built once from
+  it at 02:46; `resolve-identity` v110 = its edge code; roster index frozen
+  (crawler stopped 02:45:37; at freeze: 738 Chess.com rosters covering
+  2026-07-06 → 10-03 plus the 28 validation targets, 1,514 Lichess DMV
+  rosters covering 2022-09 → 2026-10). **No code edit during the run.**
+- Run 02:46:05 → 05:11:03 UTC, one fresh process per search, strictly
+  serial, a 25-minute runaway guard in the harness (a clock, see Errors), every
+  HTTP request counted. Then every online player whose first search resolved
+  was searched again (warm).
+- **Disclosed conditions.** (a) Lichess's `/api/user/{name}` was in its long
+  penalty for this address from before the run (Phase 4.3); the run drew 83
+  Lichess rate-limit events, all handled by the breaker. (b) The store grows
+  during the run: 14 of the 75 first searches found their player already
+  stored by an earlier player's search (mostly an index join that aligned a
+  shared section). Those 14 are in the warm column, not the cold one.
+- **One bug, recorded, run finished anyway:** player #44's process did not end
+  when the harness's 25-minute guard aborted it, and was killed by the runner
+  at 27 minutes with no output. It is counted as a failure at 1,620 s.
+  Diagnosis below.
+
+### 6.4–6.5 Results, cold and warm never merged
+
+Cold = no stored identity for the player when their first search started.
+
+| Metric | **Cold**, online-rated (n = 46) | **Warm**, online-rated (n = 63: 14 first searches found stored + 49 repeats) | OTB-only (n = 15, all cold) |
+|---|---|---|---|
+| Resolved (tournament-proven, ≥ 0.85) | **35 / 46 = 76.1%** (Wilson 95% CI **62–86%**) | **63 / 63 = 100%** (94–100%) | 0 / 15 (nothing to align, by design) |
+| … of which verdict-grade (≥ 0.97) | 31 (67.4%); 4 are single weak sections (0.93, leads) | — | — |
+| How the cold ones resolved | index join of the player's own section **8**; index join inside the walk **3**; walk alignment / crown **24** | index **26**, store **25**, walk 12 | — |
+| Latency, median / p95 | **48.5 s / 900 s** (resolved only: 36.8 s / 166.7 s; index-answered: **0.79 s**) | **0.70 s / 37.4 s** | **≈ 1 ms** / 2 ms, 0 requests |
+| Platform requests per search, median: proven / speculative | **54 / 200** | 0 / 0 | 0 / 0 |
+| Speculative share of all platform requests | **22.3%** aggregate (per walk, median 59%; **22 of 37 walks spent ≥ 240 of the 250 budget**) | (few requests) | — |
+| 404 share of Chess.com requests | **14.8%** (of 29,673 requests) | (few requests) | — |
+| Identities stored per aligned section | **21.4** (285 sections aligned) | 21.4 (56) | — |
+| Time to first aligned section, median | **41.8 s** (n = 38) | 0.58 s | — |
+| Rank of first resolved (scouted) pivot | 5, 22, 3, 11, 4, 13, 14 — median **11**, **n = 7** | 3, 11, 18, 8 (n = 4) | — |
+| Traversal depth reached (searches that walked) | level 0: 13, 1: 15, 2: 3, 3: 2, 4: 4 | 0: 9, 1: 3 | — |
+| Index joins: tried / resolved / not covered | 893 / **199 (22%)** / 290 (32%: no crawled tournament in that date window) | 263 / 46 / 42 | — |
+| Searches whose answer came from the index | **11 / 46** (24%; 31% of the resolved) | 27 / 63 | — |
+| Bridges resolved by the index (deeper sections, no walk) | 180 | 12 | — |
+| Runs stopped by a guard | 2 (#45 at 25 min, ended cleanly; #44 killed, see below) | 0 | 0 |
+| Longest silence in any run | 43.7 s | 15.7 s | — |
+
+**Against the earlier numbers** (different samples and conditions, so
+reported, not concluded from): the investigation's baseline resolved **6 / 23
+(26%, CI 12–47%)** online-rated players in 5 minutes; last session's
+contaminated run reported 21 / 23. Speculative share: **70.0% → 22.3%**.
+Chess.com 404 share: **63.5% → 43.9% → 14.8%**. Per search, median: 649
+platform calls (baseline) → 80 proven + 518 speculative (last session) →
+**54 proven + 200 speculative** (cold; a walk alone: 343 in total, median). OTB-only: 338 s → 0.34 s → ~1 ms.
+
+**Why the 11 cold failures failed** (from each run's own record): 1 has only
+ICC/ChessKid sections (nothing alignable; answered in 49 s); 2 have a single
+online section that never aligned and an empty frontier (61–62 s); **7
+aligned 15–35 sections each without the target's own handle ever appearing**
+(frontier exhausted ×3, request budget ×3, guard ×1) — the target's own
+sections are the ones nothing aligns; 1 is the #44 hang.
+
+**Does portal ranking do real work?** Not determinable from this run: only 7
+of 46 cold searches resolved their first pivot by scouting (the rest were
+answered by the index, a stored link or an alignment seeded by stored
+handles), and their ranks (median 11) are not comparable to a random order
+without each section's count of eligible members, which the run did not
+record. The metric is now correct; the sample that exercises it is too small.
+
+### 6.6 Confidence and sample size
+
+Cold online-rated resolution is **76.1%, 95% CI 62–86%** (n = 46; verdict-grade
+67.4%, CI 53–79%). The change this report claims is from the investigation's
+**26%**: detecting 26% → 76% at two-sided α = 0.05 with 80% power needs **15
+per arm**, which both samples exceed — but the two arms were not run under the
+same conditions (different players, a 240 s stop, a dead discovery backend
+then; the index and a Lichess penalty now), so the comparison is indicative.
+Telling 76% from last session's reported 91% would need **~95 per arm**; a
+±10-point interval on 76% needs **~70** cold online-rated players.
+
+### #44: what hung
+
+See the diagnosis note at the end of this section.
 
 ## Phase 7: Retrieval and hosting, decided
 
