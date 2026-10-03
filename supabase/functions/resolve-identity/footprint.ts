@@ -10,11 +10,13 @@
 //
 // MUIR carries no platform field. The platform of each section is read, in
 // order of trust, from: a stored verdict for the event (event_platform_cache,
-// written when a section aligns), a learned series (series_platform), the
-// event/section title, else "unknown". In production's muir_cache on
-// 2026-10-02, 46% of online sections named no platform in the title, 43% were
-// ICC, 10% Chess.com, 0.1% Lichess — so a title-only rule would zero out most
-// real online players.
+// written when a section aligns or the roster index joins it); a series proved
+// by an alignment or present in the roster index; the event/section title; a
+// series seen in a Chess.com member's public tournament list; a learned
+// organizer prefix ("dmvchess.com …" → Lichess); else "unknown". Measured
+// 2026-10-03 over 13,535 distinct footprint sections: 57% had no platform
+// before these layers, 23% after (docs/roster-index.md, Phase 5). ICC events
+// name ICC in the title (314 of 314 ICC-hosted sections in the cache).
 //
 // Cost: one MUIR request per 100 games, at most FOOTPRINT_PAGE_CAP pages,
 // served from muir_cache when warm; the footprint itself is cached 3 days.
@@ -28,7 +30,7 @@ import {
   seriesKey,
   type OnlineSecRef,
 } from "./uscf.ts";
-import { cacheGet, cachePut, getEventPlatforms, getSeriesPlatforms } from "../_shared/identityStore.ts";
+import { cacheGet, cachePut, getEventPlatforms, getSeriesPlatforms, type SeriesPlatformRow } from "../_shared/identityStore.ts";
 
 export type FootprintPlatform = "chesscom" | "lichess" | "icc" | "chesskid" | "unknown";
 
@@ -41,7 +43,7 @@ export interface FootprintSection {
   rs: string;
   platform: FootprintPlatform;
   /** Where the platform came from. */
-  via: "stored" | "series" | "title" | "none";
+  via: "stored" | "series" | "index" | "title" | "listing" | "prefix" | "none";
   games: number;
 }
 
@@ -61,25 +63,51 @@ export interface MemberFootprint {
   /** Chess.com / Lichess / unknown-host sections, newest first, capped — the
    *  traversal's expansion frontier when this member is resolved. */
   sections: FootprintSection[];
+  /** Payload version (FOOTPRINT_VERSION). */
+  v?: number;
 }
 
 const FOOTPRINT_TTL_MS = 3 * 24 * 60 * 60_000;
 const FOOTPRINT_PAGE_CAP = 2;
 const SECTIONS_RETURNED = 80;
 
+/** Only a series proved by an aligned section outranks the title; index,
+ *  listing and prefix evidence fill a blank the title leaves. */
+const STRONG_SERIES = new Set(["alignment"]);
+/** Footprint payload version: bump when classification changes, so cached
+ *  footprints (3 days) are recomputed instead of serving stale platforms. */
+export const FOOTPRINT_VERSION = 2;
+/** The organizer token of a series key ("dmvchess.com action swiss" → "dmvchess.com"). */
+export const organizerPrefix = (key: string) => `prefix:${key.split(" ")[0] || ""}`;
+
 function classify(
   ref: OnlineSecRef,
   stored: Map<string, { platform: string }>,
-  series: Map<string, string>
+  series: Map<string, SeriesPlatformRow>
 ): { platform: FootprintPlatform; via: FootprintSection["via"] } {
   const norm = (p?: string): FootprintPlatform | null =>
     p === "chesscom" || p === "lichess" || p === "icc" || p === "chesskid" ? p : null;
+  // 1. A stored verdict for this very event (alignment, harvest or index join).
   const fromStore = norm(stored.get(ref.eventId)?.platform);
   if (fromStore) return { platform: fromStore, via: "stored" };
-  const fromSeries = norm(series.get(seriesKey(ref.eventName)));
-  if (fromSeries) return { platform: fromSeries, via: "series" };
+  // 2. The series, when an aligned section or a crawled tournament proved it.
+  const key = seriesKey(ref.eventName);
+  const s = series.get(key);
+  if (s && STRONG_SERIES.has(s.source)) {
+    const p = norm(s.platform);
+    if (p) return { platform: p, via: "series" };
+  }
+  // 3. The title ("… on Chess.com", "… on ICC").
   const fromTitle = norm(platformGuess(nameForMatch(`${ref.eventName} ${ref.sectionName || ""}`)));
   if (fromTitle) return { platform: fromTitle, via: "title" };
+  // 4. Weaker series evidence: a crawled tournament of that name (index), a
+  //    Chess.com public listing of that name, then a learned organizer prefix.
+  if (s) {
+    const p = norm(s.platform);
+    if (p) return { platform: p, via: s.source === "index" ? "index" : "listing" };
+  }
+  const pre = norm(series.get(organizerPrefix(key))?.platform);
+  if (pre) return { platform: pre, via: "prefix" };
   return { platform: "unknown", via: "none" };
 }
 
@@ -87,7 +115,7 @@ export async function memberFootprint(uscfId: string, overBudget: () => boolean)
   const id = uscfId.replace(/\D/g, "");
   if (!id) return null;
   const cached = await cacheGet<MemberFootprint>("footprint", id, FOOTPRINT_TTL_MS);
-  if (cached) return cached;
+  if (cached && cached.v === FOOTPRINT_VERSION) return cached;
   let pages = 0;
   let truncated = false;
   const refs = await fetchMemberOnlineSections(
@@ -107,7 +135,10 @@ export async function memberFootprint(uscfId: string, overBudget: () => boolean)
   if (overBudget() && !refs.length) return null; // never cache a walk the clock cut short
   const [stored, series] = await Promise.all([
     getEventPlatforms(refs.map((r) => r.eventId)),
-    getSeriesPlatforms(refs.map((r) => seriesKey(r.eventName))),
+    getSeriesPlatforms(refs.flatMap((r) => {
+      const k = seriesKey(r.eventName);
+      return [k, organizerPrefix(k)];
+    })),
   ]);
   const fp: MemberFootprint = {
     uscfId: id,
@@ -119,6 +150,7 @@ export async function memberFootprint(uscfId: string, overBudget: () => boolean)
     pagesRead: pages,
     truncated,
     sections: [],
+    v: FOOTPRINT_VERSION,
   };
   const secs: FootprintSection[] = [];
   for (const r of refs) {

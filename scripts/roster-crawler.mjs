@@ -70,6 +70,45 @@ export function chesscomSeries(slug) {
 const idNum = (slug) => Number(String(slug).match(/(\d+)$/)?.[1] || 0);
 
 // ---------------------------------------------------------------------------
+// Platform inference (Phase 5): every tournament NAME the crawler sees teaches
+// series_platform which platform a USCF series of that name runs on. Keys are
+// built exactly like seriesKey() in supabase/functions/resolve-identity/uscf.ts
+// (slugs: dashes read as spaces); generic keys ("rapid", "3 2 blitz") are
+// skipped because every platform has them.
+// ---------------------------------------------------------------------------
+export function seriesKey(name) {
+  return String(name || "")
+    .replace(/[_-]/g, " ")
+    .toLowerCase()
+    .replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/g, " ")
+    .replace(/\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*\b/g, " ")
+    .replace(/\b\d+(st|nd|rd|th)\b/g, " ")
+    .replace(/[0-9]+/g, " ")
+    .replace(/\b(round|rd|section|sec|week|wk|event|edition|no|part)\b/g, " ")
+    .replace(/[^a-z.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+const GENERIC_KEYS = new Set(["", "rapid", "blitz", "bullet", "classical", "standard", "open", "rated", "online", "beginner", "swiss", "arena", "tournament", "championship", "live", "rapid quad", "blitz quad", "quad", "lightning", "super blitz", "hyper", "untitled", "rapid open", "blitz open", "scholastic", "chess", "club", "test", "practice", "casual", "seven", "wild"]);
+export const distinctiveKey = (k) =>
+  !GENERIC_KEYS.has(k) && k.replace(/\b(rapid|blitz|bullet|open|rated|online|u|i|ii|g|x)\b/g, "").trim().length >= 3;
+
+const seriesSeen = new Set();
+async function learnSeries(pairs, source) {
+  const rows = [];
+  for (const [name, platform] of pairs) {
+    const k = seriesKey(name);
+    if (!distinctiveKey(k) || seriesSeen.has(`${k}|${platform}`)) continue;
+    seriesSeen.add(`${k}|${platform}`);
+    rows.push({ series_key: k, platform, source, n_events: 0 });
+  }
+  // Never overwrite: an alignment-learned row outranks anything learned here.
+  for (let i = 0; i < rows.length; i += 500) {
+    await rest("POST", "series_platform?on_conflict=series_key", rows.slice(i, i + 500), "resolution=ignore-duplicates,return=minimal").catch(() => null);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Adaptive pacer: serial, rate halves on a block, steps back when clean.
 // ---------------------------------------------------------------------------
 class Pacer {
@@ -283,7 +322,9 @@ async function pollChesscomSource(src) {
   if (res.status === 200) {
     const j = JSON.parse(res.text);
     const rows = [];
-    for (const t of [...(j.finished || []), ...(j.in_progress || [])]) {
+    const all = [...(j.finished || []), ...(j.in_progress || [])];
+    await learnSeries(all.map((t) => [String(t.url || t["@id"] || "").split("/").pop(), "chesscom"]), "listing");
+    for (const t of all) {
       const slug = String(t.url || t["@id"] || "").split("/").pop().toLowerCase();
       const series = chesscomSeries(slug);
       if (!series) continue;
@@ -402,7 +443,7 @@ const stats = {
 async function nextPending(platform, n = 25) {
   return rest(
     "GET",
-    `roster_tournament?select=platform,tid,series,n_rounds,starts_at,attempts&platform=eq.${platform}&status=eq.pending&order=priority.desc,id_num.desc&limit=${n}`
+    `roster_tournament?select=platform,tid,series,name,n_rounds,starts_at,attempts&platform=eq.${platform}&status=eq.pending&order=priority.desc,id_num.desc&limit=${n}`
   );
 }
 
@@ -413,6 +454,8 @@ async function store(platform, t, r) {
   if (r.row) {
     await rest("PATCH", base, { ...r.row, status: "done", requests: r.requests, fetched_at: new Date().toISOString(), last_error: null }, "return=minimal");
     st.done++;
+    const nm = r.row.name || t.name;
+    if (nm) await learnSeries([[nm, platform]], "index");
   } else if (r.gone) {
     await rest("PATCH", base, { status: "skipped", last_error: "not found", requests: r.requests }, "return=minimal");
     st.skipped++;

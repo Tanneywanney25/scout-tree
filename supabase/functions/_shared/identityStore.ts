@@ -700,17 +700,28 @@ export async function getEventPlatforms(eventIds: string[]): Promise<Map<string,
   return out;
 }
 
-export async function getSeriesPlatforms(keys: string[]): Promise<Map<string, string>> {
+export interface SeriesPlatformRow {
+  platform: string;
+  /** alignment | index | listing | prefix — see migrations/20261003000200. */
+  source: string;
+}
+
+export async function getSeriesPlatforms(keys: string[]): Promise<Map<string, SeriesPlatformRow>> {
   const rest = supabaseRest();
   const uniq = [...new Set(keys.filter(Boolean))];
-  const out = new Map<string, string>();
+  const out = new Map<string, SeriesPlatformRow>();
   if (!rest || !uniq.length) return out;
   try {
-    const res = await fetch(`${rest.url}/rest/v1/series_platform?series_key=in.(${inList(uniq)})&select=series_key,platform`, {
-      headers: headers(rest.key),
-    });
-    if (!res.ok) return out;
-    for (const r of (await res.json()) as { series_key: string; platform: string }[]) out.set(r.series_key, r.platform);
+    for (let i = 0; i < uniq.length; i += 150) {
+      const res = await fetch(
+        `${rest.url}/rest/v1/series_platform?series_key=in.(${inList(uniq.slice(i, i + 150))})&select=series_key,platform,source`,
+        { headers: headers(rest.key) }
+      );
+      if (!res.ok) continue;
+      for (const r of (await res.json()) as { series_key: string; platform: string; source?: string }[]) {
+        out.set(r.series_key, { platform: r.platform, source: r.source || "alignment" });
+      }
+    }
   } catch {
     /* fail soft */
   }
@@ -783,7 +794,7 @@ export async function putSeriesPlatform(seriesKey: string, platform: string): Pr
     const res = await fetch(`${rest.url}/rest/v1/series_platform?on_conflict=series_key`, {
       method: "POST",
       headers: headers(rest.key, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }),
-      body: JSON.stringify({ series_key: seriesKey, platform, updated_at: new Date().toISOString() }),
+      body: JSON.stringify({ series_key: seriesKey, platform, source: "alignment", updated_at: new Date().toISOString() }),
     });
     return res.ok;
   } catch {
