@@ -485,44 +485,85 @@ function retryAfterMs(res: Response): number | undefined {
   return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
 }
 
-// Lichess saturation breaker. Acceptance players #6 and #22 each drew 30–46
-// Lichess 429s within minutes; every queued request retried through pauses of
-// up to 60 s, which kept the block alive (the previous session saw a block
-// last 40+ minutes the same way), and both searches made no progress for
-// 13–20 minutes. After LICHESS_SATURATION_EVENTS rate-limit events inside
-// LICHESS_SATURATION_WINDOW_MS, EVERY Lichess request (proven too) fails fast
-// for LICHESS_SATURATION_COOLOFF_MS. The engine reads that as a retryable
-// hole, the same as an outage, and moves on to work that does not need
-// Lichess instead of queueing behind it.
+// Lichess saturation breaker, PER ENDPOINT CLASS. Acceptance players #6 and
+// #22 each drew 30–46 Lichess 429s within minutes; every queued request
+// retried through pauses of up to 60 s, which kept the block alive, and both
+// searches made no progress for 13–20 minutes. After
+// LICHESS_SATURATION_EVENTS rate-limit events on one endpoint class inside
+// LICHESS_SATURATION_WINDOW_MS, every request of THAT class (proven too) fails
+// fast for the cool-off. The engine reads that as a retryable hole and moves
+// on to work that does not need it.
+//
+// Measured 2026-10-03 (docs/roster-index.md 4.3): Lichess blocks per class.
+// /api/games/user tripped on the 10th request at 2/s and cleared in 1.3–3.4 s,
+// four trips in a row, with no escalation; after a 40-request overrun it still
+// cleared in 1.5 s. /api/user/{name} meanwhile stayed 429 for every name for
+// at least 13.7 minutes, while /api/users/status, autocomplete and the
+// tournament exports kept answering 200. So one class's block must not take
+// the others down (the first version dropped ALL Lichess requests), and a
+// class that 429s again right after its cool-off is still in a long penalty:
+// the cool-off doubles each time, from 90 s up to 15 minutes.
 const LICHESS_SATURATION_EVENTS = 4;
 const LICHESS_SATURATION_WINDOW_MS = 120_000;
 const LICHESS_SATURATION_COOLOFF_MS = 90_000;
-let lichessLimitTimes: number[] = [];
-let lichessSaturatedUntil = 0;
+const LICHESS_SATURATION_COOLOFF_MAX_MS = 15 * 60_000;
+interface ClassBreaker {
+  times: number[];
+  until: number;
+  /** Cool-off to apply at the next trip (doubles on a re-trip). */
+  next: number;
+}
+const freshClassBreaker = (): ClassBreaker => ({ times: [], until: 0, next: LICHESS_SATURATION_COOLOFF_MS });
+let lichessBreakers: Record<LichessClass, ClassBreaker> = {
+  user: freshClassBreaker(),
+  games: freshClassBreaker(),
+  export: freshClassBreaker(),
+  other: freshClassBreaker(),
+};
 
-/** Thrown to a Lichess request refused while Lichess is saturated. */
+/** Thrown to a Lichess request refused while its endpoint class is saturated. */
 export class PlatformSaturated extends Error {
-  constructor() {
-    super("lichess is rate-limiting this address — failing fast during the cool-off");
+  constructor(cls = "") {
+    super(`lichess is rate-limiting ${cls ? cls + " requests from " : ""}this address — failing fast during the cool-off`);
     this.name = "PlatformSaturated";
   }
 }
 
-/** Record a Lichess rate-limit event; returns true when it trips the breaker. */
-function noteLichessLimit(now = Date.now()): boolean {
-  lichessLimitTimes = lichessLimitTimes.filter((t) => now - t < LICHESS_SATURATION_WINDOW_MS);
-  lichessLimitTimes.push(now);
-  if (lichessLimitTimes.length >= LICHESS_SATURATION_EVENTS && now >= lichessSaturatedUntil) {
-    lichessSaturatedUntil = now + LICHESS_SATURATION_COOLOFF_MS;
-    lichessLimitTimes = [];
-    for (const s of Object.values(lichessSchedulers)) s.dropAll(() => new PlatformSaturated());
-    return true;
+/** Record a Lichess rate-limit event on a class; returns true when it trips. */
+function noteLichessLimit(cls: LichessClass, now = Date.now()): boolean {
+  const b = lichessBreakers[cls];
+  // A 429 soon after a cool-off ended: the penalty is still running. Re-trip
+  // at once, for twice as long.
+  const reTrip = b.until > 0 && now >= b.until && now - b.until < LICHESS_SATURATION_WINDOW_MS;
+  b.times = b.times.filter((t) => now - t < LICHESS_SATURATION_WINDOW_MS);
+  b.times.push(now);
+  if (now < b.until) return false;
+  if (!reTrip && b.times.length < LICHESS_SATURATION_EVENTS) {
+    if (b.until > 0 && now - b.until >= LICHESS_SATURATION_WINDOW_MS) b.next = LICHESS_SATURATION_COOLOFF_MS; // calm since
+    return false;
   }
-  return false;
+  const cool = reTrip ? Math.min(LICHESS_SATURATION_COOLOFF_MAX_MS, b.next * 2) : b.next;
+  b.next = cool;
+  b.until = now + cool;
+  b.times = [];
+  lichessSchedulers[cls].dropAll(() => new PlatformSaturated(cls));
+  return true;
 }
 
-export function lichessSaturated(now = Date.now()): boolean {
-  return now < lichessSaturatedUntil;
+/** Is this class (or, with no class, any class) in its cool-off? */
+export function lichessSaturated(now = Date.now(), cls?: LichessClass): boolean {
+  if (cls) return now < lichessBreakers[cls].until;
+  return Object.values(lichessBreakers).some((b) => now < b.until);
+}
+
+/** TEST-ONLY: record a rate-limit event on a class at a given time. */
+export function _noteLichessLimit(cls: LichessClass, now: number): boolean {
+  return noteLichessLimit(cls, now);
+}
+
+/** Exported for tests: the current cool-off of a class (ms left). */
+export function lichessCooloffLeft(cls: LichessClass, now = Date.now()): number {
+  return Math.max(0, lichessBreakers[cls].until - now);
 }
 
 /** Exported for tests: the pause a Lichess 429 earns. */
@@ -679,8 +720,7 @@ export function _resetBreakers(): void {
     st.n = 0;
     st.at = 0;
   }
-  lichessLimitTimes = [];
-  lichessSaturatedUntil = 0;
+  lichessBreakers = { user: freshClassBreaker(), games: freshClassBreaker(), export: freshClassBreaker(), other: freshClassBreaker() };
 }
 
 // In a browser a Cloudflare challenge carries no CORS header, so the page
@@ -743,11 +783,11 @@ export async function politeFetch(
       }
     };
     const isProbe = breakerAdmit(platform);
-    if (platform === "lichess" && lichessSaturated()) {
-      netStats.shed.lichess++;
-      throw new PlatformSaturated();
-    }
     const lcls = platform === "lichess" ? lichessClassOf(url) : null;
+    if (lcls && lichessSaturated(Date.now(), lcls)) {
+      netStats.shed.lichess++;
+      throw new PlatformSaturated(lcls);
+    }
     const scheduler = platform === "chesscom" ? chesscomScheduler : lichessSchedulers[lcls!];
     let res: Response;
     let waitMs = 0;
@@ -791,7 +831,7 @@ export async function politeFetch(
       } else {
         netStats.limitEvents.lichess++;
         scheduler.onLimit(lichessBackoffMs(lcls!, res));
-        noteLichessLimit();
+        noteLichessLimit(lcls!);
       }
       return res;
     }
@@ -806,9 +846,9 @@ export async function politeFetch(
         netStats.limitEvents.lichess++;
         backoff = lichessBackoffMs(lcls!, res);
         scheduler.onLimit(backoff);
-        if (noteLichessLimit()) {
-          console.warn(`[net] Lichess is saturated (${LICHESS_SATURATION_EVENTS} rate limits in ${LICHESS_SATURATION_WINDOW_MS / 1000}s) — failing Lichess requests fast for ${LICHESS_SATURATION_COOLOFF_MS / 1000}s.`);
-          return res; // no retry into a saturated platform
+        if (noteLichessLimit(lcls!)) {
+          console.warn(`[net] Lichess ${lcls} requests are saturated — failing them fast for ${Math.round(lichessCooloffLeft(lcls!) / 1000)}s (other Lichess endpoints unaffected).`);
+          return res; // no retry into a saturated endpoint class
         }
         console.warn(`[net] Lichess 429 (${lcls}) on ${url} — pausing that endpoint class ${Math.round(backoff / 1000)}s.`);
       }

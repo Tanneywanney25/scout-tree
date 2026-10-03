@@ -12,7 +12,8 @@
 //   6. Lichess backoff: Retry-After honoured, else 6 s doubling, ±20%, ≤60 s;
 //   7. every request is accounted to its lane;
 //   8. under a 429, queued and new speculative work is shed, proven work is not;
-//   9. four Lichess rate limits in two minutes make every Lichess request fail fast;
+//   9. four rate limits on one Lichess endpoint class in two minutes make that
+//      class (only) fail fast; a re-trip right after the cool-off doubles it;
 //  10. the search-wide speculative request budget: exactly N speculative requests
 //      are sent, the rest are shed unsent, proven work is untouched.
 // ============================================================================
@@ -30,6 +31,8 @@ import {
   lichessSaturated,
   setSpeculativeBudget,
   speculativeBudgetState,
+  _noteLichessLimit,
+  lichessCooloffLeft,
 } from "../src/lib/identity/net";
 
 let failures = 0;
@@ -164,22 +167,34 @@ const proven8 = await politeFetch(cc(6200), {}, "chesscom");
 assert(proven8.status === 200, "a proven request still goes through after the pause");
 assert(getNetStats().shed.chesscom >= 11, `shed counted (${getNetStats().shed.chesscom})`);
 
-console.log("Scenario 9: Lichess saturation breaker");
+console.log("Scenario 9: Lichess saturation breaker, per endpoint class, escalating");
 _resetBreakers();
 for (const c of ["user", "games", "export", "other"] as const) configureAllocator(c, { capacity: 50, rate: 1000, minRate: 1, step: 1, recoverMs: 60_000, specShare: 1 });
-script = (u) => (u.includes("lichess.org") ? 429 : 200);
-const li = (i: number) => `https://lichess.org/api/user/u${i}`;
-const spec9 = speculativeSignal();
-// One speculative 429 per endpoint class (a second on the same class would be shed unsent).
-for (const u of ["https://lichess.org/api/user/a1", "https://lichess.org/api/games/user/a1", "https://lichess.org/api/swiss/abcdefgh/games", "https://lichess.org/api/fide/player?q=a"])
-  await politeFetch(u, { signal: spec9 }, "lichess").catch(() => undefined);
-assert(lichessSaturated(), "four Lichess 429s inside two minutes trip the breaker");
+const T9 = Date.now();
+for (let k = 0; k < 3; k++) _noteLichessLimit("user", T9 + k * 1000);
+assert(!lichessSaturated(T9 + 3000, "user"), "three /api/user 429s inside two minutes do not trip it");
+assert(_noteLichessLimit("user", T9 + 3000), "the fourth trips the user class");
+assert(lichessSaturated(T9 + 3001, "user") && !lichessSaturated(T9 + 3001, "games") && !lichessSaturated(T9 + 3001, "export"), "only the user class is saturated; games and exports are not");
+script = (u) => (u.includes("lichess.org") ? 200 : 200);
 const t9 = Date.now();
-const r9 = await politeFetch(li(99), {}, "lichess").then(() => "sent", (e) => (e instanceof PlatformSaturated ? "saturated" : String(e)));
-assert(r9 === "saturated" && Date.now() - t9 < 50, `a PROVEN Lichess request now fails in ${Date.now() - t9} ms instead of queueing (${r9})`);
-script = () => 200;
+const r9 = await politeFetch("https://lichess.org/api/user/someone", {}, "lichess").then(() => "sent", (e) => (e instanceof PlatformSaturated ? "saturated" : String(e)));
+assert(r9 === "saturated" && Date.now() - t9 < 50, `a PROVEN /api/user request fails in ${Date.now() - t9} ms instead of queueing (${r9})`);
+const g9 = await politeFetch("https://lichess.org/api/swiss/abcdefgh/games", {}, "lichess");
+assert(g9.status === 200, "a tournament export still goes through while /api/user is saturated");
 const cc9 = await politeFetch(cc(9000), {}, "chesscom");
 assert(cc9.status === 200, "Chess.com is unaffected by Lichess saturation");
+const end1 = T9 + 3000 + lichessCooloffLeft("user", T9 + 3000);
+assert(end1 - (T9 + 3000) === 90_000, `first cool-off 90 s (${(end1 - T9 - 3000) / 1000} s)`);
+assert(_noteLichessLimit("user", end1 + 1000), "one 429 right after the cool-off re-trips at once");
+const c2 = lichessCooloffLeft("user", end1 + 1000);
+assert(c2 === 180_000, `second cool-off doubles to 180 s (${c2 / 1000} s)`);
+let at = end1 + 1000 + c2;
+for (let k = 0; k < 6; k++) {
+  _noteLichessLimit("user", at + 500);
+  at = at + 500 + lichessCooloffLeft("user", at + 500);
+}
+assert(lichessCooloffLeft("user", at - 1) <= 15 * 60_000, "the cool-off is capped at 15 minutes");
+assert(!_noteLichessLimit("user", at + 3 * 60_000), "a single 429 after a calm stretch (> 2 min past the cool-off) does not re-trip");
 
 console.log("Scenario 10: search-wide speculative request budget");
 _resetBreakers();
