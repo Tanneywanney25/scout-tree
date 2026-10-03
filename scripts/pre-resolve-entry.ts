@@ -87,9 +87,9 @@ const [rostersRaw, links, progress, metas, xtKeys, evRows] = await Promise.all([
 const rosters = [...new Map(rostersRaw.filter((r) => r.starts_at && r.handles?.length).map((r) => [`${r.platform}:${r.tid}`, r])).values()];
 const evNames = new Map(evRows.map((r) => [r.key, r.name || ""]));
 const linked = new Set(links.filter((l) => l.status === "verified").map((l) => `${l.event_id}/${l.section_no}`));
-// An index link is written just before its identities; one with no 'resolved'
-// progress row may be a write this batch never finished, so it is joined again
-// (idempotent: the same link and edges are upserted).
+// An index link with no 'resolved' progress row (written by the edge indexJoin,
+// or by a run that was cut off before its progress write) is joined once more
+// so it gets one: idempotent, the same link and edges are upserted.
 const linkedElsewhere = new Set(links.filter((l) => l.status === "verified" && l.source !== "index").map((l) => `${l.event_id}/${l.section_no}`));
 const progressBy = new Map(progress.map((p) => [`${p.event_id}/${p.section_no}`, p]));
 const xtSet = new Set(xtKeys.map((r) => r.key));

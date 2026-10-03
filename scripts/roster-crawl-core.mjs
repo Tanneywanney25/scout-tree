@@ -21,6 +21,10 @@ const now = () => Date.now();
 // Wednesday / Sunday Seven), Westford CC "AOCC USCF rated", Morning Membership
 // Event, Seneca scholastic, Transcontinental Scholastic, KT Chess. Live
 // tournaments only: a slug with no numeric id (daily events) is out of scope.
+// Second wave (same day, same name-and-date test): Waltham's other formats,
+// "<tc>-1201|1400|1401-rated-<n>" (USCF "(Under 1400) RATED #n"; Chess.com
+// names it "<1201 RATED"), First Thursday / First Friday and Goldfarb, all
+// "<tc>-<name>-<n>-<id>"; Evangel's Tuesday Twelve; Super Saturday Online.
 // ---------------------------------------------------------------------------
 export function chesscomSeries(slug) {
   const s = String(slug || "").toLowerCase();
@@ -29,8 +33,10 @@ export function chesscomSeries(slug) {
   if (/^-*pca-/.test(s)) return "pca";
   if (/(^|-)grand-prix-rated(-|$)/.test(s)) return "grandprix";
   if (!/-\d{6,}$/.test(s)) return null;
+  if (/^\d+-(1[24]0[01]-rated|first-thursday|first-friday|goldfarb)-\d+-\d{6,}$/.test(s)) return "wnz";
   if (/^-*sfs-/.test(s)) return "sfs";
-  if (/(^|-)(jackalope|fast-five|three-two-fastball|wild-wednesday|sunday-seven)(-|$)/.test(s)) return "evangel";
+  if (/(^|-)(jackalope|fast-five|three-two-fastball|wild-wednesday|sunday-seven|tuesday-twelve)(-|$)/.test(s)) return "evangel";
+  if (/^-*super-saturday-/.test(s)) return "supersat";
   if (/(^|-)aocc-/.test(s) && /uscf-rated/.test(s)) return "aocc";
   if (/^-*morning-membership-event-/.test(s)) return "morning";
   if (/^-*seneca-/.test(s)) return "seneca";
@@ -395,7 +401,9 @@ export function createCrawler(cfg) {
     return { requests, row: { ...meta, n_rounds: rounds, n_players: handles.length, handles, vectors: encodeVectors(handles, games, rounds) } };
   }
 
-  async function pollLichessTeam(team, series, max) {
+  // keepCasual: USCF-rated events are often Lichess-casual, so teams that come from crawl_source
+  // keep unrated swisses too; the configured default (DMV) keeps the Lichess-rated filter.
+  async function pollLichessTeam(team, series, max, keepCasual = false) {
     const res = await platformGet("lichess", `https://lichess.org/api/team/${team}/swiss?max=${max}`, {
       accept: "application/x-ndjson",
       timeoutMs: 600_000,
@@ -405,7 +413,7 @@ export function createCrawler(cfg) {
     for (const l of res.text.split("\n")) {
       if (!l.trim()) continue;
       const t = JSON.parse(l);
-      if (t.status !== "finished" || !t.rated) continue;
+      if (t.status !== "finished" || (!t.rated && !keepCasual)) continue;
       rows.push({
         platform: "lichess",
         tid: t.id,
@@ -515,17 +523,17 @@ export function createCrawler(cfg) {
     // only in crawl_source uses its team id as the series label.
     const stored = await rest("GET", "crawl_source?select=key&platform=eq.lichess&kind=eq.team&order=priority.desc,key&limit=1000").catch(() => []);
     const teams = [...LICHESS_TEAMS];
-    for (const s of stored || []) if (!teams.some((t) => t.team === s.key)) teams.push({ team: s.key, series: s.key });
-    for (const { team, series } of teams) {
+    for (const s of stored || []) if (!teams.some((t) => t.team === s.key)) teams.push({ team: s.key, series: s.key, keepCasual: true });
+    for (const { team, series, keepCasual } of teams) {
       if (now() >= deadline) break;
       const src = await rest("GET", `crawl_source?select=last_polled_at&platform=eq.lichess&kind=eq.team&key=eq.${enc(team)}`);
       const last = src?.[0]?.last_polled_at ? Date.parse(src[0].last_polled_at) : 0;
       if (now() - last > 24 * 3600_000) {
         // Full history on the first poll, the newest 100 afterwards.
-        const n = await pollLichessTeam(team, series, last || cfg.idleReturn ? 100 : 5000);
+        const n = await pollLichessTeam(team, series, last || cfg.idleReturn ? 100 : 5000, !!keepCasual);
         stats.lichess.polls++;
         stats.lichess.discovered += Math.max(0, n);
-        log(`[lichess] team ${team}: ${n} rated finished swiss listed`);
+        log(`[lichess] team ${team}: ${n} ${keepCasual ? "" : "rated "}finished swiss listed`);
       }
     }
     while (now() < deadline) {
