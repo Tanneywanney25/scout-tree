@@ -619,8 +619,16 @@ never settled; the single-file stream lane stayed held; every section worker
 that needed the organiser's history queued behind it; and nothing in that
 chain listens to the search's abort (`politeFetch`'s timeout and abort end at
 the headers). Fix `98b4cea`: every response body read now rejects on abort and
-after 30 s without a byte (`guardBody`, `test-allocator` scenario 11). The
-re-run of #44 on the fixed code is recorded just below.
+after 30 s without a byte (`guardBody`, `test-allocator` scenario 11).
+
+Re-run of #44 on the fixed code (14:33–14:58 UTC, awake): the 25-minute abort
+**ended the search at 1,500 s with its output written** (exit 0, no hang dump;
+terminated "stopped", level 2, 8 sections aligned, not resolved; longest
+silence 44.6 s). An earlier fixed-code attempt straddled the laptop's sleep
+and is not evidence either way. Whether a stream stalled during the awake
+re-run is not recorded (an idle rejection is not logged as an event); what is
+shown is that the search now honours the abort. #44 is still unresolved: a
+resolution failure, no longer a hang.
 
 ## Phase 7: Retrieval and hosting, decided
 
@@ -846,7 +854,7 @@ workflow is public by design.
 | How much of the remaining failure is index coverage | 290 of 893 index joins in the cold column found **no crawled tournament in the window** (the Chess.com backfill had reached back to 2026-07-06) | Re-run the same 46 cold players against a completed backfill (they are now warm for the store, so with `skipStore` and the index on) and count index answers |
 | Whether portal pivot ranking beats a random order | Only 7 cold searches resolved their first pivot by scouting; eligible-member counts per section were not recorded | Record each section's eligible count with the rank; ~100 scouted resolutions |
 | What causes Lichess's long `/api/user/{name}` penalty, and how long it lasts | It began at or before my first probe and was still on 31+ minutes later while other endpoint classes answered; the crawler's exports ran throughout | From a fresh address: trip only `/api/user` once, then probe every 2 minutes with nothing else running |
-| Whether #44 is the stalled-stream hang | The fix is in (`98b4cea`); the diagnostic re-run's outcome is recorded under Phase 6 | A dump of a live hang (`acc6/diag-entry.ts` writes one 60 s after an unheeded abort) |
+| Whether every hang of this kind is gone | #44 reproduced the hang on the old code and honoured the abort on the fixed code; idle rejections are not logged, so a stall-then-recover is invisible | Log `guardBody` idle rejections as engine events and run the held-out sample again |
 | Total catalogue size per series | Discovery yield fell from ~600 to ~16 new tournaments per member poll, but 1,267 of 1,417 sources were still unpolled | Poll every source once (≈ 1,400 requests, 25 minutes) and see whether the catalogue still grows |
 | Whether the edge crawler behaves like the laptop one | Deployed, not scheduled; never run in production | Run `supabase/sql/roster-crawl-schedule.sql` (Phase 8, step 4) and read `cron.job_run_details` after an hour |
 | Whether the index generalises beyond the five series | The 150 extra sections the index resolved are all in the crawled series | Add one more organiser's series to `chesscomSeries()` and measure its join rate |
