@@ -989,7 +989,7 @@ workflow is public by design.
 
 ## Mass pre-resolution and target discovery (2026-10-03, 22:00 UTC session)
 
-Short results; numbers are as of 22:12 UTC and the unattended loop keeps adding.
+Short results; numbers are as of 22:16 UTC and the unattended loop keeps adding.
 
 **What runs.** `scripts/pre-resolve.mjs` joins USCF online sections against the
 roster index in bulk and writes exactly what the edge `indexJoin` writes
@@ -1011,13 +1011,17 @@ MUIR (about 75 requests a minute from one address, ~2.6 requests a section).
 | Not resolved, by reason | no roster in the window 1,211; candidates but none trusted 495; **below the 90% floor 126**; ICC / ChessKid title 180; ambiguous 4; under 3 players 2 |
 | Disagreements with stored identities | 9 equal-strength conflicts, 41 weaker edges superseded |
 | Resolved rows under 90% coverage | **0 of 1,376** (minimum 90.2%) |
-| Store, before → 22:10 | `identity_edge` 3,691 → **7,502** (7,428 active, 6,812 strong); verified `section_link` 307 → **1,517** |
-| Enumerated from MUIR (`scripts/enumerate-online-sections.mjs`) | `/affiliates/{id}/events` lists an organiser's events newest first; 2,166 sections queued in the first run, more affiliates and earlier dates queued after |
-| Unattended loop (`scripts/pre-resolve-run.sh 13`, started 22:07) | works the queue at MUIR pace (about 31 sections a minute) and re-reads the index every pass; log `logs/pre-resolve.log` |
+| Store, before → 22:16 | `identity_edge` 3,691 → **7,518** (7,443 active, 6,829 strong, 23 in conflict, 52 superseded); verified `section_link` 307 → **1,642** |
+| Enumerated from MUIR (`scripts/enumerate-online-sections.mjs`) | `/affiliates/{id}/events` lists an organiser's events newest first (no online or date filter; `isOnline` is only on the section). 11,424 sections in `preresolve_section` at 22:16, 7,912 still queued: the five series' affiliates back to 2025-01 (DMV to 2020, 3,790 of those with the online flag unknown, which the batch reads itself) |
+| Unattended loop (`scripts/pre-resolve-run.sh`, started 22:07) | works the queue at MUIR pace (about 30 sections a minute) and re-reads the index every pass; first 226 queued sections: 205 resolved. Log `logs/pre-resolve.log` |
 
 "Alignments written" counts one row per member per section; a member seen in
 ten sections is one `identity_edge`, which is why 24,000 alignments became
-3,800 new edges. The first cached pass wrote the link before the identities and
+3,800 new edges. The five crawled series are now mostly the same people again
+(100 more WNZ sections added 16 edges); new people will come from the newly
+queued series and teams. The table can grow `muir_cache` (153 MB of the 500 MB
+cap today) by one crosstable per joined section, an estimated 50 to 80 MB for
+the present queue. The first cached pass wrote the link before the identities and
 30 identity writes failed under 8 concurrent calls; the order is now identities
 first, with retries, and the second pass repaired all 30.
 
@@ -1030,21 +1034,33 @@ it was not measured from the laptop. Nothing in the pre-resolution uses a model,
 so worker count was sized from MUIR instead. Production `AI_PROXY_*` secrets
 were not changed.
 
-**Crawl targets queued (Item 2).** Chess.com: 7 new series (`sfs` 64Squares,
-`evangel`, `aocc` Westford, `morning`, `seneca`, `transcon`, `ktchess`), 1,121
-tournaments queued as pending and `chesscomSeries()` extended; the running
-crawler has already fetched some. Lichess: 12 teams in `crawl_source`, 609
-swisses queued; `lichessLane` now reads teams from `crawl_source`. The running
-crawler's Lichess lane exited at start, so those 609 wait for the next crawler
-run (`node scripts/roster-crawler.mjs --platform lichess` once the lease is
-free). Largest series still without a platform: PLAY N STAY (659 sections) and
-HERMOVENEXT / Impact Coaching Network (637).
+**Crawl targets queued (Item 2).** Two discovery waves, each target accepted
+only on a tournament whose name and date matched a USCF online section within a
+day, or on the organiser's own statement that its events there are USCF rated.
+
+| Platform | Queued | What |
+|---|---|---|
+| Chess.com | **1,211 tournaments** (1,121 + 90), pending in `roster_tournament` | New series `sfs` (64Squares) 351, `evangel` 512, `aocc` (Westford) 201, `seneca` 54, `morning` 24, `ktchess` 6, `transcon` 3, `supersat` 2, `pnwcc` 12 (10 since skipped); Waltham variants under `wnz` 46 (Under-1201/1400 rated, First Thursday, First Friday, Goldfarb). `chesscomSeries()` extended to match. The running crawler reads the queue from the database and has already fetched 99 of them. |
+| Lichess | **659 swisses**, 13 new teams in `crawl_source` | chess-klub-uscf-tournaments, sam-schenk-uscf-online-chess-tournaments, uscf-rated-tournament-club, uscf-chess, presidential-pawn-storm, the-golden-pawn, westfield-chess-club, livingston-scholastic-chess-club, seattle-chess-school-uscf, chess4everyonecom, online-tr-tournaments, start-right-chess, chess-for-all-online-team. `lichessLane` now reads teams from `crawl_source` and keeps Lichess-casual swisses for them. |
+
+Estimated additional USCF sections: about 1,900 on Chess.com (upper bound: every
+cached section whose name falls in an accepted series) and 400 to 500 on
+Lichess (not checked against MUIR). The running crawler's Lichess lane exited at
+start ("nothing pending"), so the 659 Lichess rows wait for the next crawler run:
+`node scripts/roster-crawler.mjs --platform lichess` once the lease is free.
+
+Not traceable or not settled: HERMOVENEXT / Impact Coaching Network (653
+sections) is played on the organiser's own login-gated server; PLAY N STAY
+(Chess NYC, 659 sections) names no platform, its members' identities are mostly
+Lichess, and no team swiss list matches it (possibly direct challenges). Great
+Lakes Chess League, ISCA, Marshall and True Chess have Lichess teams with no
+matching swisses. Mechanics' and Marshall Sunday Beginner were not reached.
 
 **Production changes.** Migration `20261003000400_preresolve_section.sql`
 applied (`drop table public.preresolve_section;`). Rows written by the batch:
 `delete from section_link where source = 'index' and checked_at >= '2026-10-03 22:04';`
 and the `identity_edge` rows whose `sections` name those events. Queued targets:
-`delete from roster_tournament where status = 'pending' and series in ('sfs','evangel','aocc','morning','seneca','transcon','ktchess');`
+`delete from roster_tournament where status = 'pending' and series in ('sfs','evangel','aocc','morning','seneca','transcon','ktchess','supersat','pnwcc');`
 and `delete from crawl_source where platform = 'lichess' and kind = 'team' and key <> 'dmv-chess-tournaments';`
 with their pending `roster_tournament` rows. No secret was set and no function
 was deployed.
