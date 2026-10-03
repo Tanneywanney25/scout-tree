@@ -400,11 +400,15 @@ this laptop, 62 requests):
 | 40 requests at 4/s ignoring 429s (27 refused) | games recovered in **1.5 s** |
 | `/api/user/{name}` during and after | **429 for every name from the first probe (01:58) until at least 02:30 — over 31 minutes**, while `/api/users/status`, autocomplete and the crawler's swiss exports (≈1/s throughout) answered 200 |
 
-So Lichess limits **per endpoint class**, the games bucket refills in ~2 s
-(≈ 0.5 token/s, consistent with last session's fit), and the profile endpoint
-has a long penalty that does not clear while the address keeps using the API
-at a modest rate. Whether my 5 profile probes caused it or it predates them
-is not determinable from here (Undetermined).
+So Lichess limits **per endpoint class**, and the games bucket refills in
+~2 s (≈ 0.5 token/s, consistent with last session's fit). The profile
+endpoint's block is of a different kind: it was **still on at 14:59 UTC, 13
+hours later, after 8.5 hours in which this address sent nothing at all** (the
+laptop slept), while the same request from another network (Firecrawl,
+14:59) returned **200**. It is a long, address-specific penalty on
+`/api/user/{name}`, not a rate bucket. Whether this session or last session's
+acceptance run (46 + 34 profile 429s on two players) earned it is not
+determinable from here.
 
 **Breaker changed to match** (`7fbb67b`): it now trips **per class** (four
 429s on one class in 2 minutes) instead of dropping every Lichess request,
@@ -853,7 +857,7 @@ workflow is public by design.
 | Whether the cold resolution rate (76%, CI 62–86%) holds | n = 46; Lichess was in a penalty during the run; the index covered only Jul–Oct 2026 on Chess.com at the freeze | ~70 never-searched online-rated players run after the backfill completes, with a clean Lichess state (no experiments that day), cold only |
 | How much of the remaining failure is index coverage | 290 of 893 index joins in the cold column found **no crawled tournament in the window** (the Chess.com backfill had reached back to 2026-07-06) | Re-run the same 46 cold players against a completed backfill (they are now warm for the store, so with `skipStore` and the index on) and count index answers |
 | Whether portal pivot ranking beats a random order | Only 7 cold searches resolved their first pivot by scouting; eligible-member counts per section were not recorded | Record each section's eligible count with the rank; ~100 scouted resolutions |
-| What causes Lichess's long `/api/user/{name}` penalty, and how long it lasts | It began at or before my first probe and was still on 31+ minutes later while other endpoint classes answered; the crawler's exports ran throughout | From a fresh address: trip only `/api/user` once, then probe every 2 minutes with nothing else running |
+| What earns Lichess's address-level `/api/user/{name}` penalty, and how long it lasts | On from 01:58 until at least 14:59 (13 h, 8.5 h of them with no traffic); 200 from another network | Probe once a day from this address until it clears; from a fresh address, find the profile-lookup volume that triggers it. Meanwhile, a heavy user's own address can lose Lichess profile lookups for hours, which the per-class breaker now contains |
 | Whether every hang of this kind is gone | #44 reproduced the hang on the old code and honoured the abort on the fixed code; idle rejections are not logged, so a stall-then-recover is invisible | Log `guardBody` idle rejections as engine events and run the held-out sample again |
 | Total catalogue size per series | Discovery yield fell from ~600 to ~16 new tournaments per member poll, but 1,267 of 1,417 sources were still unpolled | Poll every source once (≈ 1,400 requests, 25 minutes) and see whether the catalogue still grows |
 | Whether the edge crawler behaves like the laptop one | Deployed, not scheduled; never run in production | Run `supabase/sql/roster-crawl-schedule.sql` (Phase 8, step 4) and read `cron.job_run_details` after an hour |
