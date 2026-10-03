@@ -221,7 +221,88 @@ _pending_
 
 ## Phase 4: Kill the guessing
 
-_pending_
+### 4.1 A search-wide speculative request budget
+
+`b6b2c2b`, fixed in `4558483`. The previous caps counted guessed *members*
+(8 at level 0, 3 per deeper section, 24 per search) and each guessed member
+costs 20–30 profile probes, so they compounded. The allocator now counts
+speculative requests actually **sent** in one search and sheds the rest before
+they are sent (default 250 per search; `sectionBfs` resets it at the start of
+every search). Proven work is never charged.
+
+The first version checked the budget only when a request was enqueued. Live,
+on the re-run of acceptance player #6, it sent **333 speculative requests
+against a budget of 250**, because requests queued before the budget ran out
+were granted later without a check. The fix re-checks at grant time.
+`test-allocator` scenario 10, queued case: **10 sent / 30 shed** with the fix,
+**40 sent / 0 shed** on the previous code.
+
+Speculative share of platform requests, live (the two players that wedged
+last session, walk forced, index disabled — the worst case for guessing):
+
+| Run | Code | Proven | Speculative | Speculative share |
+|---|---|---|---|---|
+| #6 | `rindex-p0`+4.1 (pre-fix) | 310 | 333 | 51.8% |
+| #22 | same | 4,255 | 306 | 6.7% |
+| last session's acceptance, all online players | `a709727` era | 3,982 | 9,311 | **70.0%** |
+
+The share across a representative sample is in Phase 6.
+
+### 4.2 Round-robin frontier
+
+`b851275` (last session) admits at most `sectionsPerBridge` (4) sections from
+one bridge per level, taking one section per bridge per round. New counters
+(`sectionSearch.levels`, `eb55a11`) measure it rather than assert it:
+
+| Run | Level | Sections admitted | Distinct bridges | Most from one bridge | Held back |
+|---|---|---|---|---|---|
+| #6 | 1 | 8 | 3 | 4 | 0 |
+| #6 | 2 | 60 | 56 | 2 | 155 |
+| #6 | 3 / 4 | 60 / 60 | 60 / 60 | 1 / 1 | 780 / 959 |
+| #22 | 1 / 2 / 3 | 60 / 60 / 60 | 60 / 60 / 60 | 1 / 1 / 1 | 152 / 1,730 / 700 |
+
+**The fix holds.** The smoke data it was written against had 60 of 60 level-1
+sections from one member; no level here takes more than 4 from one bridge, and
+every level past the first is spread one section per bridge.
+
+### 4.3 The Lichess breaker, live
+
+**Measured schedule first** (`p4/li429.mjs`, `p4/li429b.mjs`, 01:58–02:13 UTC,
+this laptop, 62 requests):
+
+| Probe | Result |
+|---|---|
+| `/api/games/user`, 2/s from rest | 429 on the **10th** request. **No `Retry-After`.** |
+| Recovery after each of 4 back-to-back trips (probes at 1, 2, 4… s) | **1.4, 1.3, 3.4, 1.3 s** — no escalation |
+| 40 requests at 4/s ignoring 429s (27 refused) | games recovered in **1.5 s** |
+| `/api/user/{name}` during and after | **429 for every name from the first probe (01:58) until at least 02:30 — over 31 minutes**, while `/api/users/status`, autocomplete and the crawler's swiss exports (≈1/s throughout) answered 200 |
+
+So Lichess limits **per endpoint class**, the games bucket refills in ~2 s
+(≈ 0.5 token/s, consistent with last session's fit), and the profile endpoint
+has a long penalty that does not clear while the address keeps using the API
+at a modest rate. Whether my 5 profile probes caused it or it predates them
+is not determinable from here (Undetermined).
+
+**Breaker changed to match** (`7fbb67b`): it now trips **per class** (four
+429s on one class in 2 minutes) instead of dropping every Lichess request,
+because a `/api/user` penalty was also stopping proven tournament exports. A
+429 within 2 minutes of a cool-off ending re-trips at **twice** the cool-off:
+**90 s, 180 s, 360 s … capped at 15 minutes**. Backoff for an isolated 429 is
+unchanged (6 s doubling to 60 s): the measured refill is ~2 s, so 6 s is
+3× margin.
+
+**Stall reproduced and ended.** Last session's two wedged searches (#6, #22)
+were re-run with the store and index switched off (walk forced) **while this
+address's `/api/user` was in its penalty** — the stall condition, occurring
+naturally:
+
+| Player | Last session | This session, `f771786` breaker | This session, per-class breaker (`4878633`) |
+|---|---|---|---|
+| #6 | stopped by the 25-min guard after ~20 min without progress; 46 Lichess 429s | **169 s**, ended on evidence; 4 Lichess rate-limit events, 580 Lichess requests failed fast; longest silence **15.1 s** | see below |
+| #22 | stopped by the guard after 13+ min without progress; 34 Lichess 429s | **811 s**, ended on its own (frontier exhausted, level 3, 14 sections aligned, not resolved); 17 events, 1,224 failed fast; longest silence **49.3 s** | see below |
+
+The breaker ends the stall: neither search waited on Lichess; both finished
+without the guard.
 
 ## Phase 5: Platform resolution for unnamed sections
 
@@ -297,7 +378,71 @@ _pending_
 
 ## Phase 7: Retrieval and hosting, decided
 
-_pending_
+### 7.1 SearXNG: stays shelved
+
+**Decision: do not revive it.** The ADR's corrected objection was the laptop
+dependency, not capacity, and nothing this session removes that dependency at
+zero dollars: Hugging Face now requires a paid plan to create a Docker Space
+("Gradio and Docker Spaces run on compute and require a paid plan to create",
+read live 2026-10-03), Render's free web services sleep after 15 idle minutes,
+Fly.io has no free tier for new organisations, and Koyeb's single free
+instance is a web service that "can't be used as a Worker Service". Meanwhile
+the reason to want retrieval has shrunk:
+
+- The index joins whole sections of the five series with no seed and no web
+  query (Phase 2.3: 45 of 46 engine-verified sections reproduced blind, 150
+  more the engine never resolved).
+- Host pinning, the one gap the ADR said had no deterministic substitute,
+  now has three: the index's own crawled names, the public tournament
+  listings the crawler reads anyway, and a learned organiser prefix. Together
+  they placed 58.8% of the footprint sections that had no platform (Phase 5.2).
+- What is left unknown (23.4% of footprint sections) is small organisers
+  outside the five series. For those, a web search would find a flyer at best;
+  the listing layer grows on its own as the crawler polls more members, at no
+  query cost.
+
+What would reopen it: a Phase 6-style failure analysis showing that unresolved
+online-rated players fail *specifically* on unknown-host sections that no
+listing reaches, at a share that justifies a hosted search box — and a
+card-free always-on host for a container, which does not exist today.
+
+### 7.2 Hosting the crawler
+
+Read live with Playwright on 2026-10-03 (`pw/hosts.mjs`, `pw/grab.mjs`): each
+host's pricing or limits page, and the signup form's visible fields. No
+account was created and nothing was submitted.
+
+| Host | Card-free today? | What the free tier allows | Fits a resumable crawler writing to Supabase? |
+|---|---|---|---|
+| **Supabase Edge Functions + `pg_cron`** (this project) | **Yes** (already in use) | 500,000 invocations/month; **150 s** wall clock, **2 s CPU** per request, async I/O not counted; the docs show invoking a function every minute from `pg_cron` + `pg_net` + Vault. `pg_cron` 1.6.4 and `pg_net` 0.20.3 are available (not yet installed) on this project. | **Yes.** Crawl in ≤ 120 s slices; progress already lives in the tables. |
+| **GitHub Actions** (public repo `scout-tree`) | **Yes** (already in use) | "Public repositories: Minutes remain free"; jobs up to 6 h; cron schedules run from the default branch only | Yes: the Node script runs unchanged with `--hours 5.5`. |
+| Cloudflare Workers (Free) | Yes (signup form: email + password, or Google/Apple/GitHub; no card field) | 100,000 requests/day; **10 ms CPU** per invocation, cron included; cron wall 15 min | Marginal: 10 ms CPU per run is tight for parsing brackets. |
+| Deno Deploy (Free) | Not verified beyond the pricing page ($0 plan) | 1M requests/month, 20 GiB egress, 10 h active CPU/month (I/O wait not billed), `Deno.cron` | Yes in principle; a new account and a port. |
+| Koyeb | Unclear | One free web-service instance (512 MB, 0.1 vCPU), "can't be used as a Worker Service" | No. |
+| Render | Free web services only | Spin down after 15 min idle; background workers and cron jobs are paid | No. |
+| Railway | **No** (30-day trial with $5, then $1/month of usage) | — | Out (trial). |
+| Fly.io | **No** ("New organizations don't have a free tier"; trial of 2 h or 7 days) | — | Out. |
+| Hugging Face Spaces | Static only | Docker/Gradio Spaces need a paid plan to create | Out. |
+| Oracle Cloud Free Tier | **No** (card required at signup, per its FAQ) | — | Out. |
+| Google Cloud | **No** (free trial; card) | — | Out. |
+| Northflank | Sandbox advertises free services/cron; its FAQ asks "Am I charged when I enter my credit card?" | — | Out (card entered). |
+
+**Recommendation: Supabase Edge Functions on a `pg_cron` schedule.** It needs
+no new account and no new secret, it runs next to the tables it writes, and
+its egress is already measured against all three APIs (an edge address took
+392 Chess.com requests before a 429 and MUIR's 100-per-minute rule held per
+address; the crawler sends 1 per second). Resumability is free: every slice
+reads `pending` rows and writes a tournament only when it is whole, exactly as
+the laptop crawler does, and a lease row keeps two slices from overlapping. Its
+limits fit the measured workload: a slice of ~100 requests parses ~100 JSON
+bodies, far inside 2 s of CPU; one slice a minute is ~43,000 invocations a
+month of the 500,000. GitHub Actions is the fallback (zero port: the same
+script, `--hours 5.5` every six hours), held back only because schedules run
+from `main` and this branch is not merged.
+
+What is not built: the Deno port of the crawler loop into an edge function and
+the `pg_cron` job. The laptop crawler (`scripts/roster-crawler.mjs`) is the
+running implementation today.
 
 ## Phase 8: Human handoff
 
