@@ -1043,7 +1043,7 @@ day, or on the organiser's own statement that its events there are USCF rated.
 | Chess.com | **1,211 tournaments** (1,121 + 90), pending in `roster_tournament` | New series `sfs` (64Squares) 351, `evangel` 512, `aocc` (Westford) 201, `seneca` 54, `morning` 24, `ktchess` 6, `transcon` 3, `supersat` 2, `pnwcc` 12 (10 since skipped); Waltham variants under `wnz` 46 (Under-1201/1400 rated, First Thursday, First Friday, Goldfarb). `chesscomSeries()` extended to match. The running crawler reads the queue from the database and has already fetched 99 of them. |
 | Lichess | **659 swisses**, 13 new teams in `crawl_source` | chess-klub-uscf-tournaments, sam-schenk-uscf-online-chess-tournaments, uscf-rated-tournament-club, uscf-chess, presidential-pawn-storm, the-golden-pawn, westfield-chess-club, livingston-scholastic-chess-club, seattle-chess-school-uscf, chess4everyonecom, online-tr-tournaments, start-right-chess, chess-for-all-online-team. `lichessLane` now reads teams from `crawl_source` and keeps Lichess-casual swisses for them. |
 
-Estimated additional USCF sections: about 1,900 on Chess.com (upper bound: every
+Estimated additional USCF sections: about 2,000 on Chess.com (upper bound: every
 cached section whose name falls in an accepted series) and 400 to 500 on
 Lichess (not checked against MUIR). The running crawler's Lichess lane exited at
 start ("nothing pending"), so the 659 Lichess rows wait for the next crawler run:
@@ -1052,7 +1052,9 @@ start ("nothing pending"), so the 659 Lichess rows wait for the next crawler run
 Not traceable or not settled: HERMOVENEXT / Impact Coaching Network (653
 sections) is played on the organiser's own login-gated server; PLAY N STAY
 (Chess NYC, 659 sections) names no platform, its members' identities are mostly
-Lichess, and no team swiss list matches it (possibly direct challenges). Great
+Lichess, and no team swiss list matches it. One member's Lichess games in that
+period are all casual direct challenges (`source: friend`), which would put the
+series out of reach of tournament rosters; one member is not proof. Great
 Lakes Chess League, ISCA, Marshall and True Chess have Lichess teams with no
 matching swisses. Mechanics' and Marshall Sunday Beginner were not reached.
 
