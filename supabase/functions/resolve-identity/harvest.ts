@@ -18,6 +18,7 @@ import {
   alignmentTrustworthy,
   assignmentTier,
   chesscomBracketRows,
+  type SectionAlignment,
   type TournamentGameRow,
 } from "../_shared/sectionAlignCore.ts";
 import { fetchSectionGraph, seriesKey } from "./uscf.ts";
@@ -155,6 +156,58 @@ export function parseRecordAlignment(body: Record<string, unknown>): RecordAlign
   return { eventId, sectionNumber, kind, tournamentId: tid, targetUscfId: target || undefined };
 }
 
+/**
+ * Record a TRUSTED alignment: every assignment with its tier (through
+ * record_identity_edges, which filters opt-outs and resolves conflicts), the
+ * event's platform and its series. Shared by the harvest (a browser named the
+ * tournament) and the index join (the server found it in the roster index).
+ */
+export async function recordVerifiedAlignment(
+  sec: { name: string },
+  a: SectionAlignment,
+  link: { eventId: string; sectionNumber: number; kind: TournamentKind; tournamentId: string }
+): Promise<{ edges: IdentityEdgeInput[]; stored: Awaited<ReturnType<typeof recordIdentityEdges>> }> {
+  const platform = link.kind === "chesscom-tournament" ? "chesscom" : "lichess";
+  const at = new Date().toISOString();
+  const edges: IdentityEdgeInput[] = a.assignments.map((x) => {
+    const tier = assignmentTier(x, true);
+    return {
+      uscf_id: x.uscfId,
+      platform,
+      handle: x.handleLower,
+      tier,
+      rounds: x.checkedRounds,
+      corroborating: x.corroboratingOpponents,
+      section: {
+        eventId: link.eventId,
+        section: link.sectionNumber,
+        platform,
+        tournament: link.tournamentId,
+        tier,
+        rounds: x.checkedRounds,
+        corroborating: x.corroboratingOpponents,
+        at,
+      },
+    };
+  });
+  const stored = await recordIdentityEdges(edges);
+  const info =
+    platform === "chesscom"
+      ? { platform, chesscomSlugs: [link.tournamentId], lichessSwissIds: [], lichessArenaIds: [], confidence: 1, note: "verified by whole-section alignment" }
+      : {
+          platform,
+          chesscomSlugs: [],
+          lichessSwissIds: link.kind === "lichess-swiss" ? [link.tournamentId] : [],
+          lichessArenaIds: link.kind === "lichess-arena" ? [link.tournamentId] : [],
+          confidence: 1,
+          note: "verified by whole-section alignment",
+        };
+  void putEventPlatform(link.eventId, platform, info, "alignment");
+  const sk = seriesKey(sec.name);
+  if (sk) void putSeriesPlatform(sk, platform);
+  return { edges, stored };
+}
+
 export async function handleRecordAlignment(req: RecordAlignmentRequest): Promise<Record<string, unknown>> {
   const t0 = Date.now();
   const sec = await fetchSectionGraph(req.eventId, req.sectionNumber, req.targetUscfId || "");
@@ -192,44 +245,12 @@ export async function handleRecordAlignment(req: RecordAlignmentRequest): Promis
     };
   }
 
-  const at = new Date().toISOString();
-  const edges: IdentityEdgeInput[] = a.assignments.map((x) => {
-    const tier = assignmentTier(x, true);
-    return {
-      uscf_id: x.uscfId,
-      platform,
-      handle: x.handleLower,
-      tier,
-      rounds: x.checkedRounds,
-      corroborating: x.corroboratingOpponents,
-      section: {
-        eventId: req.eventId,
-        section: req.sectionNumber,
-        platform,
-        tournament: req.tournamentId,
-        tier,
-        rounds: x.checkedRounds,
-        corroborating: x.corroboratingOpponents,
-        at,
-      },
-    };
+  const { edges, stored } = await recordVerifiedAlignment(sec, a, {
+    eventId: req.eventId,
+    sectionNumber: req.sectionNumber,
+    kind: req.kind,
+    tournamentId: req.tournamentId,
   });
-  const stored = await recordIdentityEdges(edges);
-  const info =
-    platform === "chesscom"
-      ? { platform, chesscomSlugs: [req.tournamentId], lichessSwissIds: [], lichessArenaIds: [], confidence: 1, note: "verified by whole-section alignment" }
-      : {
-          platform,
-          chesscomSlugs: [],
-          lichessSwissIds: req.kind === "lichess-swiss" ? [req.tournamentId] : [],
-          lichessArenaIds: req.kind === "lichess-arena" ? [req.tournamentId] : [],
-          confidence: 1,
-          note: "verified by whole-section alignment",
-        };
-  void putEventPlatform(req.eventId, platform, info, "alignment");
-  const sk = seriesKey(sec.name);
-  if (sk) void putSeriesPlatform(sk, platform);
-
   const strong = edges.filter((e) => e.tier === "strong").length;
   const target = req.targetUscfId ? a.assignments.find((x) => x.uscfId === req.targetUscfId) : undefined;
   console.log(

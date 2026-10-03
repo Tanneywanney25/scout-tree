@@ -32,6 +32,7 @@ import {
 import { getEventPlatform, putEventPlatform, sweepSearchCache } from "../_shared/identityStore.ts";
 import { authenticateCaller } from "../_shared/auth.ts";
 import { handleRecordAlignment, parseRecordAlignment } from "./harvest.ts";
+import { handleIndexJoin } from "./rosterIndex.ts";
 import {
   clientKeyOf,
   handleMemberFootprints,
@@ -752,6 +753,11 @@ serve(async (req) => {
       const parsed = parseRecordAlignment(body.recordAlignment as Record<string, unknown>);
       if (!parsed) return json({ available: true, recorded: false, reason: "malformed" });
       return json(await handleRecordAlignment(parsed));
+    }
+    if (body?.indexJoin && typeof body.indexJoin === "object") {
+      // Roster index: whole sections resolved from crawled rosters, no platform request.
+      if (rateLimited("indexJoin", clientKey, 30, 60_000)) return json({ available: false, sections: [], rateLimited: true });
+      return json(await handleIndexJoin(body.indexJoin as Record<string, unknown>));
     }
     if (body?.sectionNegatives && typeof body.sectionNegatives === "object") {
       if (rateLimited("sectionNegatives", clientKey, 60, 60_000)) return json({ available: false, rateLimited: true });

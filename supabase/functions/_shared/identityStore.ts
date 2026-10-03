@@ -717,6 +717,65 @@ export async function getSeriesPlatforms(keys: string[]): Promise<Map<string, st
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// roster_tournament (the roster index; migrations/20261003000000_roster_index.sql)
+// ---------------------------------------------------------------------------
+
+export interface RosterCandidateRow {
+  platform: "chesscom" | "lichess";
+  tid: string;
+  series: string;
+  name: string | null;
+  starts_at: string | null;
+  n_rounds: number | null;
+  n_players: number | null;
+  handles: string[];
+  vectors: string;
+}
+
+/** Crawled tournaments compatible with a section's date, round count and
+ *  size. Null when the store is unreachable (distinct from "none matched"). */
+export async function getRosterCandidates(w: {
+  from: string;
+  to: string;
+  minRounds: number;
+  maxRounds: number;
+  minPlayers: number;
+  platform?: "chesscom" | "lichess";
+}): Promise<RosterCandidateRow[] | null> {
+  const rest = supabaseRest();
+  if (!rest) return null;
+  try {
+    const q =
+      `status=eq.done&starts_at=gte.${encodeURIComponent(w.from)}&starts_at=lte.${encodeURIComponent(w.to)}` +
+      `&n_rounds=gte.${w.minRounds}&n_rounds=lte.${w.maxRounds}&n_players=gte.${w.minPlayers}` +
+      (w.platform ? `&platform=eq.${w.platform}` : "") +
+      `&select=platform,tid,series,name,starts_at,n_rounds,n_players,handles,vectors&order=starts_at.asc&limit=80`;
+    const res = await fetch(`${rest.url}/rest/v1/roster_tournament?${q}`, { headers: headers(rest.key) });
+    if (!res.ok) return null;
+    return (await res.json()) as RosterCandidateRow[];
+  } catch {
+    return null;
+  }
+}
+
+/** Index coverage for a date: does the index hold ANY crawled tournament that
+ *  day? Lets a miss be told apart from "the crawler never reached this date". */
+export async function rosterIndexCovers(from: string, to: string): Promise<boolean | null> {
+  const rest = supabaseRest();
+  if (!rest) return null;
+  try {
+    const res = await fetch(
+      `${rest.url}/rest/v1/roster_tournament?status=eq.done&starts_at=gte.${encodeURIComponent(from)}&starts_at=lte.${encodeURIComponent(to)}&select=tid&limit=1`,
+      { headers: headers(rest.key) }
+    );
+    if (!res.ok) return null;
+    return ((await res.json()) as unknown[]).length > 0;
+  } catch {
+    return null;
+  }
+}
+
 export async function putSeriesPlatform(seriesKey: string, platform: string): Promise<boolean> {
   const rest = supabaseRest();
   if (!rest || !seriesKey) return false;
