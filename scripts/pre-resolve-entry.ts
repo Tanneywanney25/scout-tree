@@ -76,7 +76,7 @@ type Roster = StoredRoster & { fetched_at?: string | null };
 log("loading index and progress…");
 const [rostersRaw, links, progress, metas, xtKeys, evRows] = await Promise.all([
   getAll<Roster>("roster_tournament?select=platform,tid,series,name,starts_at,n_rounds,n_players,handles,vectors,fetched_at&status=eq.done&order=platform.asc,tid.asc"),
-  getAll<{ event_id: string; section_no: number; status: string }>("section_link?select=event_id,section_no,status&order=event_id.asc,section_no.asc,platform.asc,tournament_id.asc"),
+  getAll<{ event_id: string; section_no: number; status: string; source: string | null }>("section_link?select=event_id,section_no,status,source&order=event_id.asc,section_no.asc,platform.asc,tournament_id.asc"),
   getAll<{ event_id: string; section_no: number; verdict: string; win_from: string | null; win_to: string | null; checked_at: string; source: string | null }>(
     "preresolve_section?select=event_id,section_no,verdict,win_from,win_to,checked_at,source&order=event_id.asc,section_no.asc"
   ),
@@ -87,6 +87,10 @@ const [rostersRaw, links, progress, metas, xtKeys, evRows] = await Promise.all([
 const rosters = [...new Map(rostersRaw.filter((r) => r.starts_at && r.handles?.length).map((r) => [`${r.platform}:${r.tid}`, r])).values()];
 const evNames = new Map(evRows.map((r) => [r.key, r.name || ""]));
 const linked = new Set(links.filter((l) => l.status === "verified").map((l) => `${l.event_id}/${l.section_no}`));
+// An index link is written just before its identities; one with no 'resolved'
+// progress row may be a write this batch never finished, so it is joined again
+// (idempotent: the same link and edges are upserted).
+const linkedElsewhere = new Set(links.filter((l) => l.status === "verified" && l.source !== "index").map((l) => `${l.event_id}/${l.section_no}`));
 const progressBy = new Map(progress.map((p) => [`${p.event_id}/${p.section_no}`, p]));
 const xtSet = new Set(xtKeys.map((r) => r.key));
 const metaBy = new Map(metas.map((m) => [m.key, m.payload]));
@@ -136,8 +140,8 @@ function consider(key: string, cached: boolean, source: string) {
   const [eventId, nStr] = key.split("/");
   const n = Number(nStr);
   if (!/^\d+$/.test(eventId) || !Number.isFinite(n)) return skip("bad-key");
-  if (linked.has(key)) return skip("already-linked");
   const p = progressBy.get(key);
+  if (linkedElsewhere.has(key) || (linked.has(key) && p?.verdict === "resolved")) return skip(p?.verdict === "resolved" ? "already-resolved" : "already-linked");
   if (p && p.verdict !== "queued") {
     if (FINAL.has(p.verdict)) return skip(p.verdict === "resolved" ? "already-resolved" : `final:${p.verdict}`);
     if (!grewSince(p)) return skip("tried-no-new-roster");
@@ -225,21 +229,29 @@ async function processOne(c: Cand): Promise<void> {
   let stored: Awaited<ReturnType<typeof recordVerifiedAlignment>>["stored"] = null;
   let strong = 0;
   if (!DRY) {
-    const linkOk = await putSectionLink({
-      eventId: c.eventId,
-      sectionNo: c.n,
-      platform: j.best.platform,
-      tournamentId: j.best.tid,
-      status: "verified",
-      assigned: j.best.assigned,
-      nPlayers: played,
-      contradicted: j.best.contradicted,
-      inconsistentEdges: j.best.inconsistentEdges,
-      source: "index",
-    });
-    const rec = await recordVerifiedAlignment(sec, j.best.alignment, { eventId: c.eventId, sectionNumber: c.n, kind, tournamentId: j.best.tid });
+    // Identities first (retried: concurrent calls can deadlock on a shared
+    // member row), then the link that marks the section as done.
+    let rec = await recordVerifiedAlignment(sec, j.best.alignment, { eventId: c.eventId, sectionNumber: c.n, kind, tournamentId: j.best.tid });
+    for (let attempt = 0; !rec.stored && attempt < 3; attempt++) {
+      await new Promise((r) => setTimeout(r, 400 + Math.random() * 1200));
+      rec = await recordVerifiedAlignment(sec, j.best.alignment, { eventId: c.eventId, sectionNumber: c.n, kind, tournamentId: j.best.tid });
+    }
     stored = rec.stored;
     strong = rec.edges.filter((e) => e.tier === "strong").length;
+    const linkOk =
+      !!stored &&
+      (await putSectionLink({
+        eventId: c.eventId,
+        sectionNo: c.n,
+        platform: j.best.platform,
+        tournamentId: j.best.tid,
+        status: "verified",
+        assigned: j.best.assigned,
+        nPlayers: played,
+        contradicted: j.best.contradicted,
+        inconsistentEdges: j.best.inconsistentEdges,
+        source: "index",
+      }));
     if (!linkOk || !stored) {
       // Not recorded as resolved: the next run tries this section again.
       totals.writeFailed++;

@@ -14,6 +14,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = () => Date.now();
 // ---------------------------------------------------------------------------
 // Series scope. Anything not matched here is never fetched.
+// The second block (2026-10-03) is organizers found from uncovered USCF online
+// sections; each was accepted on a Chess.com tournament whose name and start
+// date matched a USCF section of the same series (within a day): 64Squares
+// "SFS", Evangel Chess Club (Jackalope / Fast Five / Three-Two Fastball / Wild
+// Wednesday / Sunday Seven), Westford CC "AOCC USCF rated", Morning Membership
+// Event, Seneca scholastic, Transcontinental Scholastic, KT Chess. Live
+// tournaments only: a slug with no numeric id (daily events) is out of scope.
 // ---------------------------------------------------------------------------
 export function chesscomSeries(slug) {
   const s = String(slug || "").toLowerCase();
@@ -21,6 +28,14 @@ export function chesscomSeries(slug) {
   if (/(^|-)(wnz|waltham)-rated(-|$)/.test(s)) return "wnz";
   if (/^-*pca-/.test(s)) return "pca";
   if (/(^|-)grand-prix-rated(-|$)/.test(s)) return "grandprix";
+  if (!/-\d{6,}$/.test(s)) return null;
+  if (/^-*sfs-/.test(s)) return "sfs";
+  if (/(^|-)(jackalope|fast-five|three-two-fastball|wild-wednesday|sunday-seven)(-|$)/.test(s)) return "evangel";
+  if (/(^|-)aocc-/.test(s) && /uscf-rated/.test(s)) return "aocc";
+  if (/^-*morning-membership-event-/.test(s)) return "morning";
+  if (/^-*seneca-/.test(s)) return "seneca";
+  if (/(^|-)transcontinental-scholastic-/.test(s)) return "transcon";
+  if (/^-*kt-chess-/.test(s)) return "ktchess";
   return null;
 }
 const idNum = (slug) => Number(String(slug).match(/(\d+)$/)?.[1] || 0);
@@ -496,8 +511,14 @@ export function createCrawler(cfg) {
 
   async function lichessLane() {
     if (now() >= deadline) return;
-    for (const { team, series } of LICHESS_TEAMS) {
-      const src = await rest("GET", `crawl_source?select=last_polled_at&platform=eq.lichess&kind=eq.team&key=eq.${team}`);
+    // Teams: the configured default merged with every crawl_source team row. A team that is
+    // only in crawl_source uses its team id as the series label.
+    const stored = await rest("GET", "crawl_source?select=key&platform=eq.lichess&kind=eq.team&order=priority.desc,key&limit=1000").catch(() => []);
+    const teams = [...LICHESS_TEAMS];
+    for (const s of stored || []) if (!teams.some((t) => t.team === s.key)) teams.push({ team: s.key, series: s.key });
+    for (const { team, series } of teams) {
+      if (now() >= deadline) break;
+      const src = await rest("GET", `crawl_source?select=last_polled_at&platform=eq.lichess&kind=eq.team&key=eq.${enc(team)}`);
       const last = src?.[0]?.last_polled_at ? Date.parse(src[0].last_polled_at) : 0;
       if (now() - last > 24 * 3600_000) {
         // Full history on the first poll, the newest 100 afterwards.
