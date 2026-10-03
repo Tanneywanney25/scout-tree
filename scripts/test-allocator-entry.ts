@@ -197,6 +197,16 @@ const proven10 = await politeFetch(cc(10_500), {}, "chesscom");
 assert(proven10.status === 200, "proven work is not charged to or blocked by the speculative budget");
 const st10 = speculativeBudgetState();
 assert(!!st10 && st10.used === 30 && st10.denied === 70, `budget state reports used ${st10?.used}, denied ${st10?.denied}`);
+// Queued case: tokens run out, so requests wait in the queue past the moment
+// the budget is spent — they must be shed there, not granted.
+_resetBreakers();
+configureAllocator("chesscom", { capacity: 4, rate: 100, minRate: 4, step: 2, recoverMs: 15_000, specShare: 1 });
+script = () => 404;
+starts.length = 0;
+setSpeculativeBudget(10);
+const out10b = await Promise.allSettled(Array.from({ length: 40 }, (_, i) => politeFetch(cc(10_700 + i), { signal: spec10 }, "chesscom")));
+const shed10b = out10b.filter((o) => o.status === "rejected" && (o.reason as Error) instanceof SpeculativeShed).length;
+assert(starts.length === 10 && shed10b === 30, `queued: budget 10 -> ${starts.length} sent, ${shed10b} shed (no overshoot)`);
 setSpeculativeBudget(null);
 const free10 = await politeFetch(cc(10_600), { signal: spec10 }, "chesscom").then(() => "sent", () => "shed");
 assert(free10 === "sent", "clearing the budget lets speculative work through again");

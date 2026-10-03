@@ -323,6 +323,17 @@ class RateScheduler {
           continue;
         }
         if (this.queues.speculative.length && this.specTokens >= 1) {
+          // Requests queued before the search's speculative budget ran out
+          // are checked again here, or the queue overshoots it (measured:
+          // 333 sent against a budget of 250 before this check).
+          if (specBudget && specBudget.used >= specBudget.limit) {
+            for (const w of this.queues.speculative.splice(0)) {
+              if (w.signal && w.onAbort) w.signal.removeEventListener("abort", w.onAbort);
+              specBudget.denied++;
+              w.reject(new SpeculativeShed(`${this.name} (search speculative budget spent)`));
+            }
+            continue;
+          }
           this.grant("speculative", now);
           continue;
         }
