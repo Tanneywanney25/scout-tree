@@ -114,16 +114,18 @@ const qualityOf = (a: SectionAlignment) => a.assignments.length * 10 + a.consist
  * identities proven elsewhere covered 67–71% (a PCA section matched to a
  * Lichess swiss, a 6-player section to a PCA event). So: >= 90% coverage, or
  * >= 75% when it is the only candidate that day and the section has >= 10
- * players.
+ * players. `strict` drops the second clause: the bulk pre-resolution
+ * (scripts/pre-resolve.mjs) writes without a search to cross-check it, so it
+ * takes >= 90% only.
  */
-export function indexTrusted(trusted: boolean, assigned: number, played: number, candidates: number): boolean {
+export function indexTrusted(trusted: boolean, assigned: number, played: number, candidates: number, strict = false): boolean {
   if (!trusted || !played) return false;
   const cov = assigned / played;
-  return cov >= 0.9 || (cov >= 0.75 && candidates === 1 && played >= 10);
+  return cov >= 0.9 || (!strict && cov >= 0.75 && candidates === 1 && played >= 10);
 }
 
 /** Align a section against every candidate roster; pick the trusted best. */
-export function joinSection(sec: AlignableSection, candidates: StoredRoster[]): IndexJoinOutcome {
+export function joinSection(sec: AlignableSection, candidates: StoredRoster[], opts: { strict?: boolean } = {}): IndexJoinOutcome {
   const played = playedCount(sec);
   const scored: (IndexCandidateResult & { alignment: SectionAlignment; roster: StoredRoster })[] = [];
   for (const roster of candidates) {
@@ -134,7 +136,7 @@ export function joinSection(sec: AlignableSection, candidates: StoredRoster[]): 
       platform: roster.platform,
       tid: roster.tid,
       series: roster.series,
-      trusted: indexTrusted(alignmentTrustworthy(sec, a), a.assignments.length, played, candidates.length),
+      trusted: indexTrusted(alignmentTrustworthy(sec, a), a.assignments.length, played, candidates.length, !!opts.strict),
       assigned: a.assignments.length,
       contradicted: a.contradicted.length,
       inconsistentEdges: a.inconsistentEdges,
