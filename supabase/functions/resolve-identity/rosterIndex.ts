@@ -21,6 +21,7 @@ import { assignmentTier } from "../_shared/sectionAlignCore.ts";
 import { getRosterCandidates, putSectionLink, rosterIndexCovers } from "../_shared/identityStore.ts";
 import { fetchSectionGraph } from "./uscf.ts";
 import { recordVerifiedAlignment } from "./harvest.ts";
+import { memberFootprint } from "./footprint.ts";
 
 export type IndexJoinVerdict = "resolved" | "none" | "ambiguous" | "not-covered" | "untraceable" | "no-crosstable" | "store-unavailable";
 
@@ -91,8 +92,40 @@ export async function indexJoinSection(eventId: string, sectionNumber: number, t
   };
 }
 
-/** Mode handler: up to 12 sections per call, sequentially (MUIR is paced). */
-export async function handleIndexJoin(req: { sections?: unknown; targetUscfId?: unknown }): Promise<Record<string, unknown>> {
+/**
+ * Member mode: the target's own online sections (portal footprint, newest
+ * first, ICC/ChessKid already dropped), joined one by one until the member has
+ * a strong assignment or two sections agree on a weak one. This is the first
+ * thing a search does — before the stored-identity read and before any
+ * platform request.
+ */
+async function joinMember(memberId: string, deadlineMs: number): Promise<Record<string, unknown>> {
+  const fp = await memberFootprint(memberId, () => Date.now() > deadlineMs);
+  if (!fp) return { available: true, sections: [], target: null, reason: "footprint unavailable" };
+  const out: IndexJoinSectionOut[] = [];
+  const found: NonNullable<IndexJoinSectionOut["target"]>[] = [];
+  for (const s of fp.sections.slice(0, 12)) {
+    if (Date.now() > deadlineMs) break;
+    const r = await indexJoinSection(s.eventId, s.section, memberId);
+    out.push(r);
+    if (r.target) found.push(r.target);
+    const strong = found.some((t) => t.tier === "strong");
+    const agreeing = found.length >= 2 && found.some((t, i) => found.some((u, k) => k !== i && u.handle === t.handle && u.platform === t.platform));
+    if (strong || agreeing) break;
+  }
+  // Best answer: strong first, then the handle seen in most sections.
+  const score = (t: NonNullable<IndexJoinSectionOut["target"]>) =>
+    (t.tier === "strong" ? 100 : 0) + found.filter((u) => u.handle === t.handle && u.platform === t.platform).length;
+  const best = found.sort((a, b) => score(b) - score(a))[0] || null;
+  const sectionsAgreeing = best ? found.filter((u) => u.handle === best.handle && u.platform === best.platform).length : 0;
+  return { available: true, sections: out, target: best, sectionsAgreeing, footprintSections: fp.sections.length };
+}
+
+/** Mode handler: `{memberId}` (the target's own sections), or up to 12 named
+ *  sections with an optional targetUscfId. Sequential (MUIR is paced). */
+export async function handleIndexJoin(req: { sections?: unknown; targetUscfId?: unknown; memberId?: unknown }): Promise<Record<string, unknown>> {
+  const member = typeof req.memberId === "string" ? req.memberId.replace(/\D/g, "") : "";
+  if (member) return joinMember(member, Date.now() + 40_000);
   const target = typeof req.targetUscfId === "string" ? req.targetUscfId.replace(/\D/g, "") : "";
   const list = Array.isArray(req.sections) ? req.sections.slice(0, 12) : [];
   const out: IndexJoinSectionOut[] = [];

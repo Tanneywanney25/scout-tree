@@ -49,6 +49,7 @@ import {
   findUsernameCandidates,
   searchUscfMembers,
   fetchStoredIdentity,
+  indexJoinMember,
   type MemberSearchHit,
   type StoredIdentity,
 } from "./providers/edgeClient";
@@ -285,7 +286,13 @@ export interface DiscoverOptions extends ResolveOptions {
 }
 
 /** A finished result built from stored, server-verified identities alone. */
-function storedResult(query: PlayerQuery, anchor: ConfirmedAnchor, verdicts: StoredIdentity[], t0: number): ResolutionResult {
+function storedResult(
+  query: PlayerQuery,
+  anchor: ConfirmedAnchor,
+  verdicts: StoredIdentity[],
+  t0: number,
+  via: "store" | "index" = "store"
+): ResolutionResult {
   const accounts: DiscoveredAccount[] = verdicts.map((s) => ({
     platform: s.platform,
     username: s.username,
@@ -317,14 +324,19 @@ function storedResult(query: PlayerQuery, anchor: ConfirmedAnchor, verdicts: Sto
         accounts,
         confidence: Math.max(...accounts.map((a) => a.confidence)),
         evidence: [],
-        reasoning: "Answered from the identity graph: a previous search proved this member's account by aligning a whole tournament section with the US Chess crosstable.",
+        reasoning:
+          via === "index"
+            ? "Answered from the roster index: the server aligned one of this member's US Chess sections, round by round, against the crawled roster and results of the tournament that hosted it."
+            : "Answered from the identity graph: a previous search proved this member's account by aligning a whole tournament section with the US Chess crosstable.",
         sources: ["uscf-graph"],
       },
     ],
-    providerStatus: [{ name: "uscf-graph", label: "Tournament graph", available: true, notes: ["Answered from stored identities."] }],
+    providerStatus: [
+      { name: "uscf-graph", label: "Tournament graph", available: true, notes: [via === "index" ? "Answered from the roster index." : "Answered from stored identities."] },
+    ],
     elapsedMs: Date.now() - t0,
     phaseTimings: {},
-    fromStore: true,
+    ...(via === "index" ? { fromIndex: true } : { fromStore: true }),
   };
 }
 
@@ -347,25 +359,11 @@ export async function discoverAccounts(
   const say = (message: string, status: SearchEvent["status"] = "info") =>
     resolveOpts.onEvent?.({ id: ++eventCounter, message, status, provider: "uscf-graph", timestamp: Date.now() });
 
-  // 1. The store first (brief item 3.3). A server-verified verdict for this
-  //    member ends the search before any discovery request.
-  if (!skipStore && !resolveOpts.signal?.aborted) {
-    const stored = await fetchStoredIdentity(anchor.uscfId, resolveOpts.signal).catch(() => [] as StoredIdentity[]);
-    const verdicts = stored.filter((s) => s.kind === "verdict" && (s.platform === "chesscom" || s.platform === "lichess"));
-    if (verdicts.length) {
-      say(
-        `Already proven: ${verdicts.map((v) => `@${v.username} on ${v.platform === "lichess" ? "Lichess" : "Chess.com"}`).join(", ")} — a previous search aligned a whole section that includes ${anchor.name}.`,
-        "done"
-      );
-      return storedResult(query, anchor, verdicts, t0);
-    }
-  }
-
-  // 2. No online-rated history at all (brief item 5.1): no online game can
-  //    correspond to a crosstable row, so alignment cannot succeed at any
-  //    depth. Decided from the US Chess record alone, before any platform
-  //    request. Measured: 68% of active members; the old path spent a 338 s
-  //    median on them for 0 of 12 resolved.
+  // 1. No online-rated history at all (brief item 5.1): no online game can
+  //    correspond to a crosstable row, so no index, store or walk can succeed.
+  //    Decided from the US Chess record alone, before any request. Measured:
+  //    68% of active members; the old path spent a 338 s median on them for
+  //    0 of 12 resolved.
   if (anchor.hasOnline === false) {
     say(
       `${anchor.name} has no online-rated US Chess games, so there is no online game record to align against. Nothing was searched.`,
@@ -380,7 +378,59 @@ export async function discoverAccounts(
       noOnlineFootprint: true,
     };
   }
-  return resolveIdentity(query, resolveOpts);
+
+  // 2. Resolution order (docs/roster-index.md 2.4): the roster index first,
+  //    stored handles second, the section walk third, guessing last. The index
+  //    join and the store read are both single edge calls, so they run side by
+  //    side; the index answer takes precedence when it has one.
+  let indexJoin: ResolutionResult["indexJoin"];
+  if (!skipStore && !resolveOpts.signal?.aborted) {
+    const ti = Date.now();
+    const [joined, stored] = await Promise.all([
+      indexJoinMember(anchor.uscfId, resolveOpts.signal).catch(() => null),
+      fetchStoredIdentity(anchor.uscfId, resolveOpts.signal).catch(() => [] as StoredIdentity[]),
+    ]);
+    if (joined) {
+      indexJoin = {
+        sectionsTried: joined.sections.length,
+        resolved: joined.sections.filter((s) => s.verdict === "resolved").length,
+        notCovered: joined.sections.filter((s) => s.verdict === "not-covered").length,
+        targetFound: !!joined.target,
+        ms: Date.now() - ti,
+      };
+    }
+    const t = joined?.target;
+    // A strong assignment, or one handle agreed by two sections, is a verdict
+    // (the same tiers as the store). A single weak one is a lead: the walk
+    // continues and may confirm it.
+    if (t && (t.platform === "chesscom" || t.platform === "lichess") && (t.tier === "strong" || joined!.sectionsAgreeing >= 2)) {
+      say(
+        `Found in the roster index: @${t.handle} on ${t.platform === "lichess" ? "Lichess" : "Chess.com"} — a whole section of ${anchor.name}'s aligned against the crawled tournament, ${t.rounds} round(s) verified.`,
+        "done"
+      );
+      const verdict: StoredIdentity = {
+        platform: t.platform,
+        username: t.handle,
+        kind: "verdict",
+        tier: t.tier,
+        confidence: t.tier === "strong" ? 0.99 : 0.97,
+        serverVerified: true,
+        source: "index",
+        sections: joined!.sectionsAgreeing,
+      };
+      return { ...storedResult(query, anchor, [verdict], t0, "index"), indexJoin };
+    }
+    const verdicts = stored.filter((s) => s.kind === "verdict" && (s.platform === "chesscom" || s.platform === "lichess"));
+    if (verdicts.length) {
+      say(
+        `Already proven: ${verdicts.map((v) => `@${v.username} on ${v.platform === "lichess" ? "Lichess" : "Chess.com"}`).join(", ")} — a previous search aligned a whole section that includes ${anchor.name}.`,
+        "done"
+      );
+      return { ...storedResult(query, anchor, verdicts, t0), indexJoin };
+    }
+  }
+  const walked = await resolveIdentity(query, resolveOpts);
+  return indexJoin ? { ...walked, indexJoin } : walked;
 }
 
 /** Mutable progress state shared between the wrapper and the core. */

@@ -716,6 +716,86 @@ export async function recordSectionAlignment(req: {
   return data as unknown as RecordAlignmentResult;
 }
 
+// ---------------------------------------------------------------------------
+// Roster index (docs/roster-index.md, Phase 2). The server aligns a section's
+// crosstable against crawled tournament rosters — no platform request from
+// this tab. Results are memoised per (section, member) for 10 minutes, so the
+// member-mode call a search makes first answers the level-0 calls for free.
+// ---------------------------------------------------------------------------
+
+export type IndexJoinVerdict = "resolved" | "none" | "ambiguous" | "not-covered" | "untraceable" | "no-crosstable" | "store-unavailable";
+
+export interface IndexJoinTarget {
+  handle: string;
+  platform: Platform;
+  tier: string;
+  rounds: number;
+  corroborating: number;
+}
+
+export interface IndexJoinSection {
+  eventId: string;
+  sectionNumber: number;
+  verdict: IndexJoinVerdict;
+  platform?: Platform;
+  tournamentId?: string;
+  played?: number;
+  assigned?: number;
+  candidates?: number;
+  stored?: number | null;
+  target?: IndexJoinTarget | null;
+  ms: number;
+}
+
+const indexJoinMemo = new Map<string, { at: number; r: IndexJoinSection }>();
+const INDEX_MEMO_MS = 10 * 60_000;
+const memoKey = (eventId: string, n: number, member: string) => `${eventId}#${n}|${member}`;
+
+function rememberIndexJoins(rows: IndexJoinSection[], member: string): void {
+  const at = Date.now();
+  for (const r of rows) indexJoinMemo.set(memoKey(r.eventId, r.sectionNumber, member), { at, r });
+}
+
+/** The search's first call: the server joins the member's own online sections
+ *  against the index and stops at a strong (or twice-agreeing) assignment. */
+export async function indexJoinMember(
+  memberId: string,
+  signal?: AbortSignal
+): Promise<{ target: IndexJoinTarget | null; sectionsAgreeing: number; sections: IndexJoinSection[] } | null> {
+  const id = memberId.replace(/\D/g, "");
+  if (!id || signal?.aborted) return null;
+  const data = await invokeEdge({ indexJoin: { memberId: id } }, 60_000);
+  if (!data || !Array.isArray(data.sections)) return null;
+  const sections = data.sections as IndexJoinSection[];
+  rememberIndexJoins(sections, id);
+  return { target: (data.target as IndexJoinTarget | null) ?? null, sectionsAgreeing: Number(data.sectionsAgreeing) || 0, sections };
+}
+
+/** Join named sections, disclosing only `member`'s handle (the target at level
+ *  0, the bridge deeper). Memoised; at most 12 sections per edge call. */
+export async function indexJoinSections(
+  sections: { eventId: string; sectionNumber: number }[],
+  member: string,
+  signal?: AbortSignal
+): Promise<IndexJoinSection[]> {
+  const id = member.replace(/\D/g, "");
+  const out: IndexJoinSection[] = [];
+  const need: { eventId: string; sectionNumber: number }[] = [];
+  for (const s of sections) {
+    const m = indexJoinMemo.get(memoKey(s.eventId, s.sectionNumber, id));
+    if (m && Date.now() - m.at < INDEX_MEMO_MS) out.push(m.r);
+    else need.push(s);
+  }
+  for (let i = 0; i < need.length && !signal?.aborted; i += 12) {
+    const data = await invokeEdge({ indexJoin: { sections: need.slice(i, i + 12), targetUscfId: id } }, 90_000);
+    if (!data || !Array.isArray(data.sections)) continue;
+    const rows = data.sections as IndexJoinSection[];
+    rememberIndexJoins(rows, id);
+    out.push(...rows);
+  }
+  return out;
+}
+
 export async function fetchSectionNegatives(
   keys: { eventId: string; sectionNumber: number }[]
 ): Promise<{ eventId: string; sectionNumber: number; reason?: string }[]> {

@@ -229,6 +229,11 @@ export interface ResolutionResult {
   partialOpponents?: number;
   /** Answered from stored, server-verified identities (no search ran). */
   fromStore?: boolean;
+  /** Answered by the roster index: the server aligned one of the member's
+   *  sections against crawled tournament rosters (no platform request). */
+  fromIndex?: boolean;
+  /** What the roster-index join did for this search (docs/roster-index.md). */
+  indexJoin?: { sectionsTried: number; resolved: number; notCovered: number; targetFound: boolean; ms: number };
   /** The member has no online-rated US Chess games: nothing to align. */
   noOnlineFootprint?: boolean;
   /** Counters from the section-scoped search (sectionBfs.ts), when it ran. */

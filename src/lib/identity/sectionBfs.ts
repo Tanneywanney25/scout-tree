@@ -56,6 +56,8 @@ import {
   recordSectionAlignment,
   discoverEventPlatform,
   findUsernameCandidates,
+  indexJoinSections,
+  type IndexJoinSection,
   type MemberFootprint,
   type RecordAlignmentResult,
 } from "./providers/edgeClient";
@@ -81,6 +83,9 @@ export interface SectionBfsHooks {
   seedEdges(ids: string[], signal?: AbortSignal): Promise<{ uscfId: string; platform: string; username: string }[]>;
   discoverPlatform(ev: GraphEvent, signal?: AbortSignal): Promise<EventPlatformInfo | null>;
   findUsernames(req: UsernameSearchRequest, signal?: AbortSignal): Promise<UsernameCandidate[] | null>;
+  /** Roster index: align sections against crawled rosters server-side;
+   *  only `member`'s handle comes back. */
+  indexJoin(keys: { eventId: string; sectionNumber: number }[], member: string, signal?: AbortSignal): Promise<IndexJoinSection[]>;
 }
 
 export const defaultSectionBfsHooks: SectionBfsHooks = {
@@ -97,6 +102,7 @@ export const defaultSectionBfsHooks: SectionBfsHooks = {
     return discoverEventPlatform(ev, signal, { cacheOnly: g === "chesscom" || g === "lichess" });
   },
   findUsernames: (req, signal) => findUsernameCandidates({ ...req, maxQueries: req.maxQueries ?? 2 }, signal),
+  indexJoin: (keys, member, signal) => indexJoinSections(keys, member, signal),
 };
 
 export interface SectionBfsProgress {
@@ -159,6 +165,10 @@ export interface SectionBfsResult extends TraversalResult {
   backtracks: number;
   /** Server verdict for the target, when its section was harvested. */
   targetHarvest?: { handle: string; tier: string; rounds: number; corroborating: number } | null;
+  /** Roster-index joins: sections tried, resolved by the index, and how many
+   *  of those spared an engine walk; not-covered = the index had no
+   *  tournament in that section's date window at all. */
+  index: { tried: number; resolved: number; notCovered: number; bridgesResolved: number; targetFound: boolean };
 }
 
 interface SectionNode {
@@ -261,6 +271,60 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
   const accounts: DiscoveredAccount[] = [];
   const notes: string[] = [];
   const firstResolvedPivotRanks: number[] = [];
+  const index = { tried: 0, resolved: 0, notCovered: 0, bridgesResolved: 0, targetFound: false };
+
+  /** Order item 1 of 4 (docs/roster-index.md 2.4): the roster index. A
+   *  resolved section is aligned without a platform request; `member`'s handle
+   *  (the target or the bridge) is learned when it played there. */
+  const joinFromIndex = async (keys: { eventId: string; sectionNumber: number }[], member: string) => {
+    if (!keys.length) return new Map<SectionKey, IndexJoinSection>();
+    const rows = await hooks.indexJoin(keys, member, signal).catch(() => [] as IndexJoinSection[]);
+    const out = new Map<SectionKey, IndexJoinSection>();
+    for (const r of rows) {
+      index.tried++;
+      if (r.verdict === "not-covered") index.notCovered++;
+      const k = keyOf(r.eventId, r.sectionNumber);
+      out.set(k, r);
+      if (r.verdict !== "resolved") continue;
+      index.resolved++;
+      const node = nodes.get(k);
+      if (node && node.status !== "aligned") {
+        node.status = "aligned";
+        alignedSections++;
+        firstAlignedAtMs ??= Date.now() - t0;
+      }
+      harvestedSections.add(k);
+      identitiesHarvested += r.stored || 0;
+      progressedThisLevel = true;
+      if (r.target && (r.target.platform === "chesscom" || r.target.platform === "lichess")) {
+        if (member === T) {
+          index.targetFound = true;
+          targetHarvest = { handle: r.target.handle, tier: r.target.tier, rounds: r.target.rounds, corroborating: r.target.corroborating };
+          const strong = r.target.tier === "strong";
+          const acc: DiscoveredAccount = {
+            platform: r.target.platform,
+            username: r.target.handle,
+            profileUrl:
+              r.target.platform === "lichess" ? `https://lichess.org/@/${r.target.handle}` : `https://www.chess.com/member/${r.target.handle}`,
+            verified: true,
+            confidence: strong ? 0.99 : 0.93,
+            evidence: [
+              {
+                kind: "tournament-overlap",
+                weight: strong ? 4 : 1,
+                label: `Roster index: the whole section aligned against the crawled tournament (${r.target.tier}, ${r.target.rounds} verified round(s), ${r.target.corroborating} corroborating opponent(s))`,
+                source: "uscf-graph",
+              },
+            ],
+          };
+          recordTargetFind({ accounts: [acc], notes: [], found: strong, mappedOpponents: 0 });
+        } else if (learnHandle(member, r.target.platform, r.target.handle)) {
+          index.bridgesResolved++;
+        }
+      }
+    }
+    return out;
+  };
   let progressedThisLevel = false;
   let level = 0;
   // Speculative budget for the whole search. Smoke data: a per-section cap
@@ -513,7 +577,20 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
   progress();
 
   level = 0;
-  recordTargetFind(await runOn(T, level0, opts.guessCapLevel0 ?? 8, false));
+  const level0Index = await joinFromIndex(
+    level0.filter((ev) => typeof ev.sectionNumber === "number").map((ev) => ({ eventId: ev.eventId, sectionNumber: ev.sectionNumber! })),
+    T
+  );
+  if (level0Index.size) {
+    log(
+      `Roster index: ${[...level0Index.values()].filter((r) => r.verdict === "resolved").length} of ${level0Index.size} level-0 section(s) aligned from crawled rosters with no platform request` +
+        `${index.targetFound ? ` — ${opts.targetName}'s handle among them` : ""}.`
+    );
+  }
+  // Order items 2–4: stored handles as seeds, the section walk, guessing within
+  // the budget — only over level-0 sections the index did not align.
+  const level0Walk = level0.filter((ev) => nodes.get(keyOf(ev.eventId, ev.sectionNumber))?.status !== "aligned");
+  if (!found && level0Walk.length) recordTargetFind(await runOn(T, level0Walk, opts.guessCapLevel0 ?? 8, false));
   for (const ev of level0) {
     const n = nodes.get(keyOf(ev.eventId, ev.sectionNumber))!;
     if (n.status !== "aligned") n.status = "walked";
@@ -632,16 +709,25 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
       ev.sectionNumber ??= n.sectionNumber;
       n.ev = ev;
       registerSection(ev);
+      // Order item 1: the roster index. A section it aligns needs no walk.
+      await joinFromIndex([{ eventId: n.eventId, sectionNumber: n.sectionNumber }], n.bridge!);
+      if (n.status === "aligned") {
+        sectionsWalked++;
+        if (known.has(n.bridge!) && n.parent) pendingBacktracks.push({ node: n.parent, seed: n.bridge! });
+        return;
+      }
       // Deeper sections rank fewer members: MUIR allows ~100 requests a
       // minute per address and a cold footprint costs up to five.
       await ensureFootprints(ev.players.map((p) => p.uscfId).slice(0, opts.footprintsPerDeepSection ?? 15));
       sectionsWalked++;
       const before = requestsSoFar().total;
       await runOn(n.bridge!, [ev], opts.guessCapDeeper ?? 3, true);
-      if (n.status !== "aligned") n.status = "walked";
+      // runOn may align the section through the harvest callback.
+      const alignedNow = (n.status as SectionNode["status"]) === "aligned";
+      if (!alignedNow) n.status = "walked";
       if (known.has(n.bridge!) && n.parent) {
         pendingBacktracks.push({ node: n.parent, seed: n.bridge! });
-      } else if (n.status !== "aligned") {
+      } else if (!alignedNow) {
         void hooks.putNegative({
           eventId: n.eventId,
           sectionNumber: n.sectionNumber,
@@ -722,6 +808,7 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
       firstResolvedPivotRanks,
       backtracks,
       targetHarvest,
+      index,
     };
   }
 }
