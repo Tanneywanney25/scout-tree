@@ -20,6 +20,10 @@
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 // Args: --max-muir N (default 60)  --per-min N (default 14)  --size N (default 250)
 //       --affiliates A1,A2 (default: all below)  --dry
+//       --since YYYY-MM-DD   override every affiliate's date floor
+//       --queue-unknown      queue sections whose online flag is unknown too
+//                            (source 'enumerated-unverified'); the batch reads
+//                            isOnline itself and records 'not-online'.
 
 const SB = String(process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -30,6 +34,8 @@ const MAX_MUIR = Number(arg("max-muir", 60));
 const PER_MIN = Math.min(15, Number(arg("per-min", 14)));
 const SIZE = Number(arg("size", 250));
 const DRY = process.argv.includes("--dry");
+const SINCE = arg("since", "");
+const QUEUE_UNKNOWN = process.argv.includes("--queue-unknown");
 const API = "https://ratings-api.uschess.org/api/v1";
 const UA = "scout-report-pro/roster-index (online section enumeration)";
 
@@ -118,10 +124,11 @@ for (const a of AFFILIATES) {
     const items = res.json.items || [];
     pageSize = Number(res.json.pageSize) || items.length || SIZE;
     const rows = [];
+    const unverified = [];
     let older = false;
     for (const ev of items) {
       const day = ev.endDate || ev.startDate || "";
-      if (day && day < a.since) { older = true; continue; }
+      if (day && day < (SINCE || a.since)) { older = true; continue; }
       st.events++;
       for (let n = 1; n <= (Number(ev.sectionCount) || 0); n++) {
         st.sections++;
@@ -131,13 +138,19 @@ for (const a of AFFILIATES) {
         } else if (a.online === null || a.online.test(ev.name || "")) {
           st.online_rule++; rows.push(k);
         } else {
-          st.unknown++; pendingVerify.push({ k, st });
+          st.unknown++;
+          if (QUEUE_UNKNOWN) unverified.push(k);
+          else pendingVerify.push({ k, st });
         }
       }
     }
     st.queued_new += await queue(rows.map((k) => {
       const [event_id, no] = k.split("/");
       return { event_id, section_no: Number(no), verdict: "queued", source: "enumerated" };
+    }));
+    st.queued_new += await queue(unverified.map((k) => {
+      const [event_id, no] = k.split("/");
+      return { event_id, section_no: Number(no), verdict: "queued", source: "enumerated-unverified" };
     }));
     console.log(`${a.label}: offset ${off} items ${items.length} (${items[0]?.startDate}..${items[items.length - 1]?.startDate}) queued so far ${st.queued_new}`);
     if (older || !res.json.hasNextPage || !items.length) { st.complete = true; break; }

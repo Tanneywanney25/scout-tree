@@ -986,3 +986,65 @@ workflow is public by design.
     rows.
 18. **Hosting**: Supabase Edge + `pg_cron` over GitHub Actions (7.2), because
     GitHub schedules run from `main` only and this branch is not merged.
+
+## Mass pre-resolution and target discovery (2026-10-03, 22:00 UTC session)
+
+Short results; numbers are as of 22:12 UTC and the unattended loop keeps adding.
+
+**What runs.** `scripts/pre-resolve.mjs` joins USCF online sections against the
+roster index in bulk and writes exactly what the edge `indexJoin` writes
+(`record_identity_edges`, then a `section_link` with `source = 'index'`).
+Progress is one row per section in `preresolve_section` (migration
+`20261003000400`), so a later run continues: a resolved section is never
+processed again, and an unresolved one is retried only when a roster inside its
+date window was crawled after it was last tried. Trust bar: the strict form of
+`indexTrusted` (>= 90% of the crosstable, no 75% clause), and no blind join for
+sections with fewer than 3 players who played. The index join calls no model;
+its limits are the database and, for sections whose crosstable is not cached,
+MUIR (about 75 requests a minute from one address, ~2.6 requests a section).
+
+| | |
+|---|---|
+| Candidates before starting | 3,588 cached online sections (3,434 with a cached crosstable); 307 already linked, **3,127 to try**; index 5,609 rosters |
+| Cached pass (22:04, 72 s, no MUIR request) | 3,127 processed, **1,079 resolved**, 19,912 member alignments written (16,812 strong) |
+| Second cached pass (30 failed writes retried, earlier index links given a progress row, new rosters) | 221 processed, 205 resolved, 4,024 alignments |
+| Not resolved, by reason | no roster in the window 1,211; candidates but none trusted 495; **below the 90% floor 126**; ICC / ChessKid title 180; ambiguous 4; under 3 players 2 |
+| Disagreements with stored identities | 9 equal-strength conflicts, 41 weaker edges superseded |
+| Resolved rows under 90% coverage | **0 of 1,376** (minimum 90.2%) |
+| Store, before → 22:10 | `identity_edge` 3,691 → **7,502** (7,428 active, 6,812 strong); verified `section_link` 307 → **1,517** |
+| Enumerated from MUIR (`scripts/enumerate-online-sections.mjs`) | `/affiliates/{id}/events` lists an organiser's events newest first; 2,166 sections queued in the first run, more affiliates and earlier dates queued after |
+| Unattended loop (`scripts/pre-resolve-run.sh 13`, started 22:07) | works the queue at MUIR pace (about 31 sections a minute) and re-reads the index every pass; log `logs/pre-resolve.log` |
+
+"Alignments written" counts one row per member per section; a member seen in
+ten sections is one `identity_edge`, which is why 24,000 alignments became
+3,800 new edges. The first cached pass wrote the link before the identities and
+30 identity writes failed under 8 concurrent calls; the order is now identities
+first, with retries, and the second pass repaired all 30.
+
+**Model capacity (Item 0).** OpenRouter (`nvidia/nemotron-3-super-120b-a12b:free`)
+and Cloudflare Workers AI (`@cf/openai/gpt-oss-120b`) both answer;
+`scripts/llm-rotate.mjs` rotates round-robin with a per-provider pause on 429.
+Measured for 45 s at 8 concurrent: 115 + 113 = **228 completions a minute, about
+90,000 tokens a minute**, no 429. Groq's key exists only as a Supabase secret, so
+it was not measured from the laptop. Nothing in the pre-resolution uses a model,
+so worker count was sized from MUIR instead. Production `AI_PROXY_*` secrets
+were not changed.
+
+**Crawl targets queued (Item 2).** Chess.com: 7 new series (`sfs` 64Squares,
+`evangel`, `aocc` Westford, `morning`, `seneca`, `transcon`, `ktchess`), 1,121
+tournaments queued as pending and `chesscomSeries()` extended; the running
+crawler has already fetched some. Lichess: 12 teams in `crawl_source`, 609
+swisses queued; `lichessLane` now reads teams from `crawl_source`. The running
+crawler's Lichess lane exited at start, so those 609 wait for the next crawler
+run (`node scripts/roster-crawler.mjs --platform lichess` once the lease is
+free). Largest series still without a platform: PLAY N STAY (659 sections) and
+HERMOVENEXT / Impact Coaching Network (637).
+
+**Production changes.** Migration `20261003000400_preresolve_section.sql`
+applied (`drop table public.preresolve_section;`). Rows written by the batch:
+`delete from section_link where source = 'index' and checked_at >= '2026-10-03 22:04';`
+and the `identity_edge` rows whose `sections` name those events. Queued targets:
+`delete from roster_tournament where status = 'pending' and series in ('sfs','evangel','aocc','morning','seneca','transcon','ktchess');`
+and `delete from crawl_source where platform = 'lichess' and kind = 'team' and key <> 'dmv-chess-tournaments';`
+with their pending `roster_tournament` rows. No secret was set and no function
+was deployed.
