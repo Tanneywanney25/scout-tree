@@ -217,7 +217,51 @@ Counters: `result.indexJoin` (member mode) and `sectionSearch.index`
 
 ## Phase 3: The crawler
 
-_pending_
+`scripts/roster-crawler.mjs` (CLI) over `scripts/roster-crawl-core.mjs` (the
+crawler, runtime-neutral), `bb6f524` → `4878633`.
+
+### 3.1 Scope
+
+Five series and nothing else. Chess.com slugs are admitted only if they match
+the official US Chess events (`-us-chess-…`, `us-chess-…-u1450`, `…-open`),
+WNZ / Waltham (`…-wnz-rated-…`, `…-waltham-rated-…`), PCA (`pca-…`) or Grand
+Prix Rated (`…-grand-prix-rated-…`); Lichess: the DMV team's rated, finished
+swiss. The 25,848 distinct tournaments in 120 members' lists were 80% other
+things (hourly public blitz, bullet, Titled Tuesday…) and are never fetched.
+Plus the 46 tournaments already linked to a section, crawled first as
+validation targets.
+
+### 3.2 Pacing
+
+One request at a time per platform, target **1 request/s each**, with a
+descriptive User-Agent carrying a contact URL (the project's issues page; see
+Decisions). A 429 or a Cloudflare challenge halves the rate and pauses
+(Chess.com 10 s doubling to 5 min; Lichess 60 s doubling to 10 min, Lichess's
+own "wait a minute"); each clean minute adds 0.1/s back. Measured over the
+backfill: Chess.com **0.99 requests/s sustained, 0 rate-limit events**;
+Lichess 0.73–0.77/s effective (each roster is two requests and the exports are
+larger), **1 rate-limit event** (02:18:44, during my own Lichess experiments of
+4.3), recovered by the schedule.
+
+### 3.3 Resumable by construction
+
+All state is in Postgres: a tournament is `pending` until its **whole** roster
+is in hand and is written in one PATCH; `done` rows are never selected again;
+discovery progress is `crawl_source.last_polled_at`. A process killed, slept
+or cut off mid-tournament leaves that tournament `pending` and it is fetched
+again. Evidence: the crawler was stopped and restarted twice mid-run (01:56:47
+for the Phase 5 change; 02:45:37 for the Phase 6 freeze) with no lost or
+duplicated work: of 738 Chess.com rosters, 707 cost exactly 1 + rounds and 31
+cost less (fewer rounds played than scheduled); all 1,514 Lichess rosters cost
+2 (3 for the 18 validation targets, which also read the tournament's info). No
+row shows a second fetch. Not tested: an actual laptop sleep (the code path is the same as a
+kill: transport failures retry with backoff; the database client retries up
+to 20 times with backoff to 60 s). A lease (`crawl_lease`, `4878633`) keeps a
+laptop run and the edge slices (7.2) from ever crawling at once.
+
+### 3.4 Projection, 3.5 backfill coverage
+
+See the update at the end of the session (the crawl resumed after Phase 6).
 
 ## Phase 4: Kill the guessing
 
@@ -298,11 +342,12 @@ naturally:
 
 | Player | Last session | This session, `f771786` breaker | This session, per-class breaker (`4878633`) |
 |---|---|---|---|
-| #6 | stopped by the 25-min guard after ~20 min without progress; 46 Lichess 429s | **169 s**, ended on evidence; 4 Lichess rate-limit events, 580 Lichess requests failed fast; longest silence **15.1 s** | see below |
-| #22 | stopped by the guard after 13+ min without progress; 34 Lichess 429s | **811 s**, ended on its own (frontier exhausted, level 3, 14 sections aligned, not resolved); 17 events, 1,224 failed fast; longest silence **49.3 s** | see below |
+| #6 | stopped by the 25-min guard after ~20 min without progress; 46 Lichess 429s | **169 s**, ended on evidence; 4 Lichess rate-limit events, 580 Lichess requests failed fast; longest silence **15.1 s** | 8 s (not comparable: the first re-run had stored its section's tournament link, so the engine aligned it from the store) |
+| #22 | stopped by the guard after 13+ min without progress; 34 Lichess 429s | **811 s**, ended on its own (frontier exhausted, level 3, 14 sections aligned, not resolved); 17 events, 1,224 failed fast; longest silence **49.3 s** | **757 s**, ended on its own (frontier, level 2, 15 aligned, not resolved); 12 events, 825 failed fast; **39 Lichess tournament exports still answered** while `/api/user` was saturated; longest silence **40.2 s**; speculative budget **250 used, 184 denied** (exact) |
 
-The breaker ends the stall: neither search waited on Lichess; both finished
-without the guard.
+The breaker ends the stall: neither search waited on Lichess; every run
+finished without the guard. #22 is not resolved by any run, last session's
+included: it is a resolution failure, no longer a wedge.
 
 ## Phase 5: Platform resolution for unnamed sections
 
@@ -446,11 +491,99 @@ running implementation today.
 
 ## Phase 8: Human handoff
 
-_pending_
+### 8.1–8.2 Candidates, checked against the live pages (2026-10-03)
+
+| Candidate | What the live page asked for | Kept? | Measured bottleneck it removes |
+|---|---|---|---|
+| **Groq** (console.groq.com) | Sign-in with Google, GitHub, SSO or e-mail; no card field. The rate-limits page has a "Free Plan Limits" table. Models include `openai/gpt-oss-20b`, `openai/gpt-oss-120b`, `llama-3.1-8b-instant`, `llama-3.3-70b-versatile`. | **Yes** | Production AI: gemini-direct went to 429 after three calls and then costs **25 s per call** (Phase 0). Groq's API is OpenAI-compatible, so it plugs into the existing `AI_PROXY_*` path with no code change and no laptop. |
+| **Cloudflare** (dash.cloudflare.com/sign-up) | E-mail + password, or Google/Apple/GitHub; no card field. Workers AI: 10,000 Neurons/day free; Workers Free: 100,000 requests/day. | **Yes** (second AI provider for the FreeLLMAPI pool; also a fallback crawler host) | Same as Groq, as a second pool member. |
+| **OpenRouter** (openrouter.ai/sign-up) | First/last name (optional), e-mail, password, terms checkbox; no card field. | **Yes** (pool member; free models only) | Same. Its limits page could not be read (the docs URL redirected elsewhere), so the free daily allowance is unverified. |
+| Supabase `pg_cron` for the crawler (7.2) | No signup: same project. | **Yes** (a switch, not a signup) | The crawler lives on this laptop. |
+| Cerebras | "Add a valid payment method to receive a one-time $5 promotional credit." | **No** (payment method) | — |
+| GitHub Models | "GitHub Models has been retired." | **No** | — |
+| Mistral | The console redirected to a login form; the free API tier's requirements could not be read without an account. | **No** (unverified) | — |
+| Fly.io, Railway, Render workers, Oracle, Google Cloud, HF Docker Spaces | See 7.2 | **No** | — |
+
+### 8.3 The open browser
+
+See "Handoff state" at the end of this section.
+
+### 8.4 Checklist (followable on its own)
+
+1. **Groq key → production AI** (removes the 25 s gemini-direct 429 cost).
+   - Tab 1: `https://console.groq.com/login` → sign in (Google, GitHub or
+     e-mail; no card is asked for) → **API Keys** → **Create API Key** → copy
+     the `gsk_…` value.
+   - Pick a chat model id that the **Free Plan Limits** table on
+     `https://console.groq.com/docs/rate-limits` lists (the models page,
+     `https://console.groq.com/docs/models`, shows which are chat models).
+   - Run, from the repo:
+     ```
+     supabase secrets set AI_PROXY_BASE_URL=https://api.groq.com/openai AI_PROXY_API_KEY=<gsk_…> AI_PROXY_MODEL=<model id>
+     ```
+     (`_shared/ai.ts` appends `/v1/chat/completions`, which is Groq's path.)
+   - Verify: `curl -s -X POST https://xqyszdjczchlgyisvtvo.supabase.co/functions/v1/resolve-identity -H "apikey: <publishable key>" -H "Authorization: Bearer <publishable key>" -H "Content-Type: application/json" -d '{"health":true,"aiCheck":true}'`
+     must show `"backend":"proxy:<model>"`.
+   - Undo: `supabase secrets unset AI_PROXY_BASE_URL` (falls back to
+     gemini-direct). Note this replaces the FreeLLMAPI key held in
+     `AI_PROXY_API_KEY`.
+2. **Cloudflare account → Workers AI token** (second provider).
+   - Tab 2: `https://dash.cloudflare.com/sign-up` → sign up (e-mail +
+     password or Google/Apple/GitHub; no card) → **AI → Workers AI** → **Use
+     REST API** → create a token with *Workers AI: Read* (and *Edit*) → copy
+     the token and the **Account ID**.
+   - Where it goes: the FreeLLMAPI desktop app on this laptop (Providers →
+     add Cloudflare Workers AI with the account id + token). Production can
+     hold only one `AI_PROXY_*` backend; use Cloudflare there only instead of
+     Groq, as `AI_PROXY_BASE_URL=https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai`.
+3. **OpenRouter key** (third pool member, free models).
+   - Tab 3: `https://openrouter.ai/sign-up` → e-mail + password → **Keys** →
+     **Create Key** → copy `sk-or-…`.
+   - Where it goes: FreeLLMAPI → Providers → OpenRouter. Use only `:free`
+     model ids unless credits are deliberately added.
+4. **Turn on the crawler in production** (takes it off this laptop).
+   - Tab 4: `https://supabase.com/dashboard/project/xqyszdjczchlgyisvtvo/sql/new`
+     (sign in to Supabase).
+   - Paste `supabase/sql/roster-crawl-schedule.sql` from this branch, replace
+     `<SERVICE_ROLE_KEY>` with the service-role key (Project Settings → API
+     Keys), run it.
+   - Check after 5 minutes: `select * from cron.job_run_details order by start_time desc limit 3;`
+     and `select status, count(*) from roster_tournament group by 1;`
+     (`done` should grow by a few dozen per slice: ~110 Chess.com and ~80 Lichess requests per 110 s slice).
+   - Undo: `select cron.unschedule('roster-crawl');`. A laptop crawler and the
+     schedule never run together (`crawl_lease`).
 
 ## Production changes
 
-_pending_
+Project `xqyszdjczchlgyisvtvo` (secrets, functions, database) and the GitHub
+remote. Times UTC, 2026-10-03.
+
+| # | When | Change | Reverse with |
+|---|---|---|---|
+| R1 | 01:13 | `git push -u origin traversal/section-bfs` (29 commits that existed only locally); later pushes of this branch and tags `rindex-p0` (01:19), `rindex-p6` (02:46). Not merged, no pull request. | `git push origin --delete traversal/section-bfs rindex-p0 rindex-p6` |
+| R2 | 01:15:48 | **Secret `AI_PROXY_BASE_URL` unset** (was the laptop's quick tunnel). `AI_PROXY_API_KEY` and `AI_PROXY_SEARCH_MODEL` left as they were. | `supabase secrets set AI_PROXY_BASE_URL=<reachable proxy origin>` |
+| R3 | 01:16 | Stopped the orphaned `cloudflared` (pid 44944) on this laptop. Not production, but it was the tunnel R2 pointed at. | `cloudflared tunnel --url http://127.0.0.1:31415` |
+| R4 | 01:36 | `db push` `20261003000000_roster_index.sql`: tables `roster_tournament`, `crawl_source` (+ indexes, RLS on, no policies). | `drop table public.roster_tournament, public.crawl_source;` |
+| R5 | 01:38 | `db push` `20261003000100_roster_index_fns.sql`: function `refresh_crawl_source_priority(text)`. | `drop function public.refresh_crawl_source_priority(text);` |
+| R6 | 01:38–02:45 | Crawler writes (three runs from this laptop): `roster_tournament` rows (status, rosters, vectors), `crawl_source` rows; 46 validation rows inserted by hand (`series = 'linked'`). | `truncate public.roster_tournament, public.crawl_source;` |
+| R7 | 01:44, 01:48, 01:57, 02:11 | Deployed `resolve-identity` **v107** (indexJoin), **v108** (member mode), **v109** (footprint v2 / platform inference), **v110** (index trust bar) from this branch. All earlier modes keep their request and response shapes. | `gh workflow run deploy-supabase-functions.yml --ref main` (or deploy from tag `rindex-p0`, = v105 modulo a comment) |
+| R8 | 01:44–01:48 | Two live index joins (smoke tests): 2 `section_link` rows `source = 'index'` and their `identity_edge` rows. | `delete from section_link where source = 'index';` (edges: by `sections` containing those events) |
+| R9 | 01:56 | `db push` `20261003000200_series_platform_source.sql`: column `series_platform.source`; one row `prefix:dmvchess.com → lichess` inserted by hand; the crawler then added `index`/`listing` rows (3,784 rows in the table at 02:45). | `delete from series_platform where source <> 'alignment'; alter table series_platform drop column source;` |
+| R10 | 02:12–02:45 | Four searches for Phase 4.3 (players #6, #22 twice) through production: their harvests added identities (`identity_edge` 979 → 1,384 by 02:45, together with R8). Re-run alignments of public games. | `delete from identity_edge where first_seen between '2026-10-03 01:40' and '2026-10-03 02:46';` |
+| R11 | 02:31 | `db push` `20261003000300_crawl_lease.sql`: table `crawl_lease`, functions `take_crawl_lease`, `release_crawl_lease`. | drop the table and both functions |
+| R12 | 02:32 | Deployed a **new** function `roster-crawl` v1 (service-role only; 401 otherwise). **No schedule**: `supabase/sql/roster-crawl-schedule.sql` is staged, not run. | `supabase functions delete roster-crawl` |
+| R13 | — | `explain-move` / `training-hint` list as v63 (v62 at session start) with **unchanged** bundle hash and `updated_at` (2026-10-02 23:22). Not deployed by me; recorded because the number moved. | — |
+
+Further rows for the Phase 6 run and the resumed crawl are at the end.
+
+**Credentials.** Before the first code commit, and on every later commit, the
+staged diff was scanned for `sb_secret_…`, JWTs, `AIza…`, `sk-…` and e-mail
+addresses: no hits except the literal word "sb_secret_" in a comment. The
+service-role key used by the laptop crawler and the evaluation scripts was
+fetched with `supabase projects api-keys` into the session scratchpad
+(`crawler.env`, outside the repository) and is in no committed file. The
+publishable key in `src/integrations/supabase/client.ts` and the deploy
+workflow is public by design.
 
 ## Errors made this session
 
@@ -462,4 +595,69 @@ _pending_
 
 ## Decisions and Assumptions
 
-_pending_
+1. **The instruction.** The user's message asked me to push the existing
+   commits first, sign up for nothing that needs a card (or at all, for this
+   prompt), and use Playwright only if free; it carried the brief as pasted
+   text. I followed the brief within those limits. Playwright 1.63
+   (Apache-2.0) and its Chromium were installed into the session scratchpad,
+   not the repository. No account was created anywhere.
+2. **Which code the "Phase 0 tag" measurement runs.** `rindex-p0` marks the
+   state the session started from. Running Phase 6 on it would measure none of
+   this session's work and could not report an index-join hit rate, which the
+   brief asks for. So Phase 6 ran on frozen code tagged **`rindex-p6`**
+   (`fbd1a41`), with the bundle built once from that commit, `resolve-identity`
+   v110 equal to its edge code, and the index frozen (crawler stopped) for the
+   whole run. Both tags are on the remote.
+3. **Proxy unset despite the measurement.** The brief said to unset
+   `AI_PROXY_BASE_URL`; the measurement showed gemini-direct then costs 25 s
+   per call once its quota is hit. I followed the brief (the laptop dependency
+   was the stated reason) and recorded the cost (Phase 0). AI is not on the
+   search's critical path.
+4. **The orphaned tunnel** was stopped once nothing in production pointed at
+   it (R3). The SearXNG container was left running, untouched.
+5. **Contact in the User-Agent.** The crawler sends the project's issues URL
+   (`CRAWLER_CONTACT` overrides it). The owner's e-mail address went out in the
+   User-Agent of the Phase 1 probes; see Errors.
+6. **Result vectors, not games.** The index stores one token per player per
+   round (opponent index, colour, result); a game exists only as the two
+   tokens of its players. That is the brief's "result vector … with opponent
+   references", and it is exactly what the alignment needs.
+7. **Disclosure parity.** `indexJoin` writes every member's identity to the
+   store but returns only the named member's handle, like `storedIdentity` and
+   `recordAlignment`; the bulk read stays signed-in only (`seedEdges`).
+8. **Resolution order.** The brief puts the index join before stored handles.
+   Both are single edge calls, so they run side by side and the index answer
+   takes precedence; the free no-footprint gate stays in front of both (it is
+   a gate, not a resolution method).
+9. **A stricter trust bar for blind joins** (≥ 90% coverage, or ≥ 75% with a
+   single candidate and ≥ 10 players) than for the harvest, because a blind
+   join tries every tournament of the day (Phase 2.3).
+10. **No affiliate (organiser) layer at search time.** The event record names
+    the organiser, but reading it costs one MUIR request per event and MUIR
+    allows ~100 a minute per address. The organiser prefix rule captures the
+    largest case (DMV) from data already in hand.
+11. **Unknown-platform sections keep half weight** in pivot ranking (Phase 5.2).
+12. **The edge crawler is deployed but not scheduled.** A `pg_cron` job is a
+    standing process that keeps hitting three third-party APIs from production
+    indefinitely; starting it is left as a checklist item (Phase 8), with the
+    SQL staged.
+13. **Crawl paused for the measurement.** The index must not grow during
+    Phase 6 (the last session's store grew during its run); the crawler was
+    stopped at 02:45:37 and resumed afterwards.
+14. **Cold vs warm.** Cold = the player has no stored identity when their first
+    search starts (so none of their sections has been aligned by anyone). Warm
+    = the store already holds them: a first search that found them stored, or
+    the repeat search after a resolved first one. The roster index is part of
+    the system under test in both columns, not "the store".
+15. **The held-out sample**: the investigation's activity-weighted 900-member
+    sample, minus last session's 35 and minus anyone already in the store
+    (820 left: 223 online-rated, 597 OTB-only); 60 online-rated and 15
+    OTB-only drawn with a fixed seed (`acc6/heldout.json`, scratchpad).
+16. **Reproducing the stall** used a harness switch (`skipStore,noIndex`: the
+    index join answered "no candidate") so the walk ran; the product code was
+    not changed for it.
+17. **Scope edge.** "Official US Chess" includes `us-chess-*-open` events that
+    may not be USCF-rated; the join decides, and the cost is a few thousand
+    rows.
+18. **Hosting**: Supabase Edge + `pg_cron` over GitHub Actions (7.2), because
+    GitHub schedules run from `main` only and this branch is not merged.
