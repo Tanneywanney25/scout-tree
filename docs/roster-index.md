@@ -191,9 +191,43 @@ the five target series is a swiss with exactly one game per player per round
 (6 of 6 checked: WNZ ×3, Grand Prix ×3), so this is a format limit of
 multi-game rounds, outside the target series. Not fixed.
 
-Sections the engine never resolved, and an independent cross-check of index
-answers against identities proven in *other* sections: see the update below
-(run once the backfill has coverage).
+**Sections the engine never resolved**, with an independent cross-check:
+each index answer's members who hold an identity proven in a *different*
+section. Two runs, the second on the larger index:
+
+| | 02:05 UTC, 860 rosters, before the trust bar | 02:10, 860 rosters, with the bar (`25a161a`) | **14:30, 3,898 rosters**, with the bar |
+|---|---|---|---|
+| Cached online sections tried (not already linked) | 2,756 | 2,756 | 3,281 |
+| **Resolved by the index** | 119 | 150 | **880** (DMV 571, PCA 171, official US Chess 62, WNZ 62, Grand Prix 14) |
+| Identities those carry | 2,121 | 2,759 | **15,145** |
+| Cross-checked identities: agree / disagree | 738 / 10 | 948 / 9 | **8,400 / 175 (2.0%)** |
+| Ambiguous (two trusted candidates) | 3 | — | 3 |
+| No candidate in the window | 1,941 | 1,906 | 1,329 |
+
+The 14:30 linked set also includes the 229 links Phase 6 created (151 by
+index joins, 78 by harvests). Of the **226 with their tournament in the index:
+223 same tournament, 0 handle disagreements in 4,715**, 2 no candidate, and
+**1 different tournament** — investigated: a 7-player "Grand Prix Rated #24"
+section (3 rounds, 2026-05-27) that a Phase 6 *harvest* had linked to "Grand
+Prix Rated #21" (4 rounds, starting 2026-05-25) on 5 of 7 players, which
+`alignmentTrustworthy` accepts (≥ 50%). The index found a tournament inside the
+section's own date window explaining 7 of 7. The harvest link is the likely
+error, which says the harvest wants the same coverage bar as the index.
+
+**The 175 disagreements** (78 distinct member/handle pairs, each counted once
+per section it appears in): 151 are strong on both sides (≥ 3 verified rounds
+and ≥ 2 corroborating opponents in fully aligned sections), 41 of those with
+visibly related handles; 149 of the 175 are in the DMV scholastic series on
+Lichess, where children commonly hold two accounts. The investigation measured
+two strong accounts for 5 of 236 multi-section members (~2%); this is the same
+rate. 20 have a weak assignment on the index side, which the store's conflict
+rules resolve toward the strong one.
+
+**One evaluation error, disclosed:** the 14:2x first pass paged the index
+with an unordered offset and read duplicate rows, which showed up as 182
+"ambiguous" sections (both top candidates were the same tournament). Paging
+ordered and deduplicated, it is 3. Production's candidate read is one ordered,
+filtered query (`getRosterCandidates`) and was not affected.
 
 ### 2.4 Wired in ahead of everything else
 
