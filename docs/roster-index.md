@@ -3,6 +3,47 @@
 Session 2026-10-03 01:12 UTC onward (evening of 2026-10-02, US Eastern). Branch: `traversal/section-bfs`.
 Every number below states the tag or commit that produced it.
 
+Sampled players are referred to by row number only; no member id, name or
+handle of a subject appears in this file (the repository is public).
+
+## Summary
+
+- **The gate is positive** (Phase 1). Chess.com truncates only the summary
+  roster (25); the per-round bracket is complete in 28 of 28 tested
+  tournaments at 1 + R requests, and Lichess swiss exports are complete in 18
+  of 18 at 2. One request lists a member's whole Chess.com tournament history,
+  one lists a Lichess team's swiss: tournaments are enumerable without any web
+  search.
+- **The index works** (Phase 2). Rosters and per-round result vectors for the
+  five series (no games, no PGN) in `roster_tournament`; a section's crosstable
+  is aligned against every stored tournament of its day. Blind, it
+  reproduced **45 of 46** engine-verified sections with **0 of 1,284** handles
+  disagreeing, and on the larger index resolved **880** cached sections the
+  engine never had (15,145 identities; against identities proven elsewhere,
+  8,400 agree, 175 disagree, almost all strong-vs-strong second accounts). A
+  blind join needs ≥ 90% coverage; three small-section false positives at
+  67–71% showed why.
+- **Resolution order** is now index join → stored handles → section walk →
+  guessing (Phase 2.4), with a search-wide speculative request budget (4.1),
+  a per-class Lichess breaker built from measurement (4.3) and platform
+  inference that places 57% of formerly unknown-host footprint sections in production (Phase 5).
+- **Measured on frozen code** (`rindex-p6`, held-out players, Phase 6):
+  cold online-rated **35 / 46 = 76% (95% CI 62–86%)**, median **48 s**, index
+  answers in **0.8 s**; speculative share of requests **22%** (was 70%);
+  Chess.com 404 share **15%** (was 44%); warm **63 / 63** in 0.7 s; OTB-only
+  answered in ~1 ms with no request.
+- **The crawler** (Phase 3) runs serially at ~1 request/s per platform with no
+  Chess.com rate-limit event, survived a real laptop sleep without losing or
+  duplicating work, and is deployable as Supabase Edge slices on `pg_cron`
+  (staged, not switched on). Backfill coverage and projection: Phase 3.4–3.5.
+- **SearXNG stays shelved** (7.1). **Hosting**: Supabase Edge + `pg_cron`,
+  card-free and already in use (7.2). **Handoff** (Phase 8): Groq,
+  Cloudflare and OpenRouter keys (all card-free on the live signup page) and
+  one SQL statement to start the crawler.
+- **Also found**: a long-standing hang where a stalled Lichess stream ignored
+  the search's abort (fixed, `98b4cea`); `muir_cache`, not the index, is what
+  will hit the 500 MB cap (153 MB, ~0.5 MB per search, never pruned).
+
 ## Phase 0: Housekeeping and freeze
 
 Run 2026-10-03 01:12–01:25 UTC.
@@ -445,6 +486,13 @@ keys the crawler had learned by 02:00 UTC (a partial index):
 | **Resolved** | **4,508 of 7,669 (58.8%)** → 3,326 Chess.com, 1,182 Lichess |
 | **Still unknown** | **3,161 (41.2%)**, i.e. 23.4% of all footprint sections (was 56.7%) |
 
+Re-run at 14:40 UTC with production's own tables after Phase 6 (4,636
+`series_platform` rows, 304 stored event platforms) and the production
+classifier's order: **4,402 of 7,669 placed (57.4%)** — stored 174, aligned
+series 3,372, listing 386, prefix 470 — leaving **3,267 unknown (24.1% of all
+footprint sections)**. Most alignment-learned keys now come from Phase 6's
+index joins and harvests, which recorded their series.
+
 The largest remaining keys are organisers outside the five series (e.g. one
 "play n stay" series, 539 sections; 64Squares "SFS" events; Seneca, PNWCC).
 
@@ -593,7 +641,7 @@ the reason to want retrieval has shrunk:
 - Host pinning, the one gap the ADR said had no deterministic substitute,
   now has three: the index's own crawled names, the public tournament
   listings the crawler reads anyway, and a learned organiser prefix. Together
-  they placed 58.8% of the footprint sections that had no platform (Phase 5.2).
+  they placed 57–59% of the footprint sections that had no platform (Phase 5.2).
 - What is left unknown (23.4% of footprint sections) is small organisers
   outside the five series. For those, a web search would find a flyer at best;
   the listing layer grows on its own as the crawler polls more members, at no
