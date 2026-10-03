@@ -15,7 +15,8 @@
 //   9. four rate limits on one Lichess endpoint class in two minutes make that
 //      class (only) fail fast; a re-trip right after the cool-off doubles it;
 //  10. the search-wide speculative request budget: exactly N speculative requests
-//      are sent, the rest are shed unsent, proven work is untouched.
+//      are sent, the rest are shed unsent, proven work is untouched;
+//  11. a response body that stalls rejects on idle and on abort (guardBody).
 // ============================================================================
 
 import {
@@ -33,6 +34,7 @@ import {
   speculativeBudgetState,
   _noteLichessLimit,
   lichessCooloffLeft,
+  guardBody,
 } from "../src/lib/identity/net";
 
 let failures = 0;
@@ -225,6 +227,30 @@ assert(starts.length === 10 && shed10b === 30, `queued: budget 10 -> ${starts.le
 setSpeculativeBudget(null);
 const free10 = await politeFetch(cc(10_600), { signal: spec10 }, "chesscom").then(() => "sent", () => "shed");
 assert(free10 === "sent", "clearing the budget lets speculative work through again");
+
+console.log("Scenario 11: a stalled response body ends on idle and on abort");
+const stalled = () =>
+  new Response(
+    new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('{"a":1}\n'));
+        // ...and then nothing, ever (a stream the server stopped feeding).
+      },
+    }),
+    { status: 200 }
+  );
+const t11 = Date.now();
+const idleErr = await guardBody(stalled(), undefined, 200).text().then(() => "completed", (e) => String(e?.message || e));
+assert(/idle/.test(idleErr) && Date.now() - t11 < 1500, `idle body rejects after ${Date.now() - t11} ms (${idleErr})`);
+const ac11 = new AbortController();
+const r11 = guardBody(stalled(), ac11.signal, 60_000).body!.getReader();
+await r11.read(); // the one chunk
+const t11b = Date.now();
+setTimeout(() => ac11.abort(), 100);
+const abortErr = await r11.read().then(() => "read", (e) => String(e?.name || e));
+assert(abortErr === "AbortError" && Date.now() - t11b < 1000, `abort ends a pending read in ${Date.now() - t11b} ms (${abortErr})`);
+const ok11 = await guardBody(new Response('{"x":2}'), undefined, 200).json();
+assert(ok11.x === 2, "a normal body reads through unchanged");
 
 console.log(failures ? `\n${failures} assertion(s) FAILED.` : "\nAll allocator scenarios passed.");
 process.exit(failures ? 1 : 0);

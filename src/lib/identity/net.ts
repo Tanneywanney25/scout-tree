@@ -746,6 +746,62 @@ function withUa(init: RequestInit): RequestInit {
   return { ...init, headers };
 }
 
+// ---------------------------------------------------------------------------
+// Body guard. politeFetch's timeout and abort wiring end when the HEADERS
+// arrive; a body that then stalls (a long NDJSON stream Lichess stops
+// feeding) would leave `await reader.read()` / `res.text()` pending forever,
+// deaf to the search's abort signal. Measured: one Phase 6 search
+// (docs/roster-index.md) did not end when its 25-minute guard aborted it and
+// was killed two minutes later; the only streamed read in the stack is the
+// Lichess team-history stream, which holds a single-file lane while it runs.
+// So every response body is re-wrapped: a read rejects on abort, and after
+// BODY_IDLE_MS without a byte.
+// ---------------------------------------------------------------------------
+
+export const BODY_IDLE_MS = 30_000;
+
+export function guardBody(res: Response, signal: AbortSignal | undefined, idleMs = BODY_IDLE_MS): Response {
+  if (!res.body) return res;
+  const src = res.body.getReader();
+  let onAbort: (() => void) | null = null;
+  const aborted = new Promise<never>((_, reject) => {
+    if (!signal) return;
+    onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+  aborted.catch(() => undefined); // observed by the race below, never unhandled
+  const detach = () => {
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  };
+  const body = new ReadableStream<Uint8Array>({
+    async pull(ctrl) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const idle = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`response body idle for ${Math.round(idleMs / 1000)} s`)), idleMs);
+      });
+      try {
+        const { value, done } = await Promise.race([src.read(), idle, aborted]);
+        if (done) {
+          detach();
+          ctrl.close();
+        } else ctrl.enqueue(value);
+      } catch (e) {
+        detach();
+        src.cancel().catch(() => undefined);
+        ctrl.error(e);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    cancel(reason) {
+      detach();
+      return src.cancel(reason);
+    },
+  });
+  return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
+}
+
 /**
  * Fetch with the platform's discipline applied:
  *   • a token from the platform's bucket, proven work first;
@@ -833,7 +889,7 @@ export async function politeFetch(
         scheduler.onLimit(lichessBackoffMs(lcls!, res));
         noteLichessLimit(lcls!);
       }
-      return res;
+      return guardBody(res, outer);
     }
     if (res.status === 429 && attempt < maxRetries && !outer?.aborted) {
       let backoff: number;
@@ -848,7 +904,7 @@ export async function politeFetch(
         scheduler.onLimit(backoff);
         if (noteLichessLimit(lcls!)) {
           console.warn(`[net] Lichess ${lcls} requests are saturated — failing them fast for ${Math.round(lichessCooloffLeft(lcls!) / 1000)}s (other Lichess endpoints unaffected).`);
-          return res; // no retry into a saturated endpoint class
+          return guardBody(res, outer); // no retry into a saturated endpoint class
         }
         console.warn(`[net] Lichess 429 (${lcls}) on ${url} — pausing that endpoint class ${Math.round(backoff / 1000)}s.`);
       }
@@ -860,6 +916,6 @@ export async function politeFetch(
       // The scheduler holds the pause; the retry simply queues behind it.
       continue;
     }
-    return res;
+    return guardBody(res, outer);
   }
 }
