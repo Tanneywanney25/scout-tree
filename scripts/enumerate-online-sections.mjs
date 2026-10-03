@@ -49,6 +49,17 @@ const AFFILIATES = [
   { id: "A7238879", label: "pca", since: "2025-12-01", online: /\bPCA\b.*\b(ONLINE|RATED|BLITZ|RAPID)\b|\bONLINE\b/i },
   { id: "A5028582", label: "uschess (US Chess Federation)", since: "2025-12-01", online: /ON\s+CHESS\.?COM|\bONLINE\b/i },
   { id: "A6045387", label: "dmv", since: "2020-01-01", online: /\bONLINE\b/i },
+  // Series and Lichess teams added by the 2026-10-03 target discovery; their
+  // tournaments are queued in roster_tournament and reach back to 2020.
+  { id: "A6053298", label: "sfs (64Squares)", since: "2020-01-01", online: /\bSFS\b/i },
+  { id: "A6034194", label: "evangel", since: "2020-01-01", online: /JACKALOPE|FAST\s+FIVE|FASTBALL|WILD\s+WEDNESDAY|SUNDAY\s+SEVEN/i },
+  { id: "A6055630", label: "aocc (Westford)", since: "2020-01-01", online: /AOCC.*ONLINE|ONLINE.*AOCC/i },
+  { id: "T6021030", label: "seneca", since: "2020-01-01", online: /\bONLINE\b/i },
+  { id: "A7215356", label: "transcon (Innovative Chess Solutions)", since: "2020-01-01", online: /\bONLINE\b/i },
+  { id: "A6055886", label: "start-right-chess (Lichess)", since: "2020-01-01", online: /ONLINE\s+RATED/i },
+  { id: "A8439478", label: "chess4everyone (Lichess)", since: "2020-01-01", online: /\bONLINE\b/i },
+  { id: "A9704313", label: "online-tr-tournaments (Lichess)", since: "2020-01-01", online: /\bONLINE\b/i },
+  { id: "A6055871", label: "sam-schenk (Lichess)", since: "2020-01-01", online: /\bONLINE\b/i },
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
