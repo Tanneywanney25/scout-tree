@@ -234,7 +234,7 @@ multi-game rounds, outside the target series. Not fixed.
 
 **Sections the engine never resolved**, with an independent cross-check:
 each index answer's members who hold an identity proven in a *different*
-section. Two runs, the second on the larger index:
+section. Three runs, the last on the larger index:
 
 | | 02:05 UTC, 860 rosters, before the trust bar | 02:10, 860 rosters, with the bar (`25a161a`) | **14:30, 3,898 rosters**, with the bar |
 |---|---|---|---|
@@ -242,7 +242,7 @@ section. Two runs, the second on the larger index:
 | **Resolved by the index** | 119 | 150 | **880** (DMV 571, PCA 171, official US Chess 62, WNZ 62, Grand Prix 14) |
 | Identities those carry | 2,121 | 2,759 | **15,145** |
 | Cross-checked identities: agree / disagree | 738 / 10 | 948 / 9 | **8,400 / 175 (2.0%)** |
-| Ambiguous (two trusted candidates) | 3 | — | 3 |
+| Ambiguous (two trusted candidates) | 3 | 0 | 3 |
 | No candidate in the window | 1,941 | 1,906 | 1,329 |
 
 The 14:30 linked set also includes the 229 links Phase 6 created (151 by
@@ -267,8 +267,11 @@ rules resolve toward the strong one.
 **One evaluation error, disclosed:** the 14:2x first pass paged the index
 with an unordered offset and read duplicate rows, which showed up as 182
 "ambiguous" sections (both top candidates were the same tournament). Paging
-ordered and deduplicated, it is 3. Production's candidate read is one ordered,
-filtered query (`getRosterCandidates`) and was not affected.
+ordered and deduplicated, it is 3. The 02:0x runs read fewer than 1,000
+rosters (one page) but paged the 2,800-row section list the same unordered
+way, so their section counts are approximate; the 14:30 column is the
+reliable one. Production's candidate read is one ordered, filtered query
+(`getRosterCandidates`) and was not affected.
 
 ### 2.4 Wired in ahead of everything else
 
