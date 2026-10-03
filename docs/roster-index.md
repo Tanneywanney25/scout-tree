@@ -682,11 +682,60 @@ workflow is public by design.
 
 ## Errors made this session
 
-_pending_
+1. **The owner's e-mail address went out in a request header.** The Phase 1
+   probes (`p1/roster.mjs`, `ptourn.mjs`, `ptlist.mjs`, `stems.mjs`, ~650
+   requests to Chess.com and Lichess) and the first Lichess probes carried it
+   in the User-Agent as the "contact address" the brief asked for. That
+   address should not leave the session without an explicit instruction to
+   send it; from the crawler on, the contact is the repository's issues URL
+   (configurable).
+2. **The speculative budget overshot on its first version** (333 sent against
+   250, live, player #6): queued requests were granted without a re-check.
+   Fixed (`4558483`) before the frozen run.
+3. **The first breaker dropped every Lichess request**, so a `/api/user`
+   penalty also stopped proven tournament exports. Found by measuring
+   (Phase 4.3), changed to per class (`7fbb67b`).
+4. **Blind index joins shipped without their own trust bar** for 27 minutes
+   (v107–v109, 01:44–02:11). The evaluation found three false positives at
+   67–71% coverage; production made only my two smoke joins in that window,
+   both at 100% coverage.
+5. **I probably caused the Lichess `/api/user` penalty** that then overlapped
+   the Phase 6 run: my first `/api/user` request (01:58) came seconds after I
+   deliberately tripped the games endpoint, with the crawler's exports running
+   since 01:42, and was already refused; I then kept probing it while
+   measuring. Its exact cause is not determinable, but this session is the
+   likeliest source, and it contaminates the Lichess side of Phase 6.
+6. **A hang in the frozen run** (#44): a response body could stall past the
+   search's abort. The bug is older than this session (the stream reader is
+   unchanged since before it), but this session's harness is what exposed it;
+   fixed after the run (`98b4cea`).
+7. **The second #6 re-run in 4.3 was not comparable**: the first re-run had
+   stored its section's tournament link, so the engine aligned it from the
+   store in 8 s. I should have used a player not yet re-run.
+8. **Harness clock.** The 25-minute runaway guard is a clock; the product has
+   none, but the harness needed one. It fired once (#45, cleanly) and failed
+   once (#44).
+9. **Smaller ones**: a regex edit through a Python heredoc wrote backspace
+   characters into the crawler's `seriesKey` (caught by a test print before
+   the crawler restarted with it); one evaluation run read a partial table
+   page (33 of 46 linked rosters), rerun; a scripted test's expectations were
+   wrong on first write (the code was right); the first pivot-rank metric
+   proof needed its scenarios recomputed; several heredoc commands failed on
+   quoting and were redone with files.
 
 ## Undetermined, and what would settle it
 
-_pending_
+| Question | Why it is open | What would settle it |
+|---|---|---|
+| Whether the cold resolution rate (76%, CI 62–86%) holds | n = 46; Lichess was in a penalty during the run; the index covered only Jul–Oct 2026 on Chess.com at the freeze | ~70 never-searched online-rated players run after the backfill completes, with a clean Lichess state (no experiments that day), cold only |
+| How much of the remaining failure is index coverage | 290 of 893 index joins in the cold column found **no crawled tournament in the window** (the Chess.com backfill had reached back to 2026-07-06) | Re-run the same 46 cold players against a completed backfill (they are now warm for the store, so with `skipStore` and the index on) and count index answers |
+| Whether portal pivot ranking beats a random order | Only 7 cold searches resolved their first pivot by scouting; eligible-member counts per section were not recorded | Record each section's eligible count with the rank; ~100 scouted resolutions |
+| What causes Lichess's long `/api/user/{name}` penalty, and how long it lasts | It began at or before my first probe and was still on 31+ minutes later while other endpoint classes answered; the crawler's exports ran throughout | From a fresh address: trip only `/api/user` once, then probe every 2 minutes with nothing else running |
+| Whether #44 is the stalled-stream hang | The fix is in (`98b4cea`); the diagnostic re-run's outcome is recorded under Phase 6 | A dump of a live hang (`acc6/diag-entry.ts` writes one 60 s after an unheeded abort) |
+| Total catalogue size per series | Discovery yield fell from ~600 to ~16 new tournaments per member poll, but 1,267 of 1,417 sources were still unpolled | Poll every source once (≈ 1,400 requests, 25 minutes) and see whether the catalogue still grows |
+| Whether the edge crawler behaves like the laptop one | Deployed, not scheduled; never run in production | Run `supabase/sql/roster-crawl-schedule.sql` (Phase 8, step 4) and read `cron.job_run_details` after an hour |
+| Whether the index generalises beyond the five series | The 150 extra sections the index resolved are all in the crawled series | Add one more organiser's series to `chesscomSeries()` and measure its join rate |
+| Precision of index answers against an outside source | Cross-checks are against other alignments (948 agree, 9 disagree, all 9 strong-vs-strong) | Self-identified accounts (a profile naming the USCF id) for a sample of index answers |
 
 ## Decisions and Assumptions
 
