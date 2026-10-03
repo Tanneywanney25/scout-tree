@@ -104,6 +104,24 @@ export interface IndexJoinOutcome {
 
 const qualityOf = (a: SectionAlignment) => a.assignments.length * 10 + a.consistentEdges - 5 * a.inconsistentEdges - 3 * a.contradicted.length;
 
+/**
+ * The index join's own trust bar, on top of alignmentTrustworthy(). The harvest
+ * aligns ONE tournament the engine already reached through a member's games; a
+ * blind join tries every tournament of the day, so a small section can align
+ * with a stranger by coincidence. Measured 2026-10-03 (docs/roster-index.md
+ * 2.3): every true link among the 45 the engine had verified covered >= 90%
+ * of the crosstable (44 at 100%); the three blind matches that contradicted
+ * identities proven elsewhere covered 67–71% (a PCA section matched to a
+ * Lichess swiss, a 6-player section to a PCA event). So: >= 90% coverage, or
+ * >= 75% when it is the only candidate that day and the section has >= 10
+ * players.
+ */
+export function indexTrusted(trusted: boolean, assigned: number, played: number, candidates: number): boolean {
+  if (!trusted || !played) return false;
+  const cov = assigned / played;
+  return cov >= 0.9 || (cov >= 0.75 && candidates === 1 && played >= 10);
+}
+
 /** Align a section against every candidate roster; pick the trusted best. */
 export function joinSection(sec: AlignableSection, candidates: StoredRoster[]): IndexJoinOutcome {
   const played = playedCount(sec);
@@ -116,7 +134,7 @@ export function joinSection(sec: AlignableSection, candidates: StoredRoster[]): 
       platform: roster.platform,
       tid: roster.tid,
       series: roster.series,
-      trusted: alignmentTrustworthy(sec, a),
+      trusted: indexTrusted(alignmentTrustworthy(sec, a), a.assignments.length, played, candidates.length),
       assigned: a.assignments.length,
       contradicted: a.contradicted.length,
       inconsistentEdges: a.inconsistentEdges,
