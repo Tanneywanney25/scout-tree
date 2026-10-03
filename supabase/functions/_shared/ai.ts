@@ -17,7 +17,9 @@
 //
 // Configure any of:
 //   • AI_PROXY_BASE_URL + AI_PROXY_API_KEY
-//     (+ optional AI_PROXY_MODEL, default "auto" — plain calls;
+//     (+ optional AI_PROXY_MODEL, default "auto" — plain calls; "auto" is a
+//      FreeLLMAPI router name, so a plain provider needs a real id: production
+//      runs Groq, base https://api.groq.com/openai, model openai/gpt-oss-120b;
 //      + optional AI_PROXY_SEARCH_MODEL, default "gemini-3.6-flash" — grounded
 //        calls; MUST be a model the proxy routes to Google for grounding)
 //   • GEMINI_API_KEY  (+ optional GEMINI_MODEL, default gemini-3.6-flash)
@@ -479,7 +481,8 @@ async function callProxy(
   const data = (await response.json().catch(() => null)) as ProxyChatResponse | null;
   const routedPlatform = data?._routed_via?.platform || "";
   const routedModel = data?._routed_via?.model || model;
-  const backend = `proxy:${routedPlatform || "unknown"}/${routedModel}`;
+  // A plain OpenAI-compatible provider (e.g. Groq) sends no _routed_via: name its host.
+  const backend = `proxy:${routedPlatform || new URL(proxy.baseUrl).hostname}/${routedModel}`;
 
   const msg = data?.choices?.[0]?.message;
   const text = typeof msg?.content === "string" ? msg.content : "";
