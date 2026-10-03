@@ -46,7 +46,7 @@ import {
 } from "./uscfGraphEngine";
 import type { Conductor } from "./conductor";
 import type { SectionAlignment } from "./sectionAlign";
-import { getNetStats, allocatorSaturated } from "./net";
+import { getNetStats, allocatorSaturated, setSpeculativeBudget, speculativeBudgetState } from "./net";
 import {
   fetchMemberFootprints,
   fetchSectionGraphs,
@@ -130,8 +130,11 @@ export interface SectionBfsOptions {
   requestBudget?: number;
   /** Ceiling the adaptive budget may grow to. Default 15,000. */
   maxRequestBudget?: number;
+  /** Speculative requests (guessed handles, unverified probes) the whole
+   *  search may SEND, across every section and level. Default 250. */
+  speculativeRequestBudget?: number;
   /** Members whose handles may be guessed: in the level-0 run, per deeper
-   *  section, and in the whole search (the speculative budget). */
+   *  section, and in the whole search. */
   guessCapLevel0?: number;
   guessCapDeeper?: number;
   guessBudget?: number;
@@ -169,6 +172,11 @@ export interface SectionBfsResult extends TraversalResult {
    *  of those spared an engine walk; not-covered = the index had no
    *  tournament in that section's date window at all. */
   index: { tried: number; resolved: number; notCovered: number; bridgesResolved: number; targetFound: boolean };
+  /** The search-wide speculative request budget at the end of the search. */
+  speculativeBudget: { limit: number; used: number; denied: number } | null;
+  /** Per expanded level: sections admitted, distinct bridges, the most
+   *  sections any one bridge contributed, and how many were held back. */
+  levels: { level: number; sections: number; bridges: number; maxPerBridge: number; heldBack: number }[];
 }
 
 interface SectionNode {
@@ -248,6 +256,9 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
     const speculative = s.chesscom.speculative.requests + s.lichess.speculative.requests - reqBase.speculative;
     return { proven, speculative, total: proven + speculative };
   };
+  // A fresh speculative budget for this search (4.1).
+  setSpeculativeBudget(opts.speculativeRequestBudget ?? 250);
+  const levelStats: SectionBfsResult["levels"] = [];
   let budget = opts.requestBudget ?? 2_500;
   const maxBudget = opts.maxRequestBudget ?? 15_000;
   const budgetSpent = () => requestsSoFar().total >= budget;
@@ -677,6 +688,17 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
     }
     candidates.sort((a, b) => Number(!!a.negative) - Number(!!b.negative));
     const levelNodes = candidates.slice(0, perLevel);
+    {
+      const per = new Map<string, number>();
+      for (const c of levelNodes) per.set(c.bridge!, (per.get(c.bridge!) || 0) + 1);
+      levelStats.push({
+        level: level + 1,
+        sections: levelNodes.length,
+        bridges: per.size,
+        maxPerBridge: Math.max(0, ...per.values()),
+        heldBack: candidates.length - levelNodes.length,
+      });
+    }
     level++;
     for (const c of levelNodes) nodes.set(c.key, c);
     log(
@@ -809,6 +831,8 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
       backtracks,
       targetHarvest,
       index,
+      speculativeBudget: speculativeBudgetState(),
+      levels: levelStats,
     };
   }
 }
