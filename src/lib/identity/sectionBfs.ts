@@ -151,6 +151,8 @@ export interface SectionBfsOptions {
   seedMappings?: { memberId: string; platform: OnlinePlatform; username: string }[];
   /** TEST affordance: never scout these members (forces a longer chain). */
   excludeFromSeeding?: Set<string>;
+  /** TEST affordance: the per-section engine (default: the real one). */
+  engine?: typeof runEngine;
 }
 
 export interface SectionBfsResult extends TraversalResult {
@@ -463,7 +465,7 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
     }
     let alignedHere = false;
     let firstPivotRankNoted = false;
-    const result = await runEngine(
+    const result = await (opts.engine ?? runEngine)(
       { rootUscfId: root, rootName: memberName.get(root) || (root === T ? opts.targetName : root), onlineEvents: events, graphTraversalReady: true },
       {
         targetName: root === T ? opts.targetName : memberName.get(root) || root,
@@ -481,11 +483,17 @@ export async function runSectionBfs(rootGraph: TournamentGraph, opts: SectionBfs
           findUsernames: (req) => hooks.findUsernames(req, signal),
         },
         onMapping: (m) => {
-          // Rank position BEFORE the mapping: once a member is known their
-          // rank jumps to 1000, which made every first resolution read as #1.
+          // The first SCOUTED pivot's position in the order the engine scouts
+          // in: 1 + the number of still-unknown, eligible members ranked above
+          // it, read BEFORE the mapping (afterwards its rank jumps to 1000).
+          // Members already known are not pivots to be found — counting them
+          // (rank 1000 each) inflated the position by the number of stored
+          // seeds; members ranked -Infinity are never scouted.
           const wasKnown = known.has(m.memberId);
           const mine = wasKnown ? Infinity : liveRank(m.memberId);
-          const others = wasKnown ? [] : [...platsOf.keys()].filter((id) => id !== m.memberId).map((id) => liveRank(id));
+          const others = wasKnown
+            ? []
+            : [...platsOf.keys()].filter((id) => id !== m.memberId && !known.has(id)).map((id) => liveRank(id));
           const fresh = learnHandle(m.memberId, m.platform, m.username);
           if (fresh && m.how === "seed" && !firstPivotRankNoted) {
             firstPivotRankNoted = true;
