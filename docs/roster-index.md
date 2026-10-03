@@ -35,7 +35,10 @@ handle of a subject appears in this file (the repository is public).
 - **The crawler** (Phase 3) runs serially at ~1 request/s per platform with no
   Chess.com rate-limit event, survived a real laptop sleep without losing or
   duplicating work, and is deployable as Supabase Edge slices on `pg_cron`
-  (staged, not switched on). Backfill coverage and projection: Phase 3.4–3.5.
+  (staged, not switched on). Backfill this session: **5,332 rosters** in ~3.8
+  hours (all 2,715 DMV swiss since 2020; Chess.com series since Dec 2025);
+  the rest of the known catalogue is ~41,000 requests (~12 h), and keeping up
+  costs ~250 requests a day (Phase 3.4–3.5).
 - **SearXNG stays shelved** (7.1). **Hosting**: Supabase Edge + `pg_cron`,
   card-free and already in use (7.2). **Handoff** (Phase 8): Groq,
   Cloudflare and OpenRouter keys (all card-free on the live signup page) and
@@ -341,9 +344,45 @@ expired on its own. The release call at wake did not land; harmless, because
 the lease is time-bounded. A lease (`crawl_lease`, `4878633`) keeps a
 laptop run and the edge slices (7.2) from ever crawling at once.
 
-### 3.4 Projection, 3.5 backfill coverage
+### 3.5 Backfill run this session (real numbers)
 
-See the update at the end of the session (the crawl resumed after Phase 6).
+Four bounded runs from this laptop, **~3.8 hours of crawling** in total
+(01:42–01:56, 01:56–02:45, 05:11–05:55 cut short by the sleep, 14:24–16:24),
+paused for the Phase 6 freeze. State at 16:24 UTC:
+
+| Series | Rosters crawled | Pending (catalogued) | Dates covered (crawled, newest first) | Player entries | Requests per roster |
+|---|---|---|---|---|---|
+| Official US Chess (Chess.com) | 401 | 3,762 | 2025-12-15 → 2026-10-01 | 10,710 | 6.46 |
+| WNZ / Waltham (Chess.com) | 1,303 | 958 | 2025-12-14 → 2026-10-03 | 11,342 | 4.76 |
+| PCA (Chess.com) | 678 | 2,470 | 2025-12-11 → 2026-09-28 | 12,538 | 4.89 |
+| Grand Prix Rated (Chess.com) | 207 | **0** | 2026-01-01 → 2026-10-02 | 1,345 | 4.08 |
+| DMV (Lichess) | **2,697** | **0** | **2020-09-02 → 2026-10-01 (complete)** | 40,460 | 2.00 |
+| Validation targets | 46 | 0 | 2020-03 → 2026-09 | 1,301 | 6.14 / 3.00 |
+| **Total** | **5,332** | **7,190** | | **77,696** | |
+
+Requests: ~13,650 to Chess.com (rosters 13,125 plus 528 member-list polls)
+with **0 rate-limit events in any run**; 5,448 to Lichess with 4 rate-limit
+events (one during my own Lichess experiments, three while diagnostic searches
+ran from the same address), each recovered by the schedule. Nothing failed or was skipped. The table is
+**7.5 MB** for 5,332 crawled + 7,190 pending rows (the database: 189 MB, of
+which `muir_cache` is 153 MB — see Production changes).
+
+### 3.4 Projection
+
+- **Rest of the backfill.** The known catalogue still pending is 7,190
+  Chess.com tournaments ≈ 3,762 × 6.46 + 2,470 × 4.89 + 958 × 4.76 ≈ **41,000
+  requests**, plus polling the 2,139 discovery sources not yet read (one
+  request each). At the measured 0.99/s: **≈ 12 hours** of serial Chess.com
+  time. The catalogue is not closed: PCA grew from 938 to 3,148 known events
+  once PCA regulars' own lists were polled (sources are re-ranked by how many
+  crawled rosters they sit in, so each series' regulars surface quickly). The
+  edge slices (7.2) crawl at the same 1 request/s for ~110 s of every 2
+  minutes, so the backlog takes about the same ~13 hours there.
+- **Steady state.** New tournaments per day, from the crawled windows: WNZ
+  4.4, PCA 2.3, official US Chess 1.4, DMV 1.2, Grand Prix 0.8 — **~10 a
+  day**, ≈ **47 roster requests a day**, plus a daily re-poll of the ~200
+  highest-ranked members (≈ 200 requests) and one Lichess team listing: **≈ 250
+  requests a day, about 4 minutes of crawling.**
 
 ## Phase 4: Kill the guessing
 
@@ -722,7 +761,19 @@ running implementation today.
 
 ### 8.3 The open browser
 
-See "Handoff state" at the end of this section.
+A visible Chromium (Playwright, persistent profile in the session scratchpad
+`pw/handoff-profile`, launcher pid 56812, opened 16:25 UTC) was left running
+with one tab per checklist step:
+
+1. `https://console.groq.com/login`
+2. `https://dash.cloudflare.com/sign-up`
+3. `https://openrouter.ai/sign-up`
+4. `https://supabase.com/dashboard/project/xqyszdjczchlgyisvtvo/sql/new`
+   (asks for the Supabase sign-in first)
+
+Nothing was typed, filled in or submitted on any page. Closing the window ends
+the process. If it is gone (a reboot), the same four URLs are in the
+checklist.
 
 ### 8.4 Checklist (followable on its own)
 
@@ -748,15 +799,15 @@ See "Handoff state" at the end of this section.
      password or Google/Apple/GitHub; no card) → **AI → Workers AI** → **Use
      REST API** → create a token with *Workers AI: Read* (and *Edit*) → copy
      the token and the **Account ID**.
-   - Where it goes: the FreeLLMAPI desktop app on this laptop (Providers →
-     add Cloudflare Workers AI with the account id + token). Production can
+   - Where it goes: the FreeLLMAPI desktop app on this laptop, in its
+     provider settings (Cloudflare Workers AI: account id + token). Production can
      hold only one `AI_PROXY_*` backend; use Cloudflare there only instead of
      Groq, as `AI_PROXY_BASE_URL=https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai`.
 3. **OpenRouter key** (third pool member, free models).
    - Tab 3: `https://openrouter.ai/sign-up` → e-mail + password → **Keys** →
      **Create Key** → copy `sk-or-…`.
-   - Where it goes: FreeLLMAPI → Providers → OpenRouter. Use only `:free`
-     model ids unless credits are deliberately added.
+   - Where it goes: the FreeLLMAPI app's provider settings (OpenRouter). Use
+     only `:free` model ids unless credits are deliberately added.
 4. **Turn on the crawler in production** (takes it off this laptop).
    - Tab 4: `https://supabase.com/dashboard/project/xqyszdjczchlgyisvtvo/sql/new`
      (sign in to Supabase).
@@ -792,7 +843,7 @@ remote. Times UTC, 2026-10-03.
 
 | R14 | 02:46–05:11 | **The Phase 6 run**: 124 searches through production. Writes: **2,153** `identity_edge` rows, **151** `section_link` rows from index joins and **78** from harvests, the mirrored `resolved_handles` verdicts, footprints and crosstables in `muir_cache`. All are re-run alignments of public games. | `delete … where first_seen / checked_at between '2026-10-03 02:46' and '2026-10-03 05:12'` per table |
 | R15 | 05:12–05:38, 05:4x–14:2x, 14:24– | Three diagnostic searches for #44 (same writes as any search). | as R14, by time window |
-| R16 | 05:11–05:55, 14:24– | Crawl runs 3 and 4 (`roster_tournament`, `crawl_source`, `series_platform` rows; `crawl_lease` taken and released). | as R6 / R9 |
+| R16 | 05:11–05:55, 14:24–16:24 | Crawl runs 3 and 4 (`roster_tournament`, `crawl_source`, `series_platform` rows; `crawl_lease` taken and released). | as R6 / R9 |
 
 Database size: **112 MB** at the start, **187 MB** at 14:25. The roster index is
 **5.8 MB** of that (3,745 crawled rosters); `muir_cache` is **153 MB** (about
