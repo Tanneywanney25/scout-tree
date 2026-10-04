@@ -106,7 +106,7 @@ reproduce them exactly. Coverage cannot see this: the coincidental match covers
 
 The measurement batch runs on frozen engine code, so the one-line change to
 `supabase/functions/_shared/rosterIndexCore.ts` is not made while it runs. A
-detached step (`acc7/apply-floor.sh` in the session scratchpad) waits for the
+detached step (`acc7/apply-floor2.sh` in the session scratchpad, log `acc7/apply-floor.log`) waits for the
 batch to log DONE, then makes the change, runs the alignment test, commits,
 pushes, deploys `resolve-identity`, and calls the function once to check it
 answers; if that check fails it reverts the commit and deploys the previous
