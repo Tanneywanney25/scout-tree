@@ -1119,31 +1119,31 @@ throughout, as in Phase 6. Latencies are for a shared address and are
 pessimistic next to a lone user's.
 
 <!-- measure7:start -->
-Numbers as of 2026-10-04 01:20 UTC: 35 of 238 first searches finished (32 of 208 online-rated players), 0 repeat searches. The batch is still running if this is short of the sample; `analyze7.mjs` in the run folder recomputes everything.
+Numbers as of 2026-10-04 01:30 UTC: 50 of 238 first searches finished (42 of 208 online-rated players), 0 repeat searches. The batch is still running if this is short of the sample; `analyze7.mjs` in the run folder recomputes everything.
 
 | | **Cold** first search | **Warm** first search | Warm repeat search |
 |---|---|---|---|
-| Searches | 14 | 18 | 0 |
-| **Resolved** (confidence ≥ 0.85) | **11 / 14 = 78.6% (95% CI 52.4–92.4%)** | **18 / 18 = 100.0% (95% CI 82.4–100.0%)** | n/a |
-| Latency, median / p95 (all searches) | 107.4 s / 784.1 s | 0.83 s / 2.15 s | n/a |
-| Latency, median / p95 (resolved only) | 107.4 s / 595.9 s | 0.83 s / 2.15 s | n/a |
-| Answered by the index join (whole search) | 1/14 | 17/18 | 0/0 |
-| Answered by the stored-identity read | 0/14 | 1/18 | 0/0 |
-| Index-join hit rate, per section tried | 65/204 (31.9%) | 22/27 (81.5%) | n/a |
-| Platform requests (Chess.com + Lichess) | 7308 | 0 | 0 |
-| Speculative share of platform requests | 30.8% | n/a | n/a |
-| Searches with a Chess.com / Lichess limit event | 6 / 12 | 0 / 0 | 0 / 0 |
+| Searches | 20 | 22 | 0 |
+| **Resolved** (confidence ≥ 0.85) | **16 / 20 = 80.0% (95% CI 58.4–91.9%)** | **22 / 22 = 100.0% (95% CI 85.1–100.0%)** | n/a |
+| Latency, median / p95 (all searches) | 93.9 s / 595.9 s | 0.86 s / 1.84 s | n/a |
+| Latency, median / p95 (resolved only) | 72.2 s / 595.9 s | 0.86 s / 1.84 s | n/a |
+| Answered by the index join (whole search) | 3/20 | 21/22 | 0/0 |
+| Answered by the stored-identity read | 0/20 | 1/22 | 0/0 |
+| Index-join hit rate, per section tried | 80/279 (28.7%) | 28/35 (80.0%) | n/a |
+| Platform requests (Chess.com + Lichess) | 12202 | 0 | 0 |
+| Speculative share of platform requests | 25.6% | n/a | n/a |
+| Searches with a Chess.com / Lichess limit event | 7 / 16 | 0 / 0 | 0 / 0 |
 | Hit the 25-minute guard / errored / edge rate-limited | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
 
-Cold lower bound, counting the 4 aborted searches that started with no stored identity as failures: **11 / 18 = 61.1% (95% CI 38.6–79.7%)**.
+Cold lower bound, counting the 4 aborted searches that started with no stored identity as failures: **16 / 24 = 66.7% (95% CI 46.7–82.0%)**.
 
-Warm first searches split: identity already stored 18/18; no identity but one of the player's sections already linked 0/0. OTB-only players: 3 searched, 0 resolved (none expected), median 0.00 s.
+Warm first searches split: identity already stored 22/22; no identity but one of the player's sections already linked 0/0. OTB-only players: 8 searched, 0 resolved (none expected), median 0.00 s.
 
-Cold resolution by rating band: <800 0/0, 800-1199 3/3, 1200-1599 2/2, 1600-1999 2/4, 2000+ 4/5. By online activity (sections): 1-2 5/6, 3-10 3/4, 11-50 3/4, 51+ 0/0.
+Cold resolution by rating band: <800 0/0, 800-1199 3/3, 1200-1599 5/5, 1600-1999 3/5, 2000+ 5/7. By online activity (sections): 1-2 6/8, 3-10 6/7, 11-50 4/5, 51+ 0/0.
 
-**Failure buckets (deterministic trace, 3 unresolved online players so far):** organizer-not-in-crawl-scope 1; unreachable-platform 1; coverage-below-floor 1.
+**Failure buckets (deterministic trace, 4 unresolved online players so far):** organizer-not-in-crawl-scope 2; unreachable-platform 1; engine-defect 1.
 
-**Failure buckets (one worker per failure, 2 autopsied):** organizer-not-in-crawl-scope 1; unreachable-platform 1. Closed by the running crawl: no 2; needing engineering: 1; worker disagreed with the trace: 0.
+**Failure buckets (one worker per failure, 3 autopsied):** organizer-not-in-crawl-scope 1; unreachable-platform 1; engine-or-alignment-defect 1. Closed by the running crawl: no 3; needing engineering: 2; worker disagreed with the trace: 1.
 <!-- measure7:end -->
 
 Raw results (they contain names and handles) stay in the session scratchpad
@@ -1181,6 +1181,21 @@ young; the trace is rerun on the full set when the batch ends.
 Engine observations from the autopsies, logged and not fixed (the engine is
 frozen for the run):
 
+- **A defect: the stall watchdog fires on a silent wait.** After level 0 the
+  section search waits for the rest of the section-mate footprint ranking
+  (`sectionBfs.ts:621`, `await restOfRanking`) and logs nothing while it does;
+  the resolver treats 90 s without a log line as a wedged trace
+  (`resolver.ts:764`, `TRAVERSAL_STALL_MS`) and stands the walk down. One search
+  with 157 level-0 section-mates, 103 of them with no cached footprint, was
+  ended this way after 117 s of silence, before level 1, having spent 202 of its
+  2,500 requests; 40 of those section-mates already had stored identities,
+  three of them direct opponents of the target. Any target with many
+  section-mates and cold footprints will hit it. Fixes: log progress during the
+  wait, expand level 1 from the footprints already in hand, or let footprint
+  progress reset the watchdog. A repeat search inside the footprint TTL probably
+  gets past it because the footprints are then cached.
+- The platform guess ignores the event record's city field; one section whose
+  event record says "ONLINE ON CHESS.COM" was worked as an unknown host.
 - The stored footprint reads two pages of a member's games feed; the walk reads
   thirty. A very active player whose online play is old has an empty footprint,
   so the index-first step tries none of their sections and the search answers
