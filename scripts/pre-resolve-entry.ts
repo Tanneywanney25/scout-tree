@@ -8,8 +8,12 @@
 // (enumerators put those there; MUIR-paced by uscf.ts, ~75 requests/min).
 //
 // Trust: the STRICT index bar — a candidate must explain >= 90% of the
-// crosstable (rosterIndexCore.indexTrusted strict). Sections with fewer than
-// 3 players who played are not joined blind at all.
+// crosstable (rosterIndexCore.indexTrusted strict). Measured 2026-10-04 on
+// 4,382 cross-checkable joins (docs/adr/0003): every wrong-tournament match sat
+// in a section of 3 to 5 players at 100% coverage (6 of 605; 0 of 3,777 with 6
+// or more). So sections with fewer than 4 players are not joined blind, and no
+// join is written when the store contradicts it: when more of its members hold
+// a different handle proven in another section than hold the same one.
 //
 // Resumable: one preresolve_section row per section, written as it goes. A
 // resolved or already-linked section is never processed again; an unresolved
@@ -43,7 +47,7 @@ const MINUTES = Number(arg("minutes", "0")) || 0;
 const DRY = process.argv.includes("--dry-run");
 const [SHARD, SHARDS] = arg("shard", "0/1").split("/").map(Number);
 const DEADLINE = MINUTES ? Date.now() + MINUTES * 60_000 : Infinity;
-const MIN_PLAYED = 3;
+const MIN_PLAYED = 4;
 const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 const H = { apikey: KEY, Authorization: `Bearer ${KEY}` };
@@ -74,7 +78,7 @@ async function putProgress(row: Record<string, unknown>): Promise<boolean> {
 
 type Roster = StoredRoster & { fetched_at?: string | null };
 log("loading index and progress…");
-const [rostersRaw, links, progress, metas, xtKeys, evRows] = await Promise.all([
+const [rostersRaw, links, progress, metas, xtKeys, evRows, edgeRows] = await Promise.all([
   getAll<Roster>("roster_tournament?select=platform,tid,series,name,starts_at,n_rounds,n_players,handles,vectors,fetched_at&status=eq.done&order=platform.asc,tid.asc"),
   getAll<{ event_id: string; section_no: number; status: string; source: string | null }>("section_link?select=event_id,section_no,status,source&order=event_id.asc,section_no.asc,platform.asc,tournament_id.asc"),
   getAll<{ event_id: string; section_no: number; verdict: string; win_from: string | null; win_to: string | null; checked_at: string; source: string | null }>(
@@ -83,7 +87,27 @@ const [rostersRaw, links, progress, metas, xtKeys, evRows] = await Promise.all([
   getAll<{ key: string; payload: any }>("muir_cache?select=key,payload&kind=eq.section&payload->>isOnline=eq.true&order=key.asc"),
   getAll<{ key: string }>("muir_cache?select=key&kind=eq.crosstable&order=key.asc"),
   getAll<{ key: string; name: string | null }>("muir_cache?select=key,name:payload->>name&kind=eq.event&order=key.asc"),
+  getAll<{ uscf_id: string; platform: string; handle: string; sections: { eventId?: string; section?: number | string }[] | null }>("identity_edge?select=uscf_id,platform,handle,sections&order=id.asc"),
 ]);
+// Identities already proven, by member and platform, with the sections that proved them.
+const storeBy = new Map<string, { handle: string; secs: Set<string> }[]>();
+for (const e of edgeRows) {
+  const k = `${e.uscf_id}|${e.platform}`;
+  const list = storeBy.get(k) || [];
+  list.push({ handle: e.handle, secs: new Set((e.sections || []).map((x) => `${x.eventId}/${x.section}`)) });
+  storeBy.set(k, list);
+}
+/** Members of a join whose identity is proven in a DIFFERENT section: same handle vs another. */
+function storeCheck(key: string, platform: string, assignments: { uscfId: string; handleLower: string }[]) {
+  let agree = 0, disagree = 0;
+  for (const a of assignments) {
+    const others = (storeBy.get(`${a.uscfId}|${platform}`) || []).filter((e) => [...e.secs].some((k) => k !== key));
+    if (!others.length) continue;
+    if (others.some((e) => e.handle === a.handleLower)) agree++;
+    else disagree++;
+  }
+  return { agree, disagree };
+}
 const rosters = [...new Map(rostersRaw.filter((r) => r.starts_at && r.handles?.length).map((r) => [`${r.platform}:${r.tid}`, r])).values()];
 const evNames = new Map(evRows.map((r) => [r.key, r.name || ""]));
 const linked = new Set(links.filter((l) => l.status === "verified").map((l) => `${l.event_id}/${l.section_no}`));
@@ -232,6 +256,8 @@ async function processOne(c: Cand): Promise<void> {
     return done(j.ambiguous ? "ambiguous" : belowFloor ? "below-floor" : "none", { ...win, played, candidates: pool.length, assigned: top?.assigned ?? 0 });
   }
   if (j.best.assigned / played < 0.9) return done("below-floor", { ...win, played, candidates: pool.length, assigned: j.best.assigned });
+  const xc = storeCheck(key, j.best.platform, j.best.alignment.assignments);
+  if (xc.disagree > xc.agree) return done("contradicted-by-store", { ...win, played, candidates: pool.length, assigned: j.best.assigned, conflicts: xc.disagree });
   const kind = j.best.platform === "chesscom" ? "chesscom-tournament" : "lichess-swiss";
   let stored: Awaited<ReturnType<typeof recordVerifiedAlignment>>["stored"] = null;
   let strong = 0;
