@@ -1074,3 +1074,107 @@ and the `identity_edge` rows whose `sections` name those events. Queued targets:
 and `delete from crawl_source where platform = 'lichess' and kind = 'team' and key <> 'dmv-chess-tournaments';`
 with their pending `roster_tournament` rows. No secret was set and no function
 was deployed.
+
+## Re-measurement on the larger store (2026-10-04, tag `measure-20261004`)
+
+Every figure above was measured against a store of 3,691 identities and 307
+section links. At this run's freeze the store held 9,216 identity edges and
+4,742 section-link rows, and the pre-resolution loop was still adding.
+
+**Frozen code.** Tag `measure-20261004` (`5cd5ade`); the harness bundle was
+built once from it and no engine file changed while the batch ran. The deployed
+`resolve-identity` function is the earlier deploy; the commits since then do not
+change the search path.
+
+**Sample.** The investigation's 900-member activity-weighted sample minus every
+player any earlier run searched (112 excluded): all 208 remaining online-rated
+players plus 30 OTB-only drawn with a fixed seed, shuffled with a fixed seed.
+Rating bands: under 800 31, 800–1199 31, 1200–1599 67, 1600–1999 78, 2000+ 31.
+Online activity (sections): 1–2 37, 3–10 60, 11–50 58, 51+ 53.
+
+**Cold and warm are decided per search, at its start, and never merged.**
+Cold: the player has no `identity_edge` and none of their online sections was
+linked before the search started (checked against a snapshot of `section_link`
+taken at the freeze and against `preresolve_section`). Warm: anything else.
+Warm repeat: a second search of a player whose first search resolved.
+
+**Conditions.** Four searches at a time from one address, each a fresh process.
+Searches reach the US Chess ratings API through the edge function, so the
+laptop's own budget for that API (used by the pre-resolution loop) is not what
+limits them; Chess.com from this address is. Measured before sizing: at four
+concurrent the Chess.com crawler, clean for the previous 190 minutes, took a
+rate-limit event twice in 12 minutes and ran 22% slower (228 and 235 requests
+per five minutes against 298), and each cold search saw about one Chess.com 429
+in ~450 requests. Four is therefore the ceiling, and latencies here are
+pessimistic next to a lone user's. No edge rate limit was hit. Lichess
+`/api/user` answered 429 for this address throughout, as in Phase 6.
+
+<!-- measure7:start -->
+Numbers as of 2026-10-04 01:08 UTC: 22 of 238 first searches finished (19 of 208 online-rated players), 0 repeat searches. The batch is still running if this is short of the sample; `analyze7.mjs` in the run folder recomputes everything.
+
+| | **Cold** first search | **Warm** first search | Warm repeat search |
+|---|---|---|---|
+| Searches | 9 | 10 | 0 |
+| **Resolved** (confidence ≥ 0.85) | **7 / 9 = 77.8% (95% CI 45.3–93.7%)** | **10 / 10 = 100.0% (95% CI 72.2–100.0%)** | n/a |
+| Latency, median / p95 (all searches) | 134.2 s / 784.1 s | 0.97 s / 1.84 s | n/a |
+| Latency, median / p95 (resolved only) | 134.2 s / 595.9 s | 0.97 s / 1.84 s | n/a |
+| Answered by the index join (whole search) | 0/9 | 9/10 | 0/0 |
+| Answered by the stored-identity read | 0/9 | 1/10 | 0/0 |
+| Index-join hit rate, per section tried | 53/151 (35.1%) | 11/12 (91.7%) | n/a |
+| Platform requests (Chess.com + Lichess) | 5410 | 0 | 0 |
+| Speculative share of platform requests | 30.9% | n/a | n/a |
+| Searches with a Chess.com / Lichess limit event | 4 / 9 | 0 / 0 | 0 / 0 |
+| Hit the 25-minute guard / errored / edge rate-limited | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+
+Warm first searches split: identity already stored 10/10; no identity but one of the player's sections already linked 0/0. OTB-only players: 3 searched, 0 resolved (none expected), median 0.00 s.
+
+Cold resolution by rating band: <800 0/0, 800-1199 1/1, 1200-1599 1/1, 1600-1999 1/2, 2000+ 4/5. By online activity (sections): 1-2 4/5, 3-10 2/3, 11-50 1/1, 51+ 0/0.
+
+**Failure buckets (deterministic trace, 2 unresolved online players so far):** organizer-not-in-crawl-scope 1; unreachable-platform 1.
+<!-- measure7:end -->
+
+Raw results (they contain names and handles) stay in the session scratchpad
+(`acc7/`), not in the repository.
+
+### Lichess lane
+
+The Chess.com crawler still holds the crawl lease (due to end about 11:39 UTC),
+so no second crawler was started. `scripts/lichess-crawl-watcher.sh` polls
+`crawl_lease` every two minutes and starts
+`node scripts/roster-crawler.mjs --platform lichess` the moment the lease is
+free; it runs detached and logs to `logs/lichess-crawl.log`. The crawler's
+User-Agent carries the repository's issues URL. 667 swisses from 15 teams are
+queued; nothing can be said about the rate until it starts.
+
+### muir_cache retention
+
+| Kind | Rows | Stored | Reader's TTL | Past its TTL at 00:55 UTC |
+|---|---|---|---|---|
+| games (member game-feed pages) | 12,452 | 71 MB | 6 h | 11,603 rows, 66 MB |
+| crosstable | 7,047 | 66 MB | 30 d | 1,226 rows, 20 MB |
+| footprint | 6,618 | 5.8 MB | 3 d | 0 |
+| section | 9,351 | 5.1 MB | 30 d | 3,027 rows |
+| event | 5,190 | 4.3 MB | 30 d | 825 rows |
+| events, member, member-search | 309 | 0.9 MB | 6 h to 30 d | most |
+
+All of it is re-fetchable portal data: one request to the ratings API brings any
+row back. Half the table was already dead weight by the readers' own rules (a
+reader treats a row older than its TTL as a miss and fetches again). Retention
+(`20261004000100_muir_cache_retention.sql`): `sweep_muir_cache()` deletes a row
+once it is older than the TTL its reader applies — 30 days for crosstables,
+sections, events and member records, 3 days for footprints — and 24 hours for
+the two feed kinds (games, events), four times their 6-hour read TTL. It runs
+hourly through `pg_cron` (`sweep-muir-cache`); `muir_cache_stats()` reports the
+table by kind. Because nothing is deleted that a reader would have served,
+pruning cannot change a running search.
+
+First pass (00:57 UTC, batch running): **42,044 → 31,859 rows, live payload
+159 MB → 107 MB.** The file on disk stays at 186 MB (database 237 MB of the
+500 MB cap) until the table is rewritten: the freed space is reused by new rows,
+and a detached finalizer runs `VACUUM FULL` once the batch has finished, since
+that needs an exclusive lock. The 7,500 games pages fetched in the last 24 hours
+(about 43 MB) age out hour by hour. At steady state the table holds one day of
+game feeds and 30 days of crosstables.
+
+`scripts/pre-resolve.mjs` read cached crosstables with no TTL; it now retries an
+unresolved section whose crosstable was pruned by fetching it again.
