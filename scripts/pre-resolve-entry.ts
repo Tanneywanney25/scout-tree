@@ -152,6 +152,11 @@ function consider(key: string, cached: boolean, source: string) {
   cands.push({ eventId, n, cached, source });
 }
 if (SOURCE === "cache" || SOURCE === "both") for (const m of metas) if (xtSet.has(m.key)) consider(m.key, true, "cache");
+// Unresolved sections whose cached crosstable has since been pruned from
+// muir_cache (sweep_muir_cache): still retried when the index has grown; the
+// crosstable is fetched again.
+if (SOURCE === "cache" || SOURCE === "both")
+  for (const p of progress) if (!FINAL.has(p.verdict) && p.verdict !== "queued") consider(`${p.event_id}/${p.section_no}`, xtSet.has(`${p.event_id}/${p.section_no}`), p.source || "cache");
 if (SOURCE === "queued" || SOURCE === "both") {
   // Newest events first: recent sections are the ones searches ask about.
   const queued = progress.filter((p) => p.verdict === "queued").sort((a, b) => (a.event_id < b.event_id ? 1 : -1));
@@ -197,7 +202,9 @@ async function processOne(c: Cand): Promise<void> {
   if (!evName && !c.cached) evName = await fetchEventName(c.eventId);
   const guess = (platformGuess(nameForMatch(`${evName} ${meta.name || ""}`)) || "").toLowerCase();
   if (guess === "icc" || guess === "chesskid") return done("untraceable", win);
-  const players = c.cached ? await cachedPlayers(key) : await fetchSectionPlayers(c.eventId, c.n, "");
+  let players = c.cached ? await cachedPlayers(key) : await fetchSectionPlayers(c.eventId, c.n, "");
+  // A cached crosstable can be pruned between the listing and this read.
+  if (!players.length && c.cached) players = await fetchSectionPlayers(c.eventId, c.n, "");
   if (!players.length) return done("no-crosstable", win);
   const sec = {
     eventId: c.eventId,
