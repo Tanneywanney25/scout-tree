@@ -1098,16 +1098,25 @@ linked before the search started (checked against a snapshot of `section_link`
 taken at the freeze and against `preresolve_section`). Warm: anything else.
 Warm repeat: a second search of a player whose first search resolved.
 
-**Conditions.** Four searches at a time from one address, each a fresh process.
-Searches reach the US Chess ratings API through the edge function, so the
-laptop's own budget for that API (used by the pre-resolution loop) is not what
-limits them; Chess.com from this address is. Measured before sizing: at four
-concurrent the Chess.com crawler, clean for the previous 190 minutes, took a
-rate-limit event twice in 12 minutes and ran 22% slower (228 and 235 requests
-per five minutes against 298), and each cold search saw about one Chess.com 429
-in ~450 requests. Four is therefore the ceiling, and latencies here are
-pessimistic next to a lone user's. No edge rate limit was hit. Lichess
-`/api/user` answered 429 for this address throughout, as in Phase 6.
+**Conditions.** Each search is a fresh process. Searches reach the US Chess
+ratings API through the edge function, so the laptop's own budget for that API
+(used by the pre-resolution loop) is not what limits them; Chess.com from this
+address is, and the roster crawler shares it. Measured before settling the
+width: the batch started four searches at a time, and the crawler, clean for
+the previous 190 minutes, took three rate-limit events in 17 minutes and ran
+about 28% slower (0.72 requests a second against 1.0); each cold search saw
+about one Chess.com 429 in ~450 requests. Four was over the ceiling, so at
+01:09 UTC the runner was replaced by one running **two at a time** (the width
+is a control file, no further restart needed). The first 26 sample positions
+ran at four, the rest at two. The swap killed four searches in flight
+(positions 16, 17, 25, 27; two had been running about 14 minutes, two under
+3). Their partial alignments are in the store, so they can never be cold again:
+they are excluded, and because long-running cold searches fail more often than
+short ones, leaving them out flatters the cold rate slightly. Counting all
+four as cold failures gives the lower bound stated with the result. No edge
+rate limit was hit. Lichess `/api/user` answered 429 for this address
+throughout, as in Phase 6. Latencies are for a shared address and are
+pessimistic next to a lone user's.
 
 <!-- measure7:start -->
 Numbers as of 2026-10-04 01:08 UTC: 22 of 238 first searches finished (19 of 208 online-rated players), 0 repeat searches. The batch is still running if this is short of the sample; `analyze7.mjs` in the run folder recomputes everything.
