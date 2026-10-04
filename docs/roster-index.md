@@ -1195,8 +1195,11 @@ frozen for the run):
 Measured on 6,057 cached sections joined as production joins them, each accepted
 join cross-checked against identities proven in another section: the 75%
 single-candidate clause accepted 13 sections and none was a wrong tournament
-(95% CI 0–22.8%), but its handles disagree with handles proven elsewhere 1.3% of
-the time against 0.3–0.4% at 90% and above, and it accounts for 0.3% of joins.
+(95% CI 0–22.8%; an independent re-derivation reproduced every count). But all
+13 have 34 to 78 players, so the clause is unmeasured where a coincidental match
+is plausible; its handles disagree with handles proven elsewhere about two to
+three times as often as the like-for-like baseline (1.3% against 0.4%; likely,
+not established, on 6 disagreements); and it accounts for 0.3% of joins.
 **Decision: one floor, 90%, everywhere.** The change is applied and deployed by a
 detached step when the batch ends, because the engine is frozen until then
 (`docs/adr/0003-index-join-coverage-floor.md`).

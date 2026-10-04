@@ -26,28 +26,39 @@ production joins it, then every accepted join cross-checked against identities
 proven in a *different* section. A join is contradicted when more of its
 cross-checkable members hold a different handle elsewhere than hold the same
 one. Script and snapshot: session scratchpad `floor/` (`floor-run.mjs`,
-re-runnable from the snapshot with no database request).
+re-runnable from the snapshot with no database request). A second agent
+re-derived every number below with its own loader and code and got the same
+counts; its corrections to the interpretation are folded in.
 
 | Band | Sections | Contradicted | Member-level disagreement |
 |---|---|---|---|
-| **The clause: 75–90%, single candidate, ≥ 10 players** | 13 | **0 of 13** (95% CI 0–22.8%) | 6 of 473 = **1.3%** (0.6–2.7%) |
+| **The clause: 75–90%, single candidate, ≥ 10 players** | 13 | **0 of 13** (95% CI 0–22.8%) | 6 of 473 = **1.3%**; 2.7% counting active edges only |
 | ≥ 90%, any section | 4,383 | 6 of 4,382 = 0.1% | 180 of 62,551 = 0.3% |
-| ≥ 90%, single candidate, ≥ 10 players (like for like) | 308 | 0 | 42 of 10,930 = 0.4% (0.3–0.5%) |
+| ≥ 90%, single candidate, ≥ 10 players (like for like) | 308 | 0 | 42 of 10,930 = 0.4%; 1.2% counting active edges only |
 | 75–90%, rejected today, ≥ 10 players (several candidates) | 31 | 0 | pooled with the clause band: 20 of 961 = 2.1% |
 | 75–90%, rejected today, < 10 players | 26 | **21 of 23** checkable | — |
 
 Three things follow.
 
-1. **The clause made no wrong tournament match, on 13 sections.** That bounds
-   its error below 23%, not below anything useful. The band is also uniform: 12
-   of the 13 are one Chess.com series, all have 34 to 78 players, and there is
-   no case with 10 to 33 players, which is where a coincidental match would be
-   most plausible.
-2. **Its members are wrong three to five times as often.** 1.3% of handles in
-   the clause band disagree with a handle proven elsewhere (2.1% across every
-   75–90% join with ten or more players), against 0.3–0.4% at 90% and above; the
-   intervals do not overlap. A join that leaves 10–25% of the crosstable
-   unexplained is the right tournament with a messier alignment.
+1. **The clause made no wrong tournament match, on 13 sections** (16 on a
+   re-read fifteen minutes later, still none; each confirmed by 30 to 54
+   members, at least 14 of them through game records rather than rosters). That
+   bounds its error below about 20%, not below anything useful, and the band is
+   uniform: 12 of the 13 are one Chess.com series and all have 34 to 78 players,
+   a size at which a coincidental match is essentially impossible. Between 10
+   and 33 players, where the clause would matter, there is almost no evidence:
+   one section of 19 players that production linked under the clause (14 of 14
+   members agree), and two of 12 and 16 players in the batch log whose
+   crosstables this session's own cache sweep had already removed, so they
+   could not be checked.
+2. **Its handles are probably wrong more often, about two to three times the
+   like-for-like rate under every counting rule:** 1.3% against 0.4% counting
+   edges of every status, 2.7% against 1.2% on active edges, 3.6% against 1.9%
+   when a member with both a matching and a different handle elsewhere is
+   scored by the stronger evidence. This rests on 6 to 17 disagreements from a
+   handful of members who recur across sections, so the naive intervals are too
+   narrow; a section-clustered bootstrap puts the difference at +0.9 points
+   (95% 0.02 to 1.9). Likely, not established.
 3. **It buys almost nothing.** 13 of 4,396 accepted joins, 0.3%.
 
 What separates right from wrong in the 75–90% band is section size, not the
@@ -76,8 +87,11 @@ reproduce them exactly. Coverage cannot see this: the coincidental match covers
 ## Decision
 
 1. **One floor, 90%, on every blind index join.** The 75% single-candidate
-   clause is removed from `indexTrusted()`. It gives up 0.3% of joins and removes
-   the only band whose handles are measurably worse, on the path users see.
+   clause is removed from `indexTrusted()`. The measurement does not show the
+   clause to be unsafe; it shows that the clause is unmeasured in the size range
+   where it could be, that its handles are probably worse, and that it is worth
+   0.3% of joins. That does not justify a looser standard on the path users see
+   than the one the evidence produced.
 2. **The bulk pre-resolution does not join sections with fewer than 4 players,
    and writes no join the store contradicts** (more members holding a different
    proven handle than the same one). Done in `scripts/pre-resolve-entry.ts`
@@ -107,8 +121,8 @@ export function indexTrusted(trusted: boolean, assigned: number, played: number,
 
 ## What would reopen this
 
-A clause band large and varied enough to bound its error (a few hundred
-sections, including 10–33 players) with member-level disagreement at the
-baseline. As the index fills the band shrinks, because a section's real
-tournament arrives and explains it at 90% or more, so this is unlikely to be
-worth revisiting.
+A clause band large and varied enough to bound its error: a few hundred
+sections, including many of 10 to 33 players, with member-level disagreement at
+the baseline. The band grows slowly as more sections are cached (13 to 16 in
+fifteen minutes of this run), so the measurement can be repeated from
+`floor/floor-run.mjs` once the store is several times larger.
