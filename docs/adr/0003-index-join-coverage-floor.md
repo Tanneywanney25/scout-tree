@@ -1,4 +1,4 @@
-# ADR 0003 — One coverage floor for the index join: 90%
+# ADR 0003 — One coverage floor for the index join: 90%, and a size floor
 
 - **Status:** Accepted. The code change is applied and deployed after the
   2026-10-04 measurement batch finishes (the engine is frozen at tag
@@ -92,21 +92,28 @@ reproduce them exactly. Coverage cannot see this: the coincidental match covers
    where it could be, that its handles are probably worse, and that it is worth
    0.3% of joins. That does not justify a looser standard on the path users see
    than the one the evidence produced.
-2. **The bulk pre-resolution does not join sections with fewer than 4 players,
-   and writes no join the store contradicts** (more members holding a different
-   proven handle than the same one). Done in `scripts/pre-resolve-entry.ts`
-   (`fabc2b5`); it takes effect on the loop's next pass.
-3. **Recorded, not yet built:** the same store cross-check belongs in the
-   search-time join (`rosterIndex.ts`), and sections of five or fewer players
-   should need it to pass, or a single candidate, before they are trusted. That
-   is an engine change and waits for the freeze to end. The six known wrong
-   links should be retired with their edges.
+2. **No blind index join for a section of fewer than 4 players, on either
+   path.** The bulk pre-resolution has refused them since `fabc2b5`; the
+   search-time join gets the same rule in `indexTrusted()` in the same rollout.
+   It had no size floor at all: an autopsy of this run found a search that
+   linked a 3-player and a 2-player "side games" section of one organiser to
+   another organiser's scholastic swisses. The 12 verified index links on
+   sections under 4 players were retired (2 active edges retired, 28 edges that
+   also rest on other sections had the reference removed), and the rollout
+   retires whatever the frozen engine writes until it is deployed.
+3. **The bulk pre-resolution writes no join the store contradicts** (more
+   members holding a different proven handle than the same one). The six known
+   wrong links were retired; of the 25 edges resting on them, the store's own
+   conflict rules had already superseded 23.
+4. **Recorded, not yet built:** the same store cross-check in the search-time
+   join (`rosterIndex.ts`). Sections of 4 and 5 players stay joinable (99% of
+   them are right) and are where it matters.
 
 ## Rollout
 
 The measurement batch runs on frozen engine code, so the one-line change to
 `supabase/functions/_shared/rosterIndexCore.ts` is not made while it runs. A
-detached step (`acc7/apply-floor2.sh` in the session scratchpad, log `acc7/apply-floor.log`) waits for the
+detached step (`acc7/apply-floor3.sh` in the session scratchpad, log `acc7/apply-floor.log`) waits for the
 batch to log DONE, then makes the change, runs the alignment test, commits,
 pushes, deploys `resolve-identity`, and calls the function once to check it
 answers; if that check fails it reverts the commit and deploys the previous
@@ -114,7 +121,7 @@ code. If the step never ran, the change is:
 
 ```ts
 export function indexTrusted(trusted: boolean, assigned: number, played: number, _candidates?: number, _strict?: boolean): boolean {
-  if (!trusted || !played) return false;
+  if (!trusted || played < 4) return false;
   return assigned / played >= 0.9;
 }
 ```

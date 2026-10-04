@@ -1225,6 +1225,10 @@ coverage (6 of 606 such joins; 0 of 3,777 with six or more players). The bulk
 pre-resolution now refuses sections under 4 players and any join the store
 contradicts, and the six links were retired (their 25 edges: 23 had already been
 superseded or put in conflict by the store's own rules, 2 were retired now).
+The search-time join had no size floor at all (an autopsy caught a search
+linking a 2-player and a 3-player section to another organiser's swisses); the
+12 verified index links on sections under 4 players were retired and the
+rollout adds the same floor to the engine.
 
 ### The permanent hole (ADR 0002)
 
