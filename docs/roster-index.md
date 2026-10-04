@@ -1147,7 +1147,73 @@ Cold resolution by rating band: <800 0/0, 800-1199 3/3, 1200-1599 2/2, 1600-1999
 <!-- measure7:end -->
 
 Raw results (they contain names and handles) stay in the session scratchpad
-(`acc7/`), not in the repository.
+(`acc7/`), not in the repository. When the batch logs DONE a detached finalizer
+writes the final `analysis7.json` and `autopsy7.json` there; `render7.mjs`
+rewrites the block above from them.
+
+**What the harness understates.** It calls the edge function anonymously, and
+`seedEdges` answers nothing to an anonymous caller, so a cold search here gets
+no stored section-mate identities as seeds; a signed-in search would. Lichess
+profile lookups from this address were refused throughout, which also drops
+stored Lichess seeds (the engine verifies a seed's profile before using it).
+
+**Cost to the crawler.** Each cold search trips Chess.com's limiter about once
+on its own, whatever the width, so the crawler ran 23–28% slower for as long as
+cold searches were running (about one rate-limit event every eight minutes at
+two concurrent, every six at four). The cost follows the amount of batch work,
+not its width: halving the width did not spare the crawler, it only made the
+searches contend less with each other.
+
+### Failure autopsy
+
+Every unresolved online player is traced twice: by a deterministic trace
+(`acc7/autopsy.mjs`: the player's online sections from the cached games feed,
+and for each one the links, the pre-resolution verdict, the rosters in its date
+window and the best strict coverage) and by one worker per failure that checks
+the trace against the run's own log and the database. Buckets: section not
+crawled yet (the organiser is in crawl scope, its roster is not in the index);
+organiser not in crawl scope; unreachable platform (ICC, ChessKid, the ICN
+private server); coverage below the floor; ambiguous match; aligned section with
+the target unassigned; engine or alignment defect; no online-rated games.
+The distribution so far is in the block above and is small while the batch is
+young; the trace is rerun on the full set when the batch ends.
+
+Engine observations from the autopsies, logged and not fixed (the engine is
+frozen for the run):
+
+- The stored footprint reads two pages of a member's games feed; the walk reads
+  thirty. A very active player whose online play is old has an empty footprint,
+  so the index-first step tries none of their sections and the search answers
+  from the walk's own index join about 20 s later instead of in a second.
+- `terminatedBy: frontier` is reported with hundreds of sections held back at
+  the last level; "every reachable section has been walked" is not true then.
+- The organiser lookup keys on a prefix of the event name; the affiliate in the
+  cached event record is the better key.
+
+### Coverage floor (ADR 0003)
+
+Measured on 6,057 cached sections joined as production joins them, each accepted
+join cross-checked against identities proven in another section: the 75%
+single-candidate clause accepted 13 sections and none was a wrong tournament
+(95% CI 0–22.8%), but its handles disagree with handles proven elsewhere 1.3% of
+the time against 0.3–0.4% at 90% and above, and it accounts for 0.3% of joins.
+**Decision: one floor, 90%, everywhere.** The change is applied and deployed by a
+detached step when the batch ends, because the engine is frozen until then
+(`docs/adr/0003-index-join-coverage-floor.md`).
+
+The same measurement found where wrong matches actually are: all six
+contradicted joins at 90% and above are sections of 3 to 5 players at 100%
+coverage (6 of 606 such joins; 0 of 3,777 with six or more players). The bulk
+pre-resolution now refuses sections under 4 players and any join the store
+contradicts, and the six links were retired (their 25 edges: 23 had already been
+superseded or put in conflict by the store's own rules, 2 were retired now).
+
+### The permanent hole (ADR 0002)
+
+HERMOVENEXT / Impact Coaching Network, about 653 sections, runs on the
+organiser's own login-gated server: recorded as permanently unreachable, with
+the mechanism. PLAY N STAY, about 659 sections, is recorded as unresolved, with
+the one check that settles it.
 
 ### Lichess lane
 
