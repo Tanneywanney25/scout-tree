@@ -126,7 +126,15 @@ export function UscfMemberPicker({ onSelect, onFideSelect, onLegacySearch, onEnt
             }}
             className="h-12 pl-9 text-base"
           />
-          {loading && <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 animate-spin text-primary" />}
+          {/* The spinner sits in its own absolutely-positioned box: putting
+              `animate-spin` on an element that also carries `-translate-y-1/2`
+              makes the browser interpolate between mismatched transform lists,
+              which degrades into a jittering partial arc instead of a spin. */}
+          {loading && (
+            <span className="absolute right-3 top-0 bottom-0 flex items-center" aria-hidden="true">
+              <Loader2 className="w-4 h-4 animate-spin text-primary" />
+            </span>
+          )}
         </div>
         <Select value={state} onValueChange={setState} disabled={disabled}>
           <SelectTrigger className="h-12 w-[92px] shrink-0">
